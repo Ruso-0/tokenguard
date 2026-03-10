@@ -33,3 +33,11 @@ coverage/
 # Logs
 *.log
 npm-debug.log*
+
+# Benchmark & test artifacts
+.tokenguard-bench*
+test-results-sicaep.json
+scripts/bench-compress.ts
+
+# TokenGuard runtime directory
+.tokenguard/
