@@ -461,7 +461,7 @@ class KeywordIndex {
 
     /**
      * BM25 search with bigram phrase boosting.
-     * Standard parameters: k1 = 1.2, b = 0.75
+     * Code-tuned parameters: k1 = 1.8, b = 0.35
      * Multi-word queries get a 0.3 weight bigram boost.
      */
     search(
@@ -471,8 +471,8 @@ class KeywordIndex {
         const queryTerms = this.tokenize(queryText);
         if (queryTerms.length === 0) return [];
 
-        const k1 = 1.2;
-        const b = 0.75;
+        const k1 = 1.8;
+        const b = 0.35;
         const scores = new Map<number, number>();
 
         for (const term of queryTerms) {
@@ -766,7 +766,7 @@ export class TokenGuardDB {
      *   - Vector similarity (semantic, cosine distance)
      *   - BM25 keyword matching (in pure JS inverted index)
      *
-     * RRF formula: score = Σ 1/(k + rank_i) where k=60
+     * RRF formula: score = Σ 1/(k + rank_i) where k=10
      */
     searchHybrid(
         queryEmbedding: Float32Array,
@@ -791,8 +791,8 @@ export class TokenGuardDB {
             const vecRank = vecRanks.get(id);
             const kwRank = kwRanks.get(id);
             let rrf =
-                (vecRank ? 1.0 / (60 + vecRank) : 0) +
-                (kwRank ? 1.0 / (60 + kwRank) : 0);
+                (vecRank ? 1.0 / (10 + vecRank) : 0) +
+                (kwRank ? 1.0 / (10 + kwRank) : 0);
 
             // Apply path boost — look up the file path for this chunk
             const pathStmt = this.db.prepare("SELECT path FROM chunks WHERE id = ?");
