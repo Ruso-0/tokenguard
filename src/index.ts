@@ -3,7 +3,7 @@
 /**
  * index.ts — TokenGuard MCP Server entry point.
  *
- * Exposes 13 MCP tools to Claude Code:
+ * Exposes 14 MCP tools to Claude Code:
  *
  * 1. tg_search  — Hybrid semantic + keyword search (replaces grep)
  * 2. tg_audit   — Token consumption audit for the current session
@@ -18,6 +18,7 @@
  * 11. tg_read   — Read file with automatic compression
  * 12. tg_validate — AST sandbox validator (catches syntax errors before disk)
  * 13. tg_circuit_breaker — Detects and stops infinite failure loops
+ * 14. tg_semantic_edit — Zero-read surgical AST patching (saves 98% output tokens)
  *
  * Every tool response appends a savings message:
  *   "[TokenGuard saved ~X tokens on this query]"
@@ -38,6 +39,7 @@ import { filterTerminalOutput } from "./terminal-filter.js";
 import { findDefinition, findReferences, getFileSymbols, type SymbolKind, type ReferenceResult } from "./ast-navigator.js";
 import { AstSandbox } from "./ast-sandbox.js";
 import { CircuitBreaker } from "./circuit-breaker.js";
+import { semanticEdit } from "./semantic-edit.js";
 
 // ─── Initialization ──────────────────────────────────────────────────
 
@@ -1129,6 +1131,93 @@ server.tool(
             ],
         };
     }
+);
+
+// ─── Tool 14: tg_semantic_edit ──────────────────────────────────────
+
+server.tool(
+    "tg_semantic_edit",
+    "Surgically edit a specific function, class, interface, or type by name " +
+    "without reading or rewriting the entire file. Finds the exact AST node, " +
+    "replaces only those bytes, and validates syntax before saving. " +
+    "Use this instead of full file rewrites to save 98% of output tokens. " +
+    "If the new code has syntax errors, the edit is rejected and the " +
+    "original file is untouched.",
+    {
+        file: z
+            .string()
+            .describe("File path relative to project root"),
+        symbol: z
+            .string()
+            .describe("Name of the function/class/interface/type to edit"),
+        new_code: z
+            .string()
+            .describe("Complete new code for the symbol (including signature, decorators, export keyword if needed)"),
+    },
+    async ({ file, symbol, new_code }) => {
+        await engine.initialize();
+
+        let resolvedPath: string;
+        try {
+            resolvedPath = safePath(process.cwd(), file);
+        } catch (err) {
+            return {
+                content: [
+                    {
+                        type: "text" as const,
+                        text: `Security error: ${(err as Error).message}\n\n[TokenGuard saved ~0 tokens]`,
+                    },
+                ],
+            };
+        }
+
+        const parser = engine.getParser();
+        const result = await semanticEdit(
+            resolvedPath,
+            symbol,
+            new_code,
+            parser,
+            sandbox,
+        );
+
+        if (!result.success) {
+            return {
+                content: [
+                    {
+                        type: "text" as const,
+                        text:
+                            `## Semantic Edit: FAILED\n\n` +
+                            `**Symbol:** ${symbol}\n` +
+                            `**File:** ${file}\n\n` +
+                            `${result.error}\n\n` +
+                            `[TokenGuard saved ~0 tokens]`,
+                    },
+                ],
+            };
+        }
+
+        engine.logUsage(
+            "tg_semantic_edit",
+            Embedder.estimateTokens(new_code),
+            Embedder.estimateTokens(new_code),
+            result.tokensAvoided,
+        );
+
+        return {
+            content: [
+                {
+                    type: "text" as const,
+                    text:
+                        `## Semantic Edit: SUCCESS\n\n` +
+                        `**Symbol:** ${symbol}\n` +
+                        `**File:** ${file}\n` +
+                        `**Lines:** ${result.oldLines} → ${result.newLines}\n` +
+                        `**Syntax:** validated ✓\n\n` +
+                        `[TokenGuard saved ~${result.tokensAvoided.toLocaleString()} tokens vs full file rewrite]`,
+                },
+            ],
+        };
+    },
 );
 
 // ─── Server Startup ─────────────────────────────────────────────────
