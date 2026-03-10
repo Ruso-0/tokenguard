@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# TokenGuard runtime data
+.tokenguard.db
+.tokenguard.db-journal
+.tokenguard.db-wal
+
+# WASM binaries (downloaded at build time)
+wasm/*.wasm
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment
+.env
+.env.local
+
+# Coverage
+coverage/
+
+# Logs
+*.log
+npm-debug.log*

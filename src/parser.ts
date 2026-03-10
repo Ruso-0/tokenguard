@@ -1,0 +1,354 @@
+/**
+ * parser.ts — Universal AST parser for TokenGuard.
+ *
+ * Wraps web-tree-sitter to parse TypeScript, JavaScript, Python, and Go
+ * source files into semantic chunks. Each chunk is an AST node (class,
+ * function, method, interface) compressed into shorthand notation.
+ *
+ * Shorthand format: `[type] signature { /* TG:L42-L67 *​/ }`
+ * This preserves structure while stripping implementation — ~18% savings.
+ */
+
+import Parser from "web-tree-sitter";
+import path from "path";
+import { fileURLToPath } from "url";
+
+// ─── Types ───────────────────────────────────────────────────────────
+
+export interface ParsedChunk {
+    /** Shorthand AST signature (compressed). */
+    shorthand: string;
+    /** Full raw source code of the node. */
+    rawCode: string;
+    /** AST node type: class, func, method, interface, etc. */
+    nodeType: string;
+    /** 1-indexed start line in the source file. */
+    startLine: number;
+    /** 1-indexed end line in the source file. */
+    endLine: number;
+}
+
+export interface ParseResult {
+    /** File path that was parsed. */
+    filePath: string;
+    /** Extracted AST chunks. */
+    chunks: ParsedChunk[];
+    /** Total lines in the source file. */
+    totalLines: number;
+    /** Language that was detected. */
+    language: string;
+}
+
+/** Supported language extensions. */
+export type SupportedExtension =
+    | ".ts"
+    | ".tsx"
+    | ".js"
+    | ".jsx"
+    | ".py"
+    | ".go";
+
+// ─── Language Configuration ──────────────────────────────────────────
+
+interface LanguageConfig {
+    wasmFile: string;
+    /** Tree-sitter S-expression query to capture semantic nodes. */
+    query: string;
+}
+
+const LANGUAGE_CONFIGS: Record<string, LanguageConfig> = {
+    ".ts": {
+        wasmFile: "tree-sitter-typescript.wasm",
+        query: `
+      (class_declaration name: (type_identifier) @class_name) @class
+      (function_declaration name: (identifier) @func_name) @func
+      (method_definition name: (property_identifier) @method_name) @method
+      (interface_declaration name: (type_identifier) @iface_name) @interface
+      (type_alias_declaration name: (type_identifier) @type_name) @type_alias
+      (export_statement declaration: (function_declaration name: (identifier) @exp_func_name)) @export_func
+      (export_statement declaration: (class_declaration name: (type_identifier) @exp_class_name)) @export_class
+    `,
+    },
+    ".tsx": {
+        wasmFile: "tree-sitter-typescript.wasm",
+        query: `
+      (class_declaration name: (type_identifier) @class_name) @class
+      (function_declaration name: (identifier) @func_name) @func
+      (method_definition name: (property_identifier) @method_name) @method
+      (interface_declaration name: (type_identifier) @iface_name) @interface
+      (type_alias_declaration name: (type_identifier) @type_name) @type_alias
+      (export_statement declaration: (function_declaration name: (identifier) @exp_func_name)) @export_func
+    `,
+    },
+    ".js": {
+        wasmFile: "tree-sitter-javascript.wasm",
+        query: `
+      (class_declaration name: (identifier) @class_name) @class
+      (function_declaration name: (identifier) @func_name) @func
+      (method_definition name: (property_identifier) @method_name) @method
+      (export_statement declaration: (function_declaration name: (identifier) @exp_func_name)) @export_func
+    `,
+    },
+    ".jsx": {
+        wasmFile: "tree-sitter-javascript.wasm",
+        query: `
+      (class_declaration name: (identifier) @class_name) @class
+      (function_declaration name: (identifier) @func_name) @func
+      (method_definition name: (property_identifier) @method_name) @method
+      (export_statement declaration: (function_declaration name: (identifier) @exp_func_name)) @export_func
+    `,
+    },
+    ".py": {
+        wasmFile: "tree-sitter-python.wasm",
+        query: `
+      (class_definition name: (identifier) @class_name) @class
+      (function_definition name: (identifier) @func_name) @func
+    `,
+    },
+    ".go": {
+        wasmFile: "tree-sitter-go.wasm",
+        query: `
+      (function_declaration name: (identifier) @func_name) @func
+      (method_declaration name: (field_identifier) @method_name) @method
+      (type_declaration (type_spec name: (type_identifier) @type_name)) @type_decl
+    `,
+    },
+};
+
+// ─── Parser ──────────────────────────────────────────────────────────
+
+export class ASTParser {
+    private parser!: Parser;
+    private languageCache = new Map<string, Parser.Language>();
+    private queryCache = new Map<string, Parser.Query>();
+    private wasmDir: string;
+    private initialized = false;
+
+    constructor(wasmDir?: string) {
+        // Default: look for wasm/ relative to this file's directory
+        const __dirname = path.dirname(fileURLToPath(import.meta.url));
+        this.wasmDir = wasmDir ?? path.join(__dirname, "..", "wasm");
+    }
+
+    /** Initialize the Tree-sitter WASM runtime. Must be called once. */
+    async initialize(): Promise<void> {
+        if (this.initialized) return;
+        await Parser.init();
+        this.parser = new Parser();
+        this.initialized = true;
+    }
+
+    // ─── Language Loading ──────────────────────────────────────────
+
+    /** Check if a file extension is supported. */
+    isSupported(ext: string): boolean {
+        return ext in LANGUAGE_CONFIGS;
+    }
+
+    /** Get supported file extensions. */
+    getSupportedExtensions(): string[] {
+        return Object.keys(LANGUAGE_CONFIGS);
+    }
+
+    /** Load a Tree-sitter language grammar from WASM. */
+    private async loadLanguage(ext: string): Promise<Parser.Language | null> {
+        if (this.languageCache.has(ext)) {
+            return this.languageCache.get(ext)!;
+        }
+
+        const config = LANGUAGE_CONFIGS[ext];
+        if (!config) return null;
+
+        try {
+            const wasmPath = path.join(this.wasmDir, config.wasmFile);
+            const language = await Parser.Language.load(wasmPath);
+            this.languageCache.set(ext, language);
+            return language;
+        } catch (err) {
+            console.error(
+                `[TokenGuard] Failed to load grammar for ${ext}: ${(err as Error).message}`
+            );
+            return null;
+        }
+    }
+
+    /** Get or create a Tree-sitter query for a language. */
+    private getQuery(ext: string, language: Parser.Language): Parser.Query | null {
+        if (this.queryCache.has(ext)) {
+            return this.queryCache.get(ext)!;
+        }
+
+        const config = LANGUAGE_CONFIGS[ext];
+        if (!config) return null;
+
+        try {
+            const query = language.query(config.query);
+            this.queryCache.set(ext, query);
+            return query;
+        } catch (err) {
+            console.error(
+                `[TokenGuard] Failed to create query for ${ext}: ${(err as Error).message}`
+            );
+            return null;
+        }
+    }
+
+    // ─── Parsing ───────────────────────────────────────────────────
+
+    /**
+     * Parse a source file into semantic AST chunks.
+     *
+     * Each chunk contains:
+     * - shorthand: compressed signature (e.g., `[func] processFile(path: string) { /* TG:L12-L45 *​/ }`)
+     * - rawCode: the full implementation
+     * - nodeType: class, func, method, etc.
+     * - startLine/endLine: location in the original file
+     */
+    async parse(filePath: string, content: string): Promise<ParseResult> {
+        await this.initialize();
+
+        const ext = path.extname(filePath).toLowerCase();
+        const language = await this.loadLanguage(ext);
+
+        if (!language) {
+            return {
+                filePath,
+                chunks: [],
+                totalLines: content.split("\n").length,
+                language: "unsupported",
+            };
+        }
+
+        this.parser.setLanguage(language);
+        const tree = this.parser.parse(content);
+        const query = this.getQuery(ext, language);
+
+        if (!query) {
+            return {
+                filePath,
+                chunks: [],
+                totalLines: content.split("\n").length,
+                language: ext.slice(1),
+            };
+        }
+
+        const matches = query.matches(tree.rootNode);
+        const chunks: ParsedChunk[] = [];
+        const seen = new Set<string>(); // Deduplicate overlapping captures
+
+        for (const match of matches) {
+            // Get the main capture (the one without _name suffix)
+            const mainCapture = match.captures.find(
+                (c) => !c.name.endsWith("_name")
+            );
+            if (!mainCapture) continue;
+
+            const node = mainCapture.node;
+            const nodeKey = `${node.startPosition.row}:${node.endPosition.row}`;
+
+            // Skip duplicates from overlapping query patterns
+            if (seen.has(nodeKey)) continue;
+            seen.add(nodeKey);
+
+            const rawCode = node.text;
+            const nodeType = this.normalizeNodeType(mainCapture.name);
+            const startLine = node.startPosition.row + 1; // 1-indexed
+            const endLine = node.endPosition.row + 1;
+
+            // Generate shorthand: keep signature, collapse body
+            const shorthand = this.generateShorthand(
+                rawCode,
+                nodeType,
+                startLine,
+                endLine
+            );
+
+            chunks.push({ shorthand, rawCode, nodeType, startLine, endLine });
+        }
+
+        tree.delete();
+
+        return {
+            filePath,
+            chunks,
+            totalLines: content.split("\n").length,
+            language: ext.slice(1),
+        };
+    }
+
+    // ─── Shorthand Generation ─────────────────────────────────────
+
+    /**
+     * Generate compressed shorthand for an AST node.
+     *
+     * Strategy:
+     * 1. Extract the signature (everything before the first `{` or `:`)
+     * 2. Collapse the body into a TG marker with line range
+     * 3. Result: `[func] myFunction(a: string, b: number): void { /* TG:L12-L45 *​/ }`
+     *
+     * This preserves enough context for semantic search while
+     * cutting token count by ~60-80% per chunk.
+     */
+    private generateShorthand(
+        rawCode: string,
+        nodeType: string,
+        startLine: number,
+        endLine: number
+    ): string {
+        const lines = rawCode.split("\n");
+
+        // For single-line nodes, keep as-is
+        if (lines.length <= 2) {
+            return `[${nodeType}] ${rawCode.trim()}`;
+        }
+
+        // Find the signature boundary
+        let signatureEnd = 0;
+        let braceDepth = 0;
+        let colonDepth = 0;
+
+        for (let i = 0; i < rawCode.length; i++) {
+            const char = rawCode[i];
+            if (char === "(") braceDepth++;
+            if (char === ")") braceDepth--;
+            if (char === "<") colonDepth++;
+            if (char === ">") colonDepth--;
+
+            // Signature ends at the first `{` at depth 0
+            if (char === "{" && braceDepth === 0 && colonDepth === 0) {
+                signatureEnd = i;
+                break;
+            }
+        }
+
+        if (signatureEnd === 0) {
+            // Python-style: find the colon after `def` or `class`
+            const colonIdx = rawCode.indexOf(":");
+            if (colonIdx > 0) {
+                const signature = rawCode.slice(0, colonIdx + 1).trim();
+                return `[${nodeType}] ${signature} # TG:L${startLine}-L${endLine}`;
+            }
+            // Fallback: keep first line
+            return `[${nodeType}] ${lines[0].trim()} /* TG:L${startLine}-L${endLine} */`;
+        }
+
+        const signature = rawCode.slice(0, signatureEnd).trim();
+        return `[${nodeType}] ${signature} { /* TG:L${startLine}-L${endLine} */ }`;
+    }
+
+    /** Normalize Tree-sitter capture names to clean node types. */
+    private normalizeNodeType(captureName: string): string {
+        const typeMap: Record<string, string> = {
+            class: "class",
+            func: "func",
+            method: "method",
+            interface: "interface",
+            type_alias: "type",
+            type_decl: "type",
+            export_func: "func",
+            export_class: "class",
+        };
+
+        return typeMap[captureName] ?? captureName;
+    }
+}

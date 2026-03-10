@@ -1,0 +1,54 @@
+{
+  "name": "tokenguard",
+  "version": "1.0.0",
+  "description": "MCP plugin for Claude Code that optimizes and reduces token consumption automatically via semantic search, AST compression, and proactive monitoring.",
+  "main": "dist/index.js",
+  "type": "module",
+  "bin": {
+    "tokenguard": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "postinstall": "node scripts/download-wasm.js",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "token-optimization",
+    "semantic-search",
+    "ast",
+    "tree-sitter",
+    "embeddings",
+    "context-management"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@xenova/transformers": "^2.17.2",
+    "better-sqlite3": "^11.7.0",
+    "chokidar": "^4.0.3",
+    "sqlite-vec": "^0.1.6",
+    "web-tree-sitter": "^0.24.7",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.7"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_USERNAME/tokenguard"
+  }
+}
