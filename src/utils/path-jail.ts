@@ -18,11 +18,10 @@ import path from "path";
  * @throws Error if the path resolves outside the workspace root
  */
 export function safePath(workspaceRoot: string, inputPath: string): string {
-    const resolvedRoot = path.resolve(workspaceRoot);
     // Normalize backslashes to forward slashes so traversal detection works on Linux/macOS
     const normalized = inputPath.replace(/\\/g, "/");
-    const resolved = path.resolve(resolvedRoot, normalized);
-    if (!resolved.startsWith(resolvedRoot + path.sep) && resolved !== resolvedRoot) {
+    const resolved = path.resolve(workspaceRoot, normalized);
+    if (!resolved.startsWith(path.resolve(workspaceRoot))) {
         throw new Error(`Path traversal blocked: ${inputPath}`);
     }
     return resolved;
