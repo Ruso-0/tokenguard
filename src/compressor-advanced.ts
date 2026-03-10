@@ -374,15 +374,6 @@ function extractKeyReferences(code: string): string[] {
 }
 
 /**
- * Extract the function/class name from a chunk for expand commands.
- */
-function extractFuncName(chunk: { shorthand: string; nodeType: string }): string {
-    // Try to extract name from shorthand: [func] myFunction(...)
-    const match = chunk.shorthand.match(/\]\s+(\w+)/);
-    return match ? match[1] : chunk.nodeType;
-}
-
-/**
  * For code files, strip function bodies using AST.
  * - aggressive: replace bodies with /* TG compressed *​/
  * - medium: keep only key body lines (return, throw, await, assignments)
@@ -431,24 +422,26 @@ async function structuralCompress(
             }
         }
 
-        // FIX 4: Add each chunk with informative stubs (progressive disclosure)
+        // Add each chunk with compact stubs + bloat guard
         for (const chunk of parseResult.chunks) {
-            const bodyLines = chunk.rawCode.split("\n");
-            const bodyLineCount = bodyLines.length;
+            const bodyLineCount = chunk.rawCode.split("\n").length;
 
-            // Extract key references from the body
+            // Extract key references (compact, max 5)
             const refs = extractKeyReferences(chunk.rawCode);
-            const refsStr = refs.length > 0 ? refs.join(", ") : "none";
+            const refsStr = refs.length > 0 ? ` refs:${refs.join(",")}` : "";
 
-            // Determine function/class name for expand command
-            const funcName = extractFuncName(chunk);
+            // Compact stub format (vs verbose ~120+ char original)
+            const compactStub = `/*[tg:${bodyLineCount}L${refsStr}]*/`;
 
-            // Build informative stub
-            const fileBase = filePath.replace(/\\/g, "/");
-            const stubComment = `  // [TG: ${bodyLineCount} lines hidden | refs: ${refsStr} | use tg_read("${fileBase}", {expand: "${funcName}"}) to see full body]`;
-
-            parts.push(`${chunk.shorthand}`);
-            parts.push(stubComment);
+            // Conservation law: shorthand + stub must be strictly smaller than raw code
+            const stubTotal = chunk.shorthand.length + 1 + compactStub.length;
+            if (stubTotal < chunk.rawCode.length) {
+                parts.push(chunk.shorthand);
+                parts.push(compactStub);
+            } else {
+                // Stub would bloat — shorthand alone (already has TG line range)
+                parts.push(chunk.shorthand);
+            }
         }
 
         return parts.join("\n");
@@ -556,14 +549,19 @@ export class AdvancedCompressor {
 
         if (level === "medium" || level === "aggressive") {
             try {
-                afterStructural = await structuralCompress(
+                const structResult = await structuralCompress(
                     afterFilter,
                     filePath,
                     this.parser,
                     level,
                     content // pass original for AST parsing
                 );
-                structuralReduction = Math.max(0, afterFilter.length - afterStructural.length);
+                // Guard: only use structural result if it's actually smaller
+                if (structResult.length < afterFilter.length) {
+                    afterStructural = structResult;
+                    structuralReduction = afterFilter.length - structResult.length;
+                }
+                // Otherwise keep afterFilter (structuralReduction stays 0)
             } catch {
                 // If structural compression fails, use the filtered version
                 afterStructural = afterFilter;

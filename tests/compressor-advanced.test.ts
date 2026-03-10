@@ -9,7 +9,9 @@
  * - Natural text compression
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
+import fs from "fs";
+import path from "path";
 import {
     AdvancedCompressor,
     preprocess,
@@ -17,6 +19,8 @@ import {
     filterTokens,
     type CompressionLevel,
 } from "../src/compressor-advanced.js";
+import { ASTParser } from "../src/parser.js";
+import { Embedder } from "../src/embedder.js";
 
 // ─── Test Fixtures ───────────────────────────────────────────────────
 
@@ -364,5 +368,42 @@ describe("Full Sample Preprocessing", () => {
         const { cleaned } = preprocess(code, "clean.ts");
         expect(cleaned).toContain("const x = 1;");
         expect(cleaned).toContain("const y = 2;");
+    });
+});
+
+// ─── Stub Bloat Guard Tests ─────────────────────────────────────────
+
+describe("Stub Bloat Guard", () => {
+    let compressor: AdvancedCompressor;
+
+    beforeAll(async () => {
+        const parser = new ASTParser();
+        await parser.initialize();
+        const embedder = new Embedder();
+        compressor = new AdvancedCompressor(parser, embedder);
+    });
+
+    it("aggressive always compresses more than medium", async () => {
+        const code = fs.readFileSync(
+            path.join(process.cwd(), "src/engine.ts"),
+            "utf-8"
+        );
+        const light = await compressor.compress("engine.ts", code, "light");
+        const medium = await compressor.compress("engine.ts", code, "medium");
+        const aggressive = await compressor.compress("engine.ts", code, "aggressive");
+
+        expect(light.compressedSize).toBeGreaterThan(medium.compressedSize);
+        expect(medium.compressedSize).toBeGreaterThan(aggressive.compressedSize);
+    });
+
+    it("never produces negative compression on small functions", async () => {
+        const small = `export const add = (a: number, b: number): number => a + b;
+
+export function greet(name: string): string {
+    return "Hello, " + name;
+}
+`;
+        const result = await compressor.compress("small.ts", small, "aggressive");
+        expect(result.compressedSize).toBeLessThanOrEqual(small.length);
     });
 });
