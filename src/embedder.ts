@@ -1,15 +1,15 @@
 /**
  * embedder.ts — Local embedding generation for TokenGuard.
  *
- * Uses Xenova/transformers (ONNX Runtime) to run jina-embeddings-v2-small-en
+ * Uses Xenova/transformers (ONNX Runtime) to run embedding models
  * entirely on-device. No Ollama, no API keys, no cloud calls.
- * Produces 512-dimensional normalized embeddings for semantic code search.
+ * Tries code-aware models first, falls back to general-purpose ones.
  */
 
 // ─── Types ───────────────────────────────────────────────────────────
 
 export interface EmbeddingResult {
-    /** Normalized 512-dim embedding vector. */
+    /** Normalized embedding vector. */
     embedding: Float32Array;
     /** Time taken in milliseconds. */
     durationMs: number;
@@ -24,13 +24,29 @@ export interface BatchEmbeddingResult {
     count: number;
 }
 
+// ─── Model Priority ─────────────────────────────────────────────────
+
+export interface ModelSpec {
+    name: string;
+    dim: number;
+    type: "code" | "general";
+}
+
+export const MODEL_PRIORITY: ModelSpec[] = [
+    { name: "Xenova/jina-embeddings-v2-small-code", dim: 512, type: "code" },
+    { name: "Xenova/codebert-base", dim: 768, type: "code" },
+    { name: "Xenova/jina-embeddings-v2-small-en", dim: 512, type: "general" },
+    { name: "Xenova/all-MiniLM-L6-v2", dim: 384, type: "general" },
+];
+
 // ─── Embedder ────────────────────────────────────────────────────────
 
 /**
- * Singleton embedding engine backed by Xenova/jina-embeddings-v2-small-en.
+ * Singleton embedding engine with model fallback chain.
  *
  * Design decisions:
- * - Code-aware model: jina-v2-small trained on code + text (NDCG@10 ~0.71 on CodeSearchNet vs ~0.22 for MiniLM)
+ * - Model priority: tries code-aware models first (higher NDCG on CodeSearchNet),
+ *   falls back to general-purpose models if unavailable
  * - Lazy initialization: model loads only when first embedding is requested
  * - Quantized mode: uses INT8 quantization for faster inference & smaller memory
  * - Mean pooling + L2 normalization: standard for sentence embeddings
@@ -40,11 +56,14 @@ export class Embedder {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- FeatureExtractionPipeline from @xenova/transformers uses Tensor with incompatible DataArray union type
     private pipeline: any = null; // FeatureExtractionPipeline
     private initPromise: Promise<void> | null = null;
-    private modelId: string;
+    private loadedModel: ModelSpec | null = null;
     private isReady = false;
 
-    constructor(modelId: string = "Xenova/jina-embeddings-v2-small-en") {
-        this.modelId = modelId;
+    /** Optional: pin to a specific model, skipping the fallback chain. */
+    private pinnedModelId: string | null;
+
+    constructor(modelId?: string) {
+        this.pinnedModelId = modelId ?? null;
     }
 
     // ─── Initialization ────────────────────────────────────────────
@@ -64,11 +83,39 @@ export class Embedder {
         // Dynamic import to avoid loading 32 MB at require-time
         const { pipeline } = await import("@xenova/transformers");
 
-        this.pipeline = await pipeline("feature-extraction", this.modelId, {
-            quantized: true, // INT8 quantization — 4x smaller, ~same accuracy
-        });
+        // If a specific model was pinned, try only that one
+        if (this.pinnedModelId) {
+            const spec = MODEL_PRIORITY.find(m => m.name === this.pinnedModelId)
+                ?? { name: this.pinnedModelId, dim: 512, type: "general" as const };
 
-        this.isReady = true;
+            this.pipeline = await pipeline("feature-extraction", spec.name, {
+                quantized: true,
+            });
+            this.loadedModel = spec;
+            this.isReady = true;
+            console.log(`[TokenGuard] Loaded embedding model: ${spec.name} (${spec.type})`);
+            return;
+        }
+
+        // Try models in priority order
+        for (const spec of MODEL_PRIORITY) {
+            try {
+                this.pipeline = await pipeline("feature-extraction", spec.name, {
+                    quantized: true,
+                });
+                this.loadedModel = spec;
+                this.isReady = true;
+                console.log(`[TokenGuard] Loaded embedding model: ${spec.name} (${spec.type})`);
+                return;
+            } catch {
+                console.log(`[TokenGuard] Model ${spec.name} not available, trying next...`);
+            }
+        }
+
+        throw new Error(
+            "[TokenGuard] No embedding model could be loaded. Tried: " +
+            MODEL_PRIORITY.map(m => m.name).join(", ")
+        );
     }
 
     // ─── Single Embedding ──────────────────────────────────────────
@@ -117,9 +164,21 @@ export class Embedder {
 
     // ─── Utilities ────────────────────────────────────────────────
 
-    /** Get the dimensionality of the embedding model. */
+    /** Get the dimensionality of the loaded (or default) embedding model. */
     getDimension(): number {
-        return 512; // jina-embeddings-v2-small-en produces 512-dim vectors
+        if (this.loadedModel) return this.loadedModel.dim;
+        // Before initialization, return dimension of the first priority model
+        // (or the pinned model if set)
+        if (this.pinnedModelId) {
+            const spec = MODEL_PRIORITY.find(m => m.name === this.pinnedModelId);
+            return spec?.dim ?? 512;
+        }
+        return MODEL_PRIORITY[0].dim;
+    }
+
+    /** Get the spec of the currently loaded model, or null if not yet loaded. */
+    getLoadedModel(): ModelSpec | null {
+        return this.loadedModel;
     }
 
     /** Check if the model is loaded and ready. */

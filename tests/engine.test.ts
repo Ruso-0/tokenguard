@@ -17,7 +17,7 @@ import path from "path";
 import os from "os";
 
 import { TokenGuardDB } from "../src/database.js";
-import { Embedder } from "../src/embedder.js";
+import { Embedder, MODEL_PRIORITY } from "../src/embedder.js";
 import { TokenMonitor } from "../src/monitor.js";
 import { PreToolUseHook } from "../src/hooks/preToolUse.js";
 import { Compressor } from "../src/compressor.js";
@@ -188,14 +188,31 @@ describe("TokenGuardDB", () => {
 // ─── Embedder Tests ─────────────────────────────────────────────────
 
 describe("Embedder", () => {
-    it("should report correct dimension", () => {
+    it("should report correct dimension for default (first priority) model", () => {
         const embedder = new Embedder();
-        expect(embedder.getDimension()).toBe(512);
+        expect(embedder.getDimension()).toBe(MODEL_PRIORITY[0].dim);
+    });
+
+    it("should report correct dimension for pinned model", () => {
+        const embedder = new Embedder("Xenova/all-MiniLM-L6-v2");
+        expect(embedder.getDimension()).toBe(384);
     });
 
     it("should not be ready before initialization", () => {
         const embedder = new Embedder();
         expect(embedder.ready()).toBe(false);
+        expect(embedder.getLoadedModel()).toBeNull();
+    });
+
+    it("should have code-aware models before general models in priority list", () => {
+        const firstCodeIdx = MODEL_PRIORITY.findIndex(m => m.type === "code");
+        const firstGeneralIdx = MODEL_PRIORITY.findIndex(m => m.type === "general");
+        expect(firstCodeIdx).toBeLessThan(firstGeneralIdx);
+    });
+
+    it("should include at least one code and one general model in priority list", () => {
+        expect(MODEL_PRIORITY.some(m => m.type === "code")).toBe(true);
+        expect(MODEL_PRIORITY.some(m => m.type === "general")).toBe(true);
     });
 
     it("should estimate tokens for code", () => {
