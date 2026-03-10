@@ -17,6 +17,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import fs from "fs";
 import path from "path";
 
 import { TokenGuardEngine } from "./engine.js";
@@ -203,10 +204,9 @@ server.tool(
 
 server.tool(
     "tg_compress",
-    "Compress a source file into shorthand AST notation before reading. " +
-    "Reduces token consumption by 30-80% while preserving code structure. " +
-    "Three compression tiers: 1=signatures only (max savings), " +
-    "2=signatures + key logic, 3=signatures + docs + key logic.",
+    "Compress a source file for token-efficient reading. " +
+    "Two modes: classic tiers (1-3) or advanced LLMLingua-2-inspired levels (light/medium/aggressive). " +
+    "Advanced mode achieves 50-95% reduction via preprocessing, token filtering, and structural compression.",
     {
         file_path: z
             .string()
@@ -219,7 +219,13 @@ server.tool(
             .max(3)
             .default(1)
             .describe(
-                "Compression tier: 1=signatures only (~80% savings), 2=smart body (~50%), 3=with docs (~30%)"
+                "Classic compression tier: 1=signatures only (~80%), 2=smart body (~50%), 3=with docs (~30%). Ignored if compression_level is set."
+            ),
+        compression_level: z
+            .enum(["light", "medium", "aggressive"])
+            .optional()
+            .describe(
+                "Advanced compression level. Overrides tier. light=~50%, medium=~75%, aggressive=~90-95%."
             ),
         focus: z
             .string()
@@ -228,15 +234,47 @@ server.tool(
                 "Optional focus query to rank chunks by relevance. E.g., 'authentication' will put auth-related code first."
             ),
     },
-    async ({ file_path, tier, focus }) => {
+    async ({ file_path, tier, compression_level, focus }) => {
         await engine.initialize();
 
         const resolvedPath = path.resolve(process.cwd(), file_path);
 
-        // Check pre-tool-use hook
-        const intercept = hook.evaluateFileRead(resolvedPath);
-
         try {
+            // Advanced compression path
+            if (compression_level) {
+                const result = await engine.compressFileAdvanced(resolvedPath, compression_level);
+                const saved = result.tokensSaved;
+                const sessionReport = engine.getSessionReport();
+
+                engine.logUsage(
+                    "tg_compress",
+                    Embedder.estimateTokens(result.compressed),
+                    Embedder.estimateTokens(result.compressed),
+                    saved
+                );
+
+                return {
+                    content: [
+                        {
+                            type: "text" as const,
+                            text:
+                                `## TokenGuard Advanced Compress: ${path.basename(resolvedPath)}\n` +
+                                `Level: ${compression_level} | ` +
+                                `${result.originalSize.toLocaleString()} → ${result.compressedSize.toLocaleString()} chars ` +
+                                `(${(result.ratio * 100).toFixed(1)}% reduction)\n` +
+                                `  Preprocessing: -${result.breakdown.preprocessingReduction.toLocaleString()} chars\n` +
+                                `  Token filtering: -${result.breakdown.tokenFilterReduction.toLocaleString()} chars\n` +
+                                `  Structural: -${result.breakdown.structuralReduction.toLocaleString()} chars\n\n` +
+                                `\`\`\`\n${result.compressed}\n\`\`\`\n\n` +
+                                `[TokenGuard saved ~${saved.toLocaleString()} tokens | ` +
+                                `Session total: ~${sessionReport.totalTokensSaved.toLocaleString()} tokens ` +
+                                `($${sessionReport.savedUsdSonnet.toFixed(3)} Sonnet / $${sessionReport.savedUsdOpus.toFixed(3)} Opus)]`,
+                        },
+                    ],
+                };
+            }
+
+            // Classic tier-based compression path (backward compat)
             const result = await engine.compressFile(
                 resolvedPath,
                 tier as 1 | 2 | 3,
@@ -334,6 +372,164 @@ server.tool(
                 },
             ],
         };
+    }
+);
+
+// ─── Tool 5: tg_session_report ──────────────────────────────────────
+
+server.tool(
+    "tg_session_report",
+    "Comprehensive session savings report. Shows total tokens saved, " +
+    "estimated USD saved (Sonnet & Opus pricing), per-file-type breakdown, " +
+    "burn rate trend, and model switch recommendations.",
+    {},
+    async () => {
+        const sessionReport = engine.getSessionReport();
+        const burnRate = monitor.computeBurnRate();
+        const prediction = monitor.predictExhaustion();
+
+        const fileTypeRows = sessionReport.byFileType.length > 0
+            ? sessionReport.byFileType.map(ft =>
+                `  ${ft.ext.padEnd(6)} — ${ft.count} files, ` +
+                `avg ${(ft.ratio * 100).toFixed(0)}% compression, ` +
+                `${ft.tokensSaved.toLocaleString()} tokens saved`
+            ).join("\n")
+            : "  (no compressions yet)";
+
+        // Burn rate trend
+        let trendMsg = "Stable";
+        if (burnRate.tokensPerMinute > 0) {
+            trendMsg = burnRate.tokensPerMinute > 3000
+                ? "High (consider aggressive compression)"
+                : burnRate.tokensPerMinute > 1000
+                    ? "Moderate"
+                    : "Low (efficient usage)";
+        }
+
+        // Model recommendation
+        let modelRec = "No recommendation yet (insufficient data).";
+        if (sessionReport.totalTokensSaved > 0) {
+            const sonnetSavings = sessionReport.savedUsdSonnet;
+            const opusSavings = sessionReport.savedUsdOpus;
+            if (opusSavings > 0.50) {
+                modelRec = `Consider Sonnet for exploration to save ~$${(opusSavings - sonnetSavings).toFixed(2)}/session. Use Opus for final implementation.`;
+            } else {
+                modelRec = `Current usage is efficient. TokenGuard has saved $${sonnetSavings.toFixed(3)} (Sonnet) / $${opusSavings.toFixed(3)} (Opus).`;
+            }
+        }
+
+        const report = [
+            "═══════════════════════════════════════════════════",
+            "  TokenGuard — Session Report",
+            "═══════════════════════════════════════════════════",
+            "",
+            `  Session Duration:     ${sessionReport.durationMinutes} min`,
+            `  Total Tokens Saved:   ${sessionReport.totalTokensSaved.toLocaleString()}`,
+            `  Total Processed:      ${sessionReport.totalOriginalTokens.toLocaleString()}`,
+            `  Overall Compression:  ${(sessionReport.overallRatio * 100).toFixed(1)}%`,
+            "",
+            "  USD Saved (estimated):",
+            `    Sonnet ($3/M input):   $${sessionReport.savedUsdSonnet.toFixed(3)}`,
+            `    Opus ($15/M input):    $${sessionReport.savedUsdOpus.toFixed(3)}`,
+            "",
+            "  Per-File-Type Breakdown:",
+            fileTypeRows,
+            "",
+            `  Burn Rate:            ${burnRate.tokensPerMinute.toLocaleString()} tok/min`,
+            `  Trend:                ${trendMsg}`,
+            `  Prediction:           ${prediction.message}`,
+            "",
+            `  Model Recommendation: ${modelRec}`,
+            "═══════════════════════════════════════════════════",
+        ].join("\n");
+
+        return {
+            content: [
+                {
+                    type: "text" as const,
+                    text: report,
+                },
+            ],
+        };
+    }
+);
+
+// ─── Tool 6: tg_read ───────────────────────────────────────────────
+
+server.tool(
+    "tg_read",
+    "Read a file with automatic TokenGuard compression. " +
+    "Drop-in replacement for Read that saves 50-95% tokens. " +
+    "Files < 1KB are returned raw (compression overhead not worth it).",
+    {
+        file_path: z
+            .string()
+            .describe("Path to the file to read"),
+        level: z
+            .enum(["light", "medium", "aggressive"])
+            .default("medium")
+            .describe("Compression level: light=~50%, medium=~75%, aggressive=~90-95%"),
+    },
+    async ({ file_path, level }) => {
+        await engine.initialize();
+
+        const resolvedPath = path.resolve(process.cwd(), file_path);
+
+        try {
+            const stat = fs.statSync(resolvedPath);
+
+            // Skip compression for small files (< 1KB)
+            if (stat.size < 1024) {
+                const content = fs.readFileSync(resolvedPath, "utf-8");
+                return {
+                    content: [
+                        {
+                            type: "text" as const,
+                            text:
+                                `## ${path.basename(resolvedPath)} (raw — ${stat.size} bytes, below 1KB threshold)\n\n` +
+                                `\`\`\`\n${content}\n\`\`\`\n\n` +
+                                `[TokenGuard: file too small to compress]`,
+                        },
+                    ],
+                };
+            }
+
+            const result = await engine.compressFileAdvanced(resolvedPath, level);
+            const saved = result.tokensSaved;
+
+            engine.logUsage(
+                "tg_read",
+                Embedder.estimateTokens(result.compressed),
+                Embedder.estimateTokens(result.compressed),
+                saved
+            );
+
+            const sessionReport = engine.getSessionReport();
+
+            return {
+                content: [
+                    {
+                        type: "text" as const,
+                        text:
+                            `## ${path.basename(resolvedPath)} (${level} compression)\n` +
+                            `${result.originalSize.toLocaleString()} → ${result.compressedSize.toLocaleString()} chars ` +
+                            `(${(result.ratio * 100).toFixed(1)}% reduction)\n\n` +
+                            `\`\`\`\n${result.compressed}\n\`\`\`\n\n` +
+                            `[TokenGuard saved ~${saved.toLocaleString()} tokens | ` +
+                            `Session: ~${sessionReport.totalTokensSaved.toLocaleString()} tokens saved]`,
+                    },
+                ],
+            };
+        } catch (err) {
+            return {
+                content: [
+                    {
+                        type: "text" as const,
+                        text: `Error reading ${file_path}: ${(err as Error).message}\n\n[TokenGuard saved ~0 tokens]`,
+                    },
+                ],
+            };
+        }
     }
 );
 

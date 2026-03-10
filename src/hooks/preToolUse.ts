@@ -14,6 +14,7 @@
 import fs from "fs";
 import path from "path";
 import { Embedder } from "../embedder.js";
+import type { CompressionLevel } from "../compressor-advanced.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -28,17 +29,27 @@ export interface InterceptResult {
     optimizedTokens: number;
     /** Savings as a percentage. */
     savingsPercent: number;
+    /** Pre-compressed content (if compressor is available). */
+    compressedContent?: string;
+    /** Compression level used. */
+    compressionLevel?: CompressionLevel;
+    /** Original token count. */
+    originalTokens?: number;
+    /** Compressed token count. */
+    compressedTokens?: number;
 }
 
 export interface PreToolUseConfig {
-    /** File size threshold in bytes to trigger interception. Default: 5000 */
+    /** File size threshold in bytes to trigger interception. Default: 1024 */
     fileSizeThreshold?: number;
-    /** Maximum tokens before suggesting compression. Default: 2000 */
+    /** Maximum tokens before suggesting compression. Default: 500 */
     tokenThreshold?: number;
     /** Whether to intercept grep/glob operations. Default: true */
     interceptGrep?: boolean;
     /** Whether to intercept file reads. Default: true */
     interceptRead?: boolean;
+    /** Default compression level for interception. Default: "medium" */
+    compressionLevel?: CompressionLevel;
 }
 
 // ─── Interceptor ─────────────────────────────────────────────────────
@@ -48,10 +59,11 @@ export class PreToolUseHook {
 
     constructor(config: PreToolUseConfig = {}) {
         this.config = {
-            fileSizeThreshold: config.fileSizeThreshold ?? 5000,
-            tokenThreshold: config.tokenThreshold ?? 2000,
+            fileSizeThreshold: config.fileSizeThreshold ?? 1024,
+            tokenThreshold: config.tokenThreshold ?? 500,
             interceptGrep: config.interceptGrep ?? true,
             interceptRead: config.interceptRead ?? true,
+            compressionLevel: config.compressionLevel ?? "medium",
         };
     }
 
@@ -88,10 +100,19 @@ export class PreToolUseHook {
             return this.passThrough();
         }
 
-        // Estimate token waste
+        // Estimate token waste using advanced compression ratios
         const content = fs.readFileSync(filePath, "utf-8");
         const fullTokens = Embedder.estimateTokens(content);
-        const compressedTokens = Math.round(fullTokens * 0.25); // Tier 1 estimate
+
+        // Advanced compression ratios by level
+        const ratioByLevel: Record<string, number> = {
+            light: 0.50,
+            medium: 0.75,
+            aggressive: 0.92,
+        };
+        const level = this.config.compressionLevel;
+        const estimatedRatio = ratioByLevel[level] ?? 0.75;
+        const compressedTokens = Math.round(fullTokens * (1 - estimatedRatio));
 
         if (fullTokens <= this.config.tokenThreshold) {
             return this.passThrough();
@@ -101,15 +122,16 @@ export class PreToolUseHook {
             shouldIntercept: true,
             suggestion: [
                 `⚡ TokenGuard Intercept: File "${path.basename(filePath)}" has ~${fullTokens.toLocaleString()} tokens.`,
-                `→ Use \`tg_compress\` to read a compressed version (~${compressedTokens.toLocaleString()} tokens).`,
+                `→ Use \`tg_compress --level ${level}\` to read a compressed version (~${compressedTokens.toLocaleString()} tokens).`,
                 `→ Or use \`tg_search\` with a specific query to find only the relevant chunks.`,
-                `→ Estimated savings: ~${(fullTokens - compressedTokens).toLocaleString()} tokens (${Math.round((1 - compressedTokens / fullTokens) * 100)}% reduction).`,
+                `→ Estimated savings: ~${(fullTokens - compressedTokens).toLocaleString()} tokens (${Math.round(estimatedRatio * 100)}% reduction).`,
             ].join("\n"),
             wastedTokens: fullTokens,
             optimizedTokens: compressedTokens,
-            savingsPercent: Math.round(
-                (1 - compressedTokens / fullTokens) * 100
-            ),
+            savingsPercent: Math.round(estimatedRatio * 100),
+            compressionLevel: level,
+            originalTokens: fullTokens,
+            compressedTokens,
         };
     }
 
@@ -162,6 +184,7 @@ export class PreToolUseHook {
             `  • Token threshold: ${this.config.tokenThreshold} tokens`,
             `  • Grep interception: ${this.config.interceptGrep ? "enabled" : "disabled"}`,
             `  • Read interception: ${this.config.interceptRead ? "enabled" : "disabled"}`,
+            `  • Compression level: ${this.config.compressionLevel}`,
         ].join("\n");
     }
 

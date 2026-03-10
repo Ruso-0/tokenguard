@@ -19,6 +19,7 @@ import { TokenGuardDB, type HybridSearchResult } from "./database.js";
 import { Embedder, getEmbedder } from "./embedder.js";
 import { ASTParser, type ParseResult } from "./parser.js";
 import { Compressor, type CompressionResult } from "./compressor.js";
+import { AdvancedCompressor, type CompressionLevel, type AdvancedCompressionResult } from "./compressor-advanced.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -85,16 +86,48 @@ const DEFAULT_IGNORE = [
 
 // ─── Engine ──────────────────────────────────────────────────────────
 
+export interface SessionReport {
+    /** Session duration in minutes. */
+    durationMinutes: number;
+    /** Total tokens saved across all compressions. */
+    totalTokensSaved: number;
+    /** Total original tokens processed. */
+    totalOriginalTokens: number;
+    /** Overall compression ratio. */
+    overallRatio: number;
+    /** USD saved at Sonnet pricing ($3/M input). */
+    savedUsdSonnet: number;
+    /** USD saved at Opus pricing ($15/M input). */
+    savedUsdOpus: number;
+    /** Per-file-type breakdown. */
+    byFileType: Array<{
+        ext: string;
+        count: number;
+        tokensSaved: number;
+        originalTokens: number;
+        ratio: number;
+    }>;
+}
+
 export class TokenGuardEngine {
     private db: TokenGuardDB;
     private embedder: Embedder;
     private parser: ASTParser;
     private compressor: Compressor;
+    private advancedCompressor: AdvancedCompressor;
     private watcher: FSWatcher | null = null;
     private config: Required<EngineConfig>;
     private indexingQueue = new Set<string>();
     private isIndexing = false;
     private initialized = false;
+
+    /** Session-level savings tracker. */
+    private sessionSavings = {
+        totalTokensSaved: 0,
+        totalOriginalTokens: 0,
+        compressionsByType: new Map<string, { count: number; saved: number; original: number }>(),
+        startTime: Date.now(),
+    };
 
     constructor(config: EngineConfig = {}) {
         this.config = {
@@ -111,6 +144,7 @@ export class TokenGuardEngine {
             this.config.wasmDir || undefined
         );
         this.compressor = new Compressor(this.parser, this.embedder);
+        this.advancedCompressor = new AdvancedCompressor(this.parser, this.embedder);
     }
 
     // ─── Initialization ────────────────────────────────────────────
@@ -313,6 +347,62 @@ export class TokenGuardEngine {
             tier,
             focusQuery,
         });
+    }
+
+    // ─── Advanced Compression ───────────────────────────────────
+
+    /** Compress a file using the advanced LLMLingua-2-inspired pipeline. */
+    async compressFileAdvanced(
+        filePath: string,
+        level: CompressionLevel = "medium",
+    ): Promise<AdvancedCompressionResult> {
+        await this.initialize();
+
+        const content = fs.readFileSync(filePath, "utf-8");
+        const result = await this.advancedCompressor.compress(filePath, content, level);
+
+        // Track session savings
+        const ext = path.extname(filePath).toLowerCase() || ".unknown";
+        this.sessionSavings.totalTokensSaved += result.tokensSaved;
+        this.sessionSavings.totalOriginalTokens += Embedder.estimateTokens(content);
+
+        const entry = this.sessionSavings.compressionsByType.get(ext) ?? { count: 0, saved: 0, original: 0 };
+        entry.count++;
+        entry.saved += result.tokensSaved;
+        entry.original += Embedder.estimateTokens(content);
+        this.sessionSavings.compressionsByType.set(ext, entry);
+
+        return result;
+    }
+
+    /** Get a comprehensive session savings report. */
+    getSessionReport(): SessionReport {
+        const durationMs = Date.now() - this.sessionSavings.startTime;
+        const durationMinutes = Math.max(1, durationMs / 60_000);
+        const totalSaved = this.sessionSavings.totalTokensSaved;
+        const totalOriginal = this.sessionSavings.totalOriginalTokens;
+
+        const byFileType: SessionReport["byFileType"] = [];
+        for (const [ext, data] of this.sessionSavings.compressionsByType) {
+            byFileType.push({
+                ext,
+                count: data.count,
+                tokensSaved: data.saved,
+                originalTokens: data.original,
+                ratio: data.original > 0 ? 1 - (data.original - data.saved) / data.original : 0,
+            });
+        }
+        byFileType.sort((a, b) => b.tokensSaved - a.tokensSaved);
+
+        return {
+            durationMinutes: Math.round(durationMinutes * 10) / 10,
+            totalTokensSaved: totalSaved,
+            totalOriginalTokens: totalOriginal,
+            overallRatio: totalOriginal > 0 ? totalSaved / totalOriginal : 0,
+            savedUsdSonnet: (totalSaved / 1_000_000) * 3,
+            savedUsdOpus: (totalSaved / 1_000_000) * 15,
+            byFileType,
+        };
     }
 
     // ─── File Watching ────────────────────────────────────────────

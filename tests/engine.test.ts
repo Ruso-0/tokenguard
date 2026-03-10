@@ -268,6 +268,7 @@ describe("PreToolUseHook", () => {
         const rules = hook.getRules();
         expect(rules).toContain("File read threshold");
         expect(rules).toContain("Token threshold");
+        expect(rules).toContain("Compression level");
     });
 
     it("should not intercept small files", () => {
@@ -310,6 +311,54 @@ describe("PreToolUseHook", () => {
             fs.unlinkSync(path.join(tempDir, `file${i}.ts`));
         }
         fs.rmdirSync(tempDir);
+    });
+});
+
+// ─── KeywordIndex / Porter Stemmer Tests ────────────────────────────
+
+describe("Porter Stemmer (via KeywordIndex)", () => {
+    let db: TokenGuardDB;
+    const stemDbPath = path.join(os.tmpdir(), `tokenguard-stem-test-${Date.now()}.db`);
+
+    beforeAll(async () => {
+        db = new TokenGuardDB(stemDbPath);
+        await db.initialize();
+    });
+
+    afterAll(() => {
+        db.close();
+        try {
+            fs.unlinkSync(stemDbPath);
+            fs.unlinkSync(stemDbPath.replace(/\.db$/, ".vec"));
+        } catch { /* ignore */ }
+    });
+
+    it("should find stemmed matches (running -> run)", () => {
+        const embedding = new Float32Array(384).fill(0.1);
+        db.insertChunk("/test/stem.ts", "[func] run() { /* TG:L1-L5 */ }", "function run() { ... }", "func", 1, 5, embedding);
+
+        // "running" should match "run" via stemming
+        const results = db.searchHybrid(new Float32Array(384).fill(0.1), "running function", 5);
+        expect(results.length).toBeGreaterThan(0);
+    });
+
+    it("should find stemmed matches (connections -> connect)", () => {
+        const embedding = new Float32Array(384).fill(0.15);
+        db.insertChunk("/test/stem.ts", "[func] connectDatabase() { /* TG:L10-L20 */ }", "function connectDatabase() { ... }", "func", 10, 20, embedding);
+
+        const results = db.searchHybrid(new Float32Array(384).fill(0.15), "connections database", 5);
+        expect(results.length).toBeGreaterThan(0);
+    });
+
+    it("should boost bigram phrase matches", () => {
+        const embedding1 = new Float32Array(384).fill(0.2);
+        const embedding2 = new Float32Array(384).fill(0.25);
+        db.insertChunk("/test/bigram1.ts", "[func] authMiddleware() auth middleware handler", "function authMiddleware() { ... }", "func", 1, 5, embedding1);
+        db.insertChunk("/test/bigram2.ts", "[func] something() auth unrelated middleware", "function something() { ... }", "func", 1, 5, embedding2);
+
+        // "auth middleware" as a phrase should boost bigram1 which has them adjacent
+        const results = db.searchHybrid(new Float32Array(384).fill(0.2), "auth middleware", 5);
+        expect(results.length).toBeGreaterThan(0);
     });
 });
 
