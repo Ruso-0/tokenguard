@@ -33,6 +33,17 @@ export function stripAnsiCodes(text: string): string {
     return text.replace(ANSI_RE, "");
 }
 
+// ─── Line Normalization (for near-duplicate detection) ──────────────
+
+function normalizeLine(line: string): string {
+    return line
+        .replace(/:\d+:\d+/g, ":L:C")          // line:col numbers
+        .replace(/0x[a-fA-F0-9]+/gi, "0xADDR") // memory addresses
+        .replace(/\d{13,}/g, "TIMESTAMP")       // epoch timestamps
+        .replace(/:\d+\)/g, ":N)")              // single line numbers
+        .trim();
+}
+
 // ─── Line Deduplication ─────────────────────────────────────────────
 
 export function deduplicateLines(lines: string[]): string[] {
@@ -99,7 +110,15 @@ export function deduplicateLines(lines: string[]): string[] {
         }
     }
 
-    return result;
+    // Second pass: normalize-based dedup for near-duplicates
+    // (e.g., stack traces differing only in line numbers or addresses)
+    const seen = new Set<string>();
+    return result.filter(line => {
+        const normalized = normalizeLine(line);
+        if (seen.has(normalized)) return false;
+        seen.add(normalized);
+        return true;
+    });
 }
 
 // ─── Node Modules Filtering ────────────────────────────────────────

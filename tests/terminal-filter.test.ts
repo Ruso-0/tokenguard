@@ -204,6 +204,48 @@ describe("extractErrorSummary", () => {
     });
 });
 
+// ─── Normalization-Based Deduplication ───────────────────────────────
+
+describe("normalization-based deduplication", () => {
+    it("deduplicates stack traces with different line numbers", () => {
+        const input = [
+            "at Object.<anonymous> (/app/src/auth.ts:14:2)",
+            "at Object.<anonymous> (/app/src/auth.ts:15:3)",
+            "at Object.<anonymous> (/app/src/auth.ts:16:7)",
+        ].join("\n");
+        const result = filterTerminalOutput(input);
+        expect(result.filtered_text.split("\n").length).toBe(1);
+    });
+
+    it("deduplicates lines with different memory addresses", () => {
+        const input = [
+            "Error at 0xF4A2B3: segfault",
+            "Error at 0xD1C2E3: segfault",
+        ].join("\n");
+        const result = filterTerminalOutput(input);
+        expect(result.filtered_text.split("\n").length).toBe(1);
+    });
+
+    it("deduplicates lines with different single line numbers", () => {
+        const input = [
+            "  at handler (/app/src/route.ts:10)",
+            "  at handler (/app/src/route.ts:20)",
+            "  at handler (/app/src/route.ts:30)",
+        ].join("\n");
+        const result = filterTerminalOutput(input);
+        expect(result.filtered_text.split("\n").length).toBe(1);
+    });
+
+    it("keeps lines that differ in more than just numbers", () => {
+        const input = [
+            "at Object.<anonymous> (/app/src/auth.ts:14:2)",
+            "at Object.<anonymous> (/app/src/user.ts:15:3)",
+        ].join("\n");
+        const result = filterTerminalOutput(input);
+        expect(result.filtered_text.split("\n").length).toBe(2);
+    });
+});
+
 // ─── Full Pipeline ──────────────────────────────────────────────────
 
 describe("filterTerminalOutput", () => {
