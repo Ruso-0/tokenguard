@@ -559,13 +559,15 @@ export class TokenGuardDB {
             this.db = new SQL.Database();
         }
 
-        // Load vector index if it exists
+        // Setup schema first (creates metadata table needed for dimension lookup)
+        this.setupSchema();
+
+        // Load vector index using stored dimension (default 512)
+        const storedDim = parseInt(this.getMetadata("embedding_dim") ?? "512", 10);
         if (fs.existsSync(this.vecPath)) {
             const vecBuffer = fs.readFileSync(this.vecPath);
-            this.vecIndex = VectorIndex.deserialize(vecBuffer, 512);
+            this.vecIndex = VectorIndex.deserialize(vecBuffer, storedDim);
         }
-
-        this.setupSchema();
 
         // Rebuild keyword index from existing data
         this.rebuildKeywordIndex();
@@ -612,6 +614,12 @@ export class TokenGuardDB {
       -- Indexes for common queries
       CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);
       CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_log(timestamp);
+
+      -- Metadata key-value store (embedding dimension, model name, etc.)
+      CREATE TABLE IF NOT EXISTS metadata (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
     }
 
@@ -624,6 +632,57 @@ export class TokenGuardDB {
             const [id, shorthand] = row as [number, string];
             this.kwIndex.insert(id, shorthand);
         }
+    }
+
+    // ─── Metadata ────────────────────────────────────────────────
+
+    /** Read a metadata value by key, or null if not set. */
+    getMetadata(key: string): string | null {
+        const stmt = this.db.prepare("SELECT value FROM metadata WHERE key = ?");
+        stmt.bind([key]);
+        let result: string | null = null;
+        if (stmt.step()) {
+            result = (stmt.getAsObject() as { value: string }).value;
+        }
+        stmt.free();
+        return result;
+    }
+
+    /** Write a metadata key-value pair (upsert). */
+    setMetadata(key: string, value: string): void {
+        this.db.run(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            [key, value]
+        );
+    }
+
+    /**
+     * Check if the active embedding dimension matches what was stored.
+     * If they differ, clear all vectors and update the stored dimension.
+     * Returns true if a re-index is needed.
+     */
+    checkEmbeddingDimension(activeDim: number): boolean {
+        const storedDim = this.getMetadata("embedding_dim");
+
+        if (storedDim && parseInt(storedDim, 10) !== activeDim) {
+            console.warn(
+                `[TokenGuard] Embedding dimension changed (${storedDim} -> ${activeDim}). Clearing index.`
+            );
+            // Clear all vectors
+            this.vecIndex = new VectorIndex();
+            // Clear all chunks and files so they get re-indexed
+            this.db.run("DELETE FROM chunks");
+            this.db.run("DELETE FROM files");
+            this.kwIndex = new KeywordIndex();
+            this.setMetadata("embedding_dim", String(activeDim));
+            return true;
+        }
+
+        if (!storedDim) {
+            this.setMetadata("embedding_dim", String(activeDim));
+        }
+
+        return false;
     }
 
     // ─── Persistence ─────────────────────────────────────────────

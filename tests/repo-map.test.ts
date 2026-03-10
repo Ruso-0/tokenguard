@@ -17,9 +17,9 @@ import os from "os";
 import { ASTParser } from "../src/parser.js";
 import { generateRepoMap, repoMapToText } from "../src/repo-map.js";
 
-/** Same locale-independent comparator used in repo-map.ts */
-const stableCompare = (a: string, b: string) =>
-    a.localeCompare(b, "en", { numeric: true });
+/** Same byte-identical comparator used in repo-map.ts */
+const stableCompare = (a: string, b: string): number =>
+    a < b ? -1 : a > b ? 1 : 0;
 
 // ─── Test Fixtures ──────────────────────────────────────────────────
 

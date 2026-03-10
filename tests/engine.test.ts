@@ -183,6 +183,39 @@ describe("TokenGuardDB", () => {
         expect(stats.compression_ratio).toBeGreaterThanOrEqual(0);
         expect(stats.compression_ratio).toBeLessThanOrEqual(1);
     });
+
+    it("should store and retrieve metadata", () => {
+        db.setMetadata("test_key", "test_value");
+        expect(db.getMetadata("test_key")).toBe("test_value");
+        expect(db.getMetadata("nonexistent")).toBeNull();
+    });
+
+    it("should detect embedding dimension mismatch and clear index", () => {
+        // Store initial dimension
+        db.setMetadata("embedding_dim", "768");
+
+        // Insert a chunk so there's data to clear
+        const emb = new Float32Array(768).fill(0.1);
+        db.insertChunk("/test/dim.ts", "[fn] dimTest()", "function dimTest() {}", "func", 1, 1, emb);
+        expect(db.getVectorCount()).toBeGreaterThan(0);
+
+        // Check with different dimension — should clear
+        const needsReindex = db.checkEmbeddingDimension(384);
+        expect(needsReindex).toBe(true);
+        expect(db.getVectorCount()).toBe(0);
+        expect(db.getMetadata("embedding_dim")).toBe("384");
+    });
+
+    it("should not clear index when dimension matches", () => {
+        db.setMetadata("embedding_dim", "512");
+        const emb = new Float32Array(512).fill(0.1);
+        db.insertChunk("/test/match.ts", "[fn] match()", "function match() {}", "func", 1, 1, emb);
+        const before = db.getVectorCount();
+
+        const needsReindex = db.checkEmbeddingDimension(512);
+        expect(needsReindex).toBe(false);
+        expect(db.getVectorCount()).toBe(before);
+    });
 });
 
 // ─── Embedder Tests ─────────────────────────────────────────────────

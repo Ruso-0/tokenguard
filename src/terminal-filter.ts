@@ -36,11 +36,22 @@ export function stripAnsiCodes(text: string): string {
 // ─── Line Normalization (for near-duplicate detection) ──────────────
 
 function normalizeLine(line: string): string {
+    // Only normalize line:col numbers in non-user paths (node_modules, internal, anonymous)
+    // to avoid collapsing genuinely different user source errors
+    if (line.includes("node_modules") ||
+        line.includes("internal/") ||
+        line.includes("<anonymous>")) {
+        return line
+            .replace(/:\d+:\d+/g, ":L:C")          // line:col numbers
+            .replace(/0x[a-fA-F0-9]+/gi, "0xADDR") // memory addresses
+            .replace(/\d{13,}/g, "TIMESTAMP")       // epoch timestamps
+            .replace(/:\d+\)/g, ":N)")              // single line numbers
+            .trim();
+    }
+    // User source lines: only normalize memory addresses and timestamps
     return line
-        .replace(/:\d+:\d+/g, ":L:C")          // line:col numbers
-        .replace(/0x[a-fA-F0-9]+/gi, "0xADDR") // memory addresses
-        .replace(/\d{13,}/g, "TIMESTAMP")       // epoch timestamps
-        .replace(/:\d+\)/g, ":N)")              // single line numbers
+        .replace(/0x[a-fA-F0-9]+/gi, "0xADDR")
+        .replace(/\d{13,}/g, "TIMESTAMP")
         .trim();
 }
 

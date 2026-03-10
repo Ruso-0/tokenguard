@@ -162,6 +162,10 @@ export class TokenGuardEngine {
         await this.db.initialize();
         await this.parser.initialize();
         await this.embedder.initialize();
+
+        // Guard: if embedding model changed, clear stale vectors
+        this.db.checkEmbeddingDimension(this.embedder.getDimension());
+
         this.initialized = true;
     }
 

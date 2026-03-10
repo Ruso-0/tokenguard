@@ -47,9 +47,9 @@ const IGNORE_DIRS = new Set([
 
 const STRIP_KEYWORD = /^(?:export|default|declare|abstract|public|private|protected|static|readonly|async|function|class|interface|type|enum|const|let|var|def|func)\s+/;
 
-/** Locale-independent comparator for deterministic sorting. */
-const stableCompare = (a: string, b: string) =>
-    a.localeCompare(b, "en", { numeric: true });
+/** Byte-identical comparator — same result on every OS (no ICU dependency). */
+const stableCompare = (a: string, b: string): number =>
+    a < b ? -1 : a > b ? 1 : 0;
 
 // ─── Extraction Helpers ─────────────────────────────────────────────
 
