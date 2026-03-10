@@ -3,7 +3,7 @@
 /**
  * index.ts — TokenGuard MCP Server entry point.
  *
- * Exposes 12 MCP tools to Claude Code:
+ * Exposes 13 MCP tools to Claude Code:
  *
  * 1. tg_search  — Hybrid semantic + keyword search (replaces grep)
  * 2. tg_audit   — Token consumption audit for the current session
@@ -17,6 +17,7 @@
  * 10. tg_outline — List all symbols in a file (like VS Code outline)
  * 11. tg_read   — Read file with automatic compression
  * 12. tg_validate — AST sandbox validator (catches syntax errors before disk)
+ * 13. tg_circuit_breaker — Detects and stops infinite failure loops
  *
  * Every tool response appends a savings message:
  *   "[TokenGuard saved ~X tokens on this query]"
@@ -36,6 +37,7 @@ import { shouldProcess } from "./utils/file-filter.js";
 import { filterTerminalOutput } from "./terminal-filter.js";
 import { findDefinition, findReferences, getFileSymbols, type SymbolKind, type ReferenceResult } from "./ast-navigator.js";
 import { AstSandbox } from "./ast-sandbox.js";
+import { CircuitBreaker } from "./circuit-breaker.js";
 
 // ─── Initialization ──────────────────────────────────────────────────
 
@@ -46,6 +48,7 @@ const engine = new TokenGuardEngine({
 
 const monitor = new TokenMonitor();
 const sandbox = new AstSandbox();
+const circuitBreaker = new CircuitBreaker();
 
 const server = new McpServer({
     name: "TokenGuard",
@@ -549,6 +552,22 @@ server.tool(
             Math.max(0, result.original_tokens - result.filtered_tokens)
         );
 
+        // Feed errors to circuit breaker for loop detection
+        let circuitWarning = "";
+        if (result.error_summary.errorCount > 0) {
+            const loopCheck = circuitBreaker.recordToolCall(
+                "tg_terminal",
+                output,
+                result.error_summary.affectedFiles[0] ?? undefined
+            );
+            if (loopCheck.tripped) {
+                circuitWarning =
+                    "\n\n## ⚠️ CIRCUIT BREAKER TRIPPED\n" +
+                    `**${loopCheck.reason}**\n` +
+                    "**STOP all fix attempts and ask the human for guidance.**\n";
+            }
+        }
+
         const summaryLines = [
             `## Terminal Filter Results`,
             `${result.original_tokens.toLocaleString()} → ${result.filtered_tokens.toLocaleString()} tokens ` +
@@ -586,7 +605,7 @@ server.tool(
             content: [
                 {
                     type: "text" as const,
-                    text: summaryLines.join("\n"),
+                    text: summaryLines.join("\n") + circuitWarning,
                 },
             ],
         };
@@ -1006,6 +1025,106 @@ server.tool(
                         `### Suggestions\n${result.suggestion}\n\n` +
                         `Fix these errors before writing the file.\n\n` +
                         `[TokenGuard saved ~${saved.toLocaleString()} tokens by catching errors before disk write]`,
+                },
+            ],
+        };
+    }
+);
+
+// ─── Tool 13: tg_circuit_breaker ────────────────────────────────────
+
+server.tool(
+    "tg_circuit_breaker",
+    "Monitors for infinite failure loops (write→test→fail cycles). " +
+    "Call this after any failed command. If it returns tripped=true, " +
+    "STOP immediately and ask the human for guidance. " +
+    "Do NOT attempt another fix — you are likely stuck in a loop.",
+    {
+        last_error: z
+            .string()
+            .describe("The error output from the last failed command"),
+        file_path: z
+            .string()
+            .optional()
+            .describe("File being worked on (if applicable)"),
+        action: z
+            .enum(["check", "reset", "stats"])
+            .default("check")
+            .describe("check=record error and check for loops, reset=clear after human help, stats=show loop stats"),
+    },
+    async ({ last_error, file_path, action }) => {
+        if (action === "reset") {
+            circuitBreaker.reset();
+            return {
+                content: [
+                    {
+                        type: "text" as const,
+                        text:
+                            "## Circuit Breaker: RESET\n" +
+                            "State cleared. You may resume working.\n\n" +
+                            "[TokenGuard circuit breaker reset]",
+                    },
+                ],
+            };
+        }
+
+        if (action === "stats") {
+            const stats = circuitBreaker.getStats();
+            const uptimeMin = Math.round((Date.now() - stats.sessionStartTime) / 60_000);
+            return {
+                content: [
+                    {
+                        type: "text" as const,
+                        text:
+                            "## Circuit Breaker Stats\n" +
+                            `Session uptime: ${uptimeMin} min\n` +
+                            `Total tool calls tracked: ${stats.totalToolCalls}\n` +
+                            `Loops detected: ${stats.loopsDetected}\n` +
+                            `Loops prevented: ${stats.loopsPrevented}\n` +
+                            `Estimated tokens saved: ~${stats.estimatedTokensSaved.toLocaleString()}\n\n` +
+                            "[TokenGuard circuit breaker stats]",
+                    },
+                ],
+            };
+        }
+
+        // action === "check"
+        const result = circuitBreaker.recordToolCall(
+            "error_check",
+            last_error,
+            file_path
+        );
+
+        if (result.tripped) {
+            return {
+                content: [
+                    {
+                        type: "text" as const,
+                        text:
+                            "## ⚠️ CIRCUIT BREAKER TRIPPED\n\n" +
+                            `**${result.reason}**\n\n` +
+                            "**Action required:** STOP all fix attempts. " +
+                            "Ask the human what to do next. " +
+                            "Do NOT attempt another automatic fix.\n\n" +
+                            "When the human provides guidance, call this tool with " +
+                            '`action: "reset"` before resuming.\n\n' +
+                            "[TokenGuard saved ~10,000 tokens by breaking the loop]",
+                    },
+                ],
+            };
+        }
+
+        const state = circuitBreaker.getState();
+        return {
+            content: [
+                {
+                    type: "text" as const,
+                    text:
+                        "## Circuit Breaker: OK\n" +
+                        `Consecutive failures: ${state.consecutiveFailures}\n` +
+                        `History depth: ${state.history.length}/${50}\n` +
+                        "No loop detected yet. You may continue.\n\n" +
+                        "[TokenGuard circuit breaker monitoring]",
                 },
             ],
         };
