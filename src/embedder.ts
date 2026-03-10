@@ -36,7 +36,8 @@ export interface BatchEmbeddingResult {
  * - Singleton pattern: avoids loading ~32 MB model multiple times
  */
 export class Embedder {
-    private pipeline: any = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- FeatureExtractionPipeline from @xenova/transformers uses Tensor with incompatible DataArray union type
+    private pipeline: any = null; // FeatureExtractionPipeline
     private initPromise: Promise<void> | null = null;
     private modelId: string;
     private isReady = false;

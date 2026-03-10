@@ -22,7 +22,6 @@ import path from "path";
 
 import { TokenGuardEngine } from "./engine.js";
 import { TokenMonitor } from "./monitor.js";
-import { PreToolUseHook } from "./hooks/preToolUse.js";
 import { Embedder } from "./embedder.js";
 
 // ─── Initialization ──────────────────────────────────────────────────
@@ -33,7 +32,6 @@ const engine = new TokenGuardEngine({
 });
 
 const monitor = new TokenMonitor();
-const hook = new PreToolUseHook();
 
 const server = new McpServer({
     name: "TokenGuard",
@@ -184,8 +182,6 @@ server.tool(
             `     Compression:     ${(engine.getStats().compressionRatio * 100).toFixed(1)}%`,
             "═══════════════════════════════════════════════════",
         ].join("\n");
-
-        const saved = Embedder.estimateTokens(report);
 
         return {
             content: [

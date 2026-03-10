@@ -84,8 +84,8 @@ function preprocess(content: string, filePath: string): { cleaned: string; remov
         text = text.replace(/\/\/[^\n]*/g, "");
     }
 
-    // Strip console.log/warn/error/debug/info/assert/trace/dir statements
-    text = text.replace(/\bconsole\.(log|warn|error|debug|info|assert|trace|dir|table|time|timeEnd|group|groupEnd)\s*\([^)]*\)\s*;?/g, "");
+    // Strip console.log/warn/error/debug/info/assert/trace/dir statements (handles nested parens)
+    text = text.replace(/^\s*console\.(log|warn|error|debug|info|assert|trace|dir|table|time|timeEnd|group|groupEnd)\s*\(.*\)\s*;?\s*$/gm, "");
 
     // Strip Python print() statements
     if (lang === "python") {

@@ -784,15 +784,15 @@ export class TokenGuardDB {
             );
             stmt.bind([id]);
             if (stmt.step()) {
-                const row = stmt.getAsObject() as any;
+                const row = stmt.getAsObject() as Record<string, number | string>;
                 results.push({
-                    id: row.id,
-                    path: row.path,
-                    shorthand: row.shorthand,
-                    raw_code: row.raw_code,
-                    node_type: row.node_type,
-                    start_line: row.start_line,
-                    end_line: row.end_line,
+                    id: row.id as number,
+                    path: row.path as string,
+                    shorthand: row.shorthand as string,
+                    raw_code: row.raw_code as string,
+                    node_type: row.node_type as string,
+                    start_line: row.start_line as number,
+                    end_line: row.end_line as number,
                     rrf_score: rrf,
                 });
             }
@@ -816,8 +816,17 @@ export class TokenGuardDB {
             );
             stmt.bind([rowid]);
             if (stmt.step()) {
-                const row = stmt.getAsObject() as any;
-                results.push({ ...row, rrf_score: 1 - distance });
+                const row = stmt.getAsObject() as Record<string, number | string>;
+                results.push({
+                    id: row.id as number,
+                    path: row.path as string,
+                    shorthand: row.shorthand as string,
+                    raw_code: row.raw_code as string,
+                    node_type: row.node_type as string,
+                    start_line: row.start_line as number,
+                    end_line: row.end_line as number,
+                    rrf_score: 1 - distance,
+                });
             }
             stmt.free();
         }
@@ -862,7 +871,13 @@ export class TokenGuardDB {
 
         let result = { total_input: 0, total_output: 0, total_saved: 0, tool_calls: 0 };
         if (stmt.step()) {
-            result = stmt.getAsObject() as any;
+            const row = stmt.getAsObject() as Record<string, number>;
+            result = {
+                total_input: row.total_input ?? 0,
+                total_output: row.total_output ?? 0,
+                total_saved: row.total_saved ?? 0,
+                tool_calls: row.tool_calls ?? 0,
+            };
         }
         stmt.free();
         return result;
