@@ -3,7 +3,7 @@
 /**
  * index.ts — TokenGuard MCP Server entry point.
  *
- * Exposes 7 MCP tools to Claude Code:
+ * Exposes 8 MCP tools to Claude Code:
  *
  * 1. tg_search  — Hybrid semantic + keyword search (replaces grep)
  * 2. tg_audit   — Token consumption audit for the current session
@@ -11,7 +11,8 @@
  * 4. tg_status  — Burn rate, exhaustion prediction, and alerts
  * 5. tg_session_report — Comprehensive session savings report
  * 6. tg_map     — Static repo map for prompt cache optimization
- * 7. tg_read    — Read file with automatic compression
+ * 7. tg_terminal — Terminal entropy filter for error output
+ * 8. tg_read    — Read file with automatic compression
  *
  * Every tool response appends a savings message:
  *   "[TokenGuard saved ~X tokens on this query]"
@@ -28,6 +29,7 @@ import { TokenMonitor } from "./monitor.js";
 import { Embedder } from "./embedder.js";
 import { safePath } from "./utils/path-jail.js";
 import { shouldProcess } from "./utils/file-filter.js";
+import { filterTerminalOutput } from "./terminal-filter.js";
 
 // ─── Initialization ──────────────────────────────────────────────────
 
@@ -511,7 +513,80 @@ server.tool(
     }
 );
 
-// ─── Tool 7: tg_read ───────────────────────────────────────────────
+// ─── Tool 7: tg_terminal ───────────────────────────────────────────
+
+server.tool(
+    "tg_terminal",
+    "Filters noisy terminal output (npm errors, test failures, build logs). " +
+    "Removes duplicate lines, node_modules stack traces, and ANSI color codes. " +
+    "Returns a clean error summary with affected files. " +
+    "Use this after any failed command to save tokens.",
+    {
+        output: z
+            .string()
+            .describe("Raw terminal output to filter"),
+        max_lines: z
+            .number()
+            .min(1)
+            .max(1000)
+            .default(100)
+            .describe("Maximum lines in filtered output (default 100)"),
+    },
+    async ({ output, max_lines }) => {
+        const result = filterTerminalOutput(output, max_lines);
+
+        engine.logUsage(
+            "tg_terminal",
+            result.filtered_tokens,
+            result.filtered_tokens,
+            Math.max(0, result.original_tokens - result.filtered_tokens)
+        );
+
+        const summaryLines = [
+            `## Terminal Filter Results`,
+            `${result.original_tokens.toLocaleString()} → ${result.filtered_tokens.toLocaleString()} tokens ` +
+            `(${result.reduction_percent}% reduction)`,
+            "",
+        ];
+
+        if (result.error_summary.errorCount > 0) {
+            summaryLines.push(`### Error Summary`);
+            summaryLines.push(`${result.error_summary.summary}`);
+            summaryLines.push("");
+            if (result.error_summary.uniqueErrors.length > 0) {
+                summaryLines.push(`**Unique errors (${result.error_summary.uniqueErrors.length}):**`);
+                for (const err of result.error_summary.uniqueErrors.slice(0, 20)) {
+                    summaryLines.push(`- ${err}`);
+                }
+                summaryLines.push("");
+            }
+            if (result.error_summary.affectedFiles.length > 0) {
+                summaryLines.push(`**Affected files:** ${result.error_summary.affectedFiles.join(", ")}`);
+                summaryLines.push("");
+            }
+        }
+
+        summaryLines.push("### Filtered Output");
+        summaryLines.push("```");
+        summaryLines.push(result.filtered_text);
+        summaryLines.push("```");
+
+        const saved = Math.max(0, result.original_tokens - result.filtered_tokens);
+        summaryLines.push("");
+        summaryLines.push(`[TokenGuard saved ~${saved.toLocaleString()} tokens on this filter]`);
+
+        return {
+            content: [
+                {
+                    type: "text" as const,
+                    text: summaryLines.join("\n"),
+                },
+            ],
+        };
+    }
+);
+
+// ─── Tool 8: tg_read ───────────────────────────────────────────────
 
 server.tool(
     "tg_read",
