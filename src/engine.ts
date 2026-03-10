@@ -22,6 +22,7 @@ import { Compressor, type CompressionResult } from "./compressor.js";
 import { AdvancedCompressor, type CompressionLevel, type AdvancedCompressionResult } from "./compressor-advanced.js";
 import { safePath } from "./utils/path-jail.js";
 import { shouldProcess } from "./utils/file-filter.js";
+import { getOrGenerateRepoMap, type RepoMap } from "./repo-map.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -439,6 +440,15 @@ export class TokenGuardEngine {
             savedUsdOpus: (totalSaved / 1_000_000) * 15,
             byFileType,
         };
+    }
+
+    // ─── Repo Map ──────────────────────────────────────────────────
+
+    /** Generate or return cached static repo map for prompt cache optimization. */
+    async getRepoMap(forceRefresh: boolean = false): Promise<{ map: RepoMap; text: string; fromCache: boolean }> {
+        await this.initialize();
+        const root = this.config.watchPaths[0] || process.cwd();
+        return getOrGenerateRepoMap(root, this.parser, forceRefresh);
     }
 
     // ─── File Watching ────────────────────────────────────────────

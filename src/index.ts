@@ -3,12 +3,15 @@
 /**
  * index.ts — TokenGuard MCP Server entry point.
  *
- * Exposes 4 MCP tools to Claude Code:
+ * Exposes 7 MCP tools to Claude Code:
  *
  * 1. tg_search  — Hybrid semantic + keyword search (replaces grep)
  * 2. tg_audit   — Token consumption audit for the current session
  * 3. tg_compress — Compress a file before reading (saves ~75% tokens)
  * 4. tg_status  — Burn rate, exhaustion prediction, and alerts
+ * 5. tg_session_report — Comprehensive session savings report
+ * 6. tg_map     — Static repo map for prompt cache optimization
+ * 7. tg_read    — Read file with automatic compression
  *
  * Every tool response appends a savings message:
  *   "[TokenGuard saved ~X tokens on this query]"
@@ -465,7 +468,50 @@ server.tool(
     }
 );
 
-// ─── Tool 6: tg_read ───────────────────────────────────────────────
+// ─── Tool 6: tg_map ────────────────────────────────────────────────
+
+server.tool(
+    "tg_map",
+    "Returns a static repo map with all file signatures, exports, and imports. " +
+    "This output is deterministic and cache-friendly — identical text for the same repo state. " +
+    "Use this FIRST before reading any files. Acts as a mental map of the entire codebase. " +
+    "Enables Anthropic prompt caching ($0.30/M vs $3.00/M input tokens).",
+    {
+        refresh: z
+            .boolean()
+            .default(false)
+            .describe("Force regenerate the map even if cached version exists"),
+    },
+    async ({ refresh }) => {
+        await engine.initialize();
+
+        // Index on first call if not already indexed
+        const stats = engine.getStats();
+        if (stats.filesIndexed === 0) {
+            await engine.indexDirectory(process.cwd());
+        }
+
+        const { text, fromCache } = await engine.getRepoMap(refresh);
+        const tokens = Embedder.estimateTokens(text);
+
+        engine.logUsage("tg_map", tokens, tokens, 0);
+
+        return {
+            content: [
+                {
+                    type: "text" as const,
+                    text:
+                        text +
+                        `\n[TokenGuard repo map: ${tokens.toLocaleString()} tokens | ` +
+                        `${fromCache ? "from cache (prompt-cacheable)" : "freshly generated"} | ` +
+                        `This text is deterministic — place it early in context for Anthropic prompt caching]`,
+                },
+            ],
+        };
+    }
+);
+
+// ─── Tool 7: tg_read ───────────────────────────────────────────────
 
 server.tool(
     "tg_read",
@@ -543,6 +589,11 @@ server.tool(
 
             const sessionReport = engine.getSessionReport();
 
+            // For aggressive compression, reference the static repo map
+            const mapHint = level === "aggressive"
+                ? "See tg_map for full project structure. Showing only the requested code:\n\n"
+                : "";
+
             return {
                 content: [
                     {
@@ -551,6 +602,7 @@ server.tool(
                             `## ${path.basename(resolvedPath)} (${level} compression)\n` +
                             `${result.originalSize.toLocaleString()} → ${result.compressedSize.toLocaleString()} chars ` +
                             `(${(result.ratio * 100).toFixed(1)}% reduction)\n\n` +
+                            mapHint +
                             `\`\`\`\n${result.compressed}\n\`\`\`\n\n` +
                             `[TokenGuard saved ~${saved.toLocaleString()} tokens | ` +
                             `Session: ~${sessionReport.totalTokensSaved.toLocaleString()} tokens saved]`,
