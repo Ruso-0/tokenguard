@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/MCP-Plugin-blue?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyem0wIDE4Yy00LjQyIDAtOC0zLjU4LTgtOHMzLjU4LTggOC04IDggMy41OCA4IDgtMy41OCA0LTggOHoiLz48L3N2Zz4=" alt="MCP Plugin">
   <img src="https://img.shields.io/badge/Tools-16-blue?style=for-the-badge" alt="16 Tools">
   <img src="https://img.shields.io/badge/Token%20Savings-91%25-green?style=for-the-badge" alt="91% Savings">
-  <img src="https://img.shields.io/badge/Tests-305%20passed-brightgreen?style=for-the-badge" alt="305 Tests">
+  <img src="https://img.shields.io/badge/Tests-335%20passed-brightgreen?style=for-the-badge" alt="335 Tests">
   <img src="https://img.shields.io/badge/Cloud-Zero-red?style=for-the-badge" alt="Zero Cloud">
   <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="MIT License">
   <img src="https://img.shields.io/badge/TypeScript-5.7-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
@@ -12,12 +12,23 @@
 </p>
 
 <p align="center">
-  <b>16 MCP tools. 305 tests. AST sandbox. Circuit breaker. Surgical edit. Pin memory. Undo. All running locally.</b>
+  <b>16 MCP tools. 335 tests. AST sandbox. Circuit breaker. Surgical edit. Pin memory. Undo. All running locally.</b>
 </p>
 
 <p align="center">
   <img src="https://placehold.co/800x400/1a1a2e/16e0bd?text=TokenGuard+v2.1+Demo&font=montserrat" alt="TokenGuard Demo" width="800">
 </p>
+
+---
+
+### Real-World Validation
+Tested against a 57-file production Next.js + Supabase app (SICAEP):
+- **94.1% token reduction** (tier 1 compression)
+- **10,532 tokens saved** on a single search query
+- **335/335 tests passed** (305 unit + 30 integration)
+- Surgically fixed a real `.single()` → `.maybeSingle()` bug via `tg_semantic_edit`
+- Circuit breaker correctly detected repeated error patterns
+- Path traversal attack (`../../../../etc/passwd`) → **BLOCKED**
 
 ---
 
@@ -166,11 +177,11 @@ Layer 2: Dynamic Context ($3.00/M but tiny per query)
 npx github:Ruso-0/TokenGuard
 ```
 
-Or install globally (once published to npm):
+Or install globally:
 
 ```bash
-npm install -g tokenguard
-npx tokenguard
+npm install -g @ruso-0/tokenguard
+npx @ruso-0/tokenguard
 ```
 
 ### Claude Code Configuration
@@ -178,7 +189,7 @@ npx tokenguard
 **Option A — CLI (recommended):**
 
 ```bash
-claude mcp add tokenguard -- npx tokenguard
+claude mcp add tokenguard -- npx @ruso-0/tokenguard
 ```
 
 **Option B — Manual config** in `.claude.json` or `claude_desktop_config.json`:
@@ -188,7 +199,7 @@ claude mcp add tokenguard -- npx tokenguard
   "mcpServers": {
     "tokenguard": {
       "command": "npx",
-      "args": ["-y", "tokenguard"]
+      "args": ["-y", "@ruso-0/tokenguard"]
     }
   }
 }
