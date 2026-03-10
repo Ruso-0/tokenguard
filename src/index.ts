@@ -23,6 +23,8 @@ import path from "path";
 import { TokenGuardEngine } from "./engine.js";
 import { TokenMonitor } from "./monitor.js";
 import { Embedder } from "./embedder.js";
+import { safePath } from "./utils/path-jail.js";
+import { shouldProcess } from "./utils/file-filter.js";
 
 // ─── Initialization ──────────────────────────────────────────────────
 
@@ -233,7 +235,20 @@ server.tool(
     async ({ file_path, tier, compression_level, focus }) => {
         await engine.initialize();
 
-        const resolvedPath = path.resolve(process.cwd(), file_path);
+        // FIX 1: Path traversal protection
+        let resolvedPath: string;
+        try {
+            resolvedPath = safePath(process.cwd(), file_path);
+        } catch (err) {
+            return {
+                content: [
+                    {
+                        type: "text" as const,
+                        text: `Security error: ${(err as Error).message}\n\n[TokenGuard saved ~0 tokens on this query]`,
+                    },
+                ],
+            };
+        }
 
         try {
             // Advanced compression path
@@ -469,10 +484,36 @@ server.tool(
     async ({ file_path, level }) => {
         await engine.initialize();
 
-        const resolvedPath = path.resolve(process.cwd(), file_path);
+        // FIX 1: Path traversal protection
+        let resolvedPath: string;
+        try {
+            resolvedPath = safePath(process.cwd(), file_path);
+        } catch (err) {
+            return {
+                content: [
+                    {
+                        type: "text" as const,
+                        text: `Security error: ${(err as Error).message}\n\n[TokenGuard saved ~0 tokens]`,
+                    },
+                ],
+            };
+        }
 
         try {
             const stat = fs.statSync(resolvedPath);
+
+            // FIX 7: File size and extension filter
+            const filterResult = shouldProcess(resolvedPath, stat.size);
+            if (!filterResult.process) {
+                return {
+                    content: [
+                        {
+                            type: "text" as const,
+                            text: `File skipped: ${filterResult.reason}\n\n[TokenGuard saved ~0 tokens]`,
+                        },
+                    ],
+                };
+            }
 
             // Skip compression for small files (< 1KB)
             if (stat.size < 1024) {

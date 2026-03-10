@@ -17,6 +17,7 @@ import initSqlJs, { type Database as SqlJsDatabase } from "sql.js";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import { codeTokenize } from "./utils/code-tokenizer.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -63,18 +64,25 @@ export interface TokenStats {
  */
 class VectorIndex {
     private vectors = new Map<number, Float32Array>();
+    private norms = new Map<number, number>();  // FIX 8: Pre-computed norms
 
     insert(rowid: number, embedding: Float32Array): void {
         this.vectors.set(rowid, embedding);
+        // FIX 8: Pre-compute norm at index time
+        let norm = 0;
+        for (let i = 0; i < embedding.length; i++) norm += embedding[i] * embedding[i];
+        this.norms.set(rowid, Math.sqrt(norm));
     }
 
     delete(rowid: number): void {
         this.vectors.delete(rowid);
+        this.norms.delete(rowid);
     }
 
     deleteBulk(rowids: number[]): void {
         for (const id of rowids) {
             this.vectors.delete(id);
+            this.norms.delete(id);
         }
     }
 
@@ -82,6 +90,11 @@ class VectorIndex {
         query: Float32Array,
         limit: number
     ): Array<{ rowid: number; distance: number }> {
+        // FIX 8: Pre-compute query norm
+        let queryNorm = 0;
+        for (let i = 0; i < query.length; i++) queryNorm += query[i] * query[i];
+        queryNorm = Math.sqrt(queryNorm);
+
         const scored: Array<{ rowid: number; distance: number }> = [];
 
         for (const [rowid, vec] of this.vectors) {
@@ -89,7 +102,10 @@ class VectorIndex {
             for (let i = 0; i < query.length; i++) {
                 dot += query[i] * vec[i];
             }
-            scored.push({ rowid, distance: 1 - dot });
+            // FIX 8: Use pre-computed norms for cosine similarity
+            const vecNorm = this.norms.get(rowid) ?? 1;
+            const cosineSim = (queryNorm > 0 && vecNorm > 0) ? dot / (queryNorm * vecNorm) : 0;
+            scored.push({ rowid, distance: 1 - cosineSim });
         }
 
         scored.sort((a, b) => a.distance - b.distance);
@@ -331,14 +347,32 @@ class KeywordIndex {
         "else", "this", "that", "it", "its", "new", "old",
     ]);
 
-    /** Tokenize text into normalized terms. */
+    /** Tokenize text into normalized terms with code-aware splitting. */
     private tokenize(text: string): string[] {
-        return text
-            .toLowerCase()
-            .replace(/[^a-z0-9_]/g, " ")
+        // FIX 5: Apply code-aware tokenizer before stemming
+        const rawTokens = text
+            .replace(/[^a-zA-Z0-9_.]/g, " ")
             .split(/\s+/)
-            .filter((t) => t.length > 1 && !KeywordIndex.STOPWORDS.has(t))
-            .map((t) => this.stem(t));
+            .filter((t) => t.length > 1);
+
+        const allTerms: string[] = [];
+        for (const raw of rawTokens) {
+            // Code-aware tokenization: split identifiers
+            const subTokens = codeTokenize(raw);
+            if (subTokens.length > 0) {
+                for (const sub of subTokens) {
+                    if (sub.length > 1 && !KeywordIndex.STOPWORDS.has(sub)) {
+                        allTerms.push(this.stem(sub));
+                    }
+                }
+            } else {
+                const lower = raw.toLowerCase();
+                if (!KeywordIndex.STOPWORDS.has(lower)) {
+                    allTerms.push(this.stem(lower));
+                }
+            }
+        }
+        return allTerms;
     }
 
     /**

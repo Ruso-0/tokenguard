@@ -347,6 +347,42 @@ function filterTokens(scored: ScoredToken[], level: CompressionLevel): string {
 // ─── Stage 3: Structural Compression ────────────────────────────────
 
 /**
+ * Extract key references from function body code.
+ * Identifies imports, function calls, and important variables.
+ */
+function extractKeyReferences(code: string): string[] {
+    const refs = new Set<string>();
+
+    // Find function/method calls: word(
+    const callMatches = code.matchAll(/\b([a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*)\s*\(/g);
+    for (const m of callMatches) {
+        const name = m[1];
+        // Skip common keywords
+        if (!["if", "for", "while", "switch", "catch", "return", "throw", "new", "await", "function", "class"].includes(name)) {
+            refs.add(name);
+        }
+    }
+
+    // Find imports: from "..."
+    const importMatches = code.matchAll(/from\s+["']([^"']+)["']/g);
+    for (const m of importMatches) {
+        refs.add(m[1]);
+    }
+
+    // Limit to 5 most useful refs
+    return Array.from(refs).slice(0, 5);
+}
+
+/**
+ * Extract the function/class name from a chunk for expand commands.
+ */
+function extractFuncName(chunk: { shorthand: string; nodeType: string }): string {
+    // Try to extract name from shorthand: [func] myFunction(...)
+    const match = chunk.shorthand.match(/\]\s+(\w+)/);
+    return match ? match[1] : chunk.nodeType;
+}
+
+/**
  * For code files, strip function bodies using AST.
  * - aggressive: replace bodies with /* TG compressed *​/
  * - medium: keep only key body lines (return, throw, await, assignments)
@@ -395,9 +431,24 @@ async function structuralCompress(
             }
         }
 
-        // Add each chunk as signature + marker
+        // FIX 4: Add each chunk with informative stubs (progressive disclosure)
         for (const chunk of parseResult.chunks) {
-            parts.push(chunk.shorthand);
+            const bodyLines = chunk.rawCode.split("\n");
+            const bodyLineCount = bodyLines.length;
+
+            // Extract key references from the body
+            const refs = extractKeyReferences(chunk.rawCode);
+            const refsStr = refs.length > 0 ? refs.join(", ") : "none";
+
+            // Determine function/class name for expand command
+            const funcName = extractFuncName(chunk);
+
+            // Build informative stub
+            const fileBase = filePath.replace(/\\/g, "/");
+            const stubComment = `  // [TG: ${bodyLineCount} lines hidden | refs: ${refsStr} | use tg_read("${fileBase}", {expand: "${funcName}"}) to see full body]`;
+
+            parts.push(`${chunk.shorthand}`);
+            parts.push(stubComment);
         }
 
         return parts.join("\n");

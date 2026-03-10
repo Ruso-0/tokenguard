@@ -20,6 +20,8 @@ import { Embedder, getEmbedder } from "./embedder.js";
 import { ASTParser, type ParseResult } from "./parser.js";
 import { Compressor, type CompressionResult } from "./compressor.js";
 import { AdvancedCompressor, type CompressionLevel, type AdvancedCompressionResult } from "./compressor-advanced.js";
+import { safePath } from "./utils/path-jail.js";
+import { shouldProcess } from "./utils/file-filter.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -171,6 +173,19 @@ export class TokenGuardEngine {
     async indexFile(filePath: string): Promise<ParseResult | null> {
         await this.initialize();
 
+        // FIX 7: Check file size and extension before processing
+        let stat: fs.Stats;
+        try {
+            stat = fs.statSync(filePath);
+        } catch {
+            return null;
+        }
+
+        const filterResult = shouldProcess(filePath, stat.size);
+        if (!filterResult.process) {
+            return null;
+        }
+
         // Read file content
         let content: string;
         try {
@@ -243,6 +258,7 @@ export class TokenGuardEngine {
         let errors = 0;
 
         const files = this.walkDirectory(dirPath);
+        let processedCount = 0;
 
         for (const file of files) {
             try {
@@ -257,6 +273,12 @@ export class TokenGuardEngine {
                     `[TokenGuard] Error indexing ${file}: ${(err as Error).message}`
                 );
                 errors++;
+            }
+
+            // FIX 3: Yield event loop every 100 files to avoid blocking
+            processedCount++;
+            if (processedCount % 100 === 0) {
+                await new Promise<void>(resolve => setImmediate(resolve));
             }
         }
 
@@ -342,6 +364,13 @@ export class TokenGuardEngine {
     ): Promise<CompressionResult> {
         await this.initialize();
 
+        // FIX 7: Check file size/extension
+        const stat = fs.statSync(filePath);
+        const filterResult = shouldProcess(filePath, stat.size);
+        if (!filterResult.process) {
+            throw new Error(`File skipped: ${filterResult.reason}`);
+        }
+
         const content = fs.readFileSync(filePath, "utf-8");
         return this.compressor.compress(filePath, content, {
             tier,
@@ -357,6 +386,13 @@ export class TokenGuardEngine {
         level: CompressionLevel = "medium",
     ): Promise<AdvancedCompressionResult> {
         await this.initialize();
+
+        // FIX 7: Check file size/extension
+        const stat = fs.statSync(filePath);
+        const filterResult = shouldProcess(filePath, stat.size);
+        if (!filterResult.process) {
+            throw new Error(`File skipped: ${filterResult.reason}`);
+        }
 
         const content = fs.readFileSync(filePath, "utf-8");
         const result = await this.advancedCompressor.compress(filePath, content, level);

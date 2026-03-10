@@ -12,6 +12,7 @@
 import Parser from "web-tree-sitter";
 import path from "path";
 import { fileURLToPath } from "url";
+import { safeParse } from "./utils/safe-parse.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -220,7 +221,6 @@ export class ASTParser {
         }
 
         this.parser.setLanguage(language);
-        const tree = this.parser.parse(content);
         const query = this.getQuery(ext, language);
 
         if (!query) {
@@ -232,41 +232,44 @@ export class ASTParser {
             };
         }
 
-        const matches = query.matches(tree.rootNode);
-        const chunks: ParsedChunk[] = [];
-        const seen = new Set<string>(); // Deduplicate overlapping captures
+        // Use safeParse to ensure tree.delete() is always called (FIX 2: WASM memory)
+        const chunks = safeParse(this.parser, content, (tree) => {
+            const matches = query.matches(tree.rootNode);
+            const result: ParsedChunk[] = [];
+            const seen = new Set<string>(); // Deduplicate overlapping captures
 
-        for (const match of matches) {
-            // Get the main capture (the one without _name suffix)
-            const mainCapture = match.captures.find(
-                (c) => !c.name.endsWith("_name")
-            );
-            if (!mainCapture) continue;
+            for (const match of matches) {
+                // Get the main capture (the one without _name suffix)
+                const mainCapture = match.captures.find(
+                    (c) => !c.name.endsWith("_name")
+                );
+                if (!mainCapture) continue;
 
-            const node = mainCapture.node;
-            const nodeKey = `${node.startPosition.row}:${node.endPosition.row}`;
+                const node = mainCapture.node;
+                const nodeKey = `${node.startPosition.row}:${node.endPosition.row}`;
 
-            // Skip duplicates from overlapping query patterns
-            if (seen.has(nodeKey)) continue;
-            seen.add(nodeKey);
+                // Skip duplicates from overlapping query patterns
+                if (seen.has(nodeKey)) continue;
+                seen.add(nodeKey);
 
-            const rawCode = node.text;
-            const nodeType = this.normalizeNodeType(mainCapture.name);
-            const startLine = node.startPosition.row + 1; // 1-indexed
-            const endLine = node.endPosition.row + 1;
+                const rawCode = node.text;
+                const nodeType = this.normalizeNodeType(mainCapture.name);
+                const startLine = node.startPosition.row + 1; // 1-indexed
+                const endLine = node.endPosition.row + 1;
 
-            // Generate shorthand: keep signature, collapse body
-            const shorthand = this.generateShorthand(
-                rawCode,
-                nodeType,
-                startLine,
-                endLine
-            );
+                // Generate shorthand: keep signature, collapse body
+                const shorthand = this.generateShorthand(
+                    rawCode,
+                    nodeType,
+                    startLine,
+                    endLine
+                );
 
-            chunks.push({ shorthand, rawCode, nodeType, startLine, endLine });
-        }
+                result.push({ shorthand, rawCode, nodeType, startLine, endLine });
+            }
 
-        tree.delete();
+            return result;
+        });
 
         return {
             filePath,
