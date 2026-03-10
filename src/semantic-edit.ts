@@ -13,6 +13,8 @@ import path from "path";
 import { ASTParser, type ParsedChunk } from "./parser.js";
 import { AstSandbox } from "./ast-sandbox.js";
 import { Embedder } from "./embedder.js";
+import { readSource } from "./utils/read-source.js";
+import { saveBackup } from "./undo.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -123,7 +125,7 @@ export async function semanticEdit(
     // Read file
     let content: string;
     try {
-        content = fs.readFileSync(filePath, "utf-8");
+        content = readSource(filePath);
     } catch (err) {
         return {
             success: false,
@@ -288,6 +290,13 @@ export async function semanticEdit(
             error:
                 `Syntax error in edited code — file NOT modified:\n${errDetails}\n\n${validation.suggestion}`,
         };
+    }
+
+    // Save backup before writing (enables tg_undo)
+    try {
+        saveBackup(process.cwd(), filePath);
+    } catch {
+        // Non-fatal: don't block the edit if backup fails
     }
 
     // Write to disk

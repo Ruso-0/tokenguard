@@ -2,9 +2,9 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/MCP-Plugin-blue?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyem0wIDE4Yy00LjQyIDAtOC0zLjU4LTgtOHMzLjU4LTggOC04IDggMy41OCA4IDgtMy41OCA0LTggOHoiLz48L3N2Zz4=" alt="MCP Plugin">
-  <img src="https://img.shields.io/badge/Tools-15-blue?style=for-the-badge" alt="15 Tools">
+  <img src="https://img.shields.io/badge/Tools-16-blue?style=for-the-badge" alt="16 Tools">
   <img src="https://img.shields.io/badge/Token%20Savings-91%25-green?style=for-the-badge" alt="91% Savings">
-  <img src="https://img.shields.io/badge/Tests-282%20passed-brightgreen?style=for-the-badge" alt="282 Tests">
+  <img src="https://img.shields.io/badge/Tests-305%20passed-brightgreen?style=for-the-badge" alt="305 Tests">
   <img src="https://img.shields.io/badge/Cloud-Zero-red?style=for-the-badge" alt="Zero Cloud">
   <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="MIT License">
   <img src="https://img.shields.io/badge/TypeScript-5.7-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <b>15 MCP tools. 282 tests. AST sandbox. Circuit breaker. Surgical edit. Pin memory. All running locally.</b>
+  <b>16 MCP tools. 305 tests. AST sandbox. Circuit breaker. Surgical edit. Pin memory. Undo. All running locally.</b>
 </p>
 
 <p align="center">
@@ -29,7 +29,7 @@ You're 90 minutes into a Claude Pro session. You've been exploring a codebase, r
 
 ## The Solution
 
-TokenGuard is a **defensive context manager** with 15 MCP tools that sit between you and token waste:
+TokenGuard is a **defensive context manager** with 16 MCP tools that sit between you and token waste:
 
 | What You Do Now | What TokenGuard Does | Savings |
 |---|---|---|
@@ -41,6 +41,7 @@ TokenGuard is a **defensive context manager** with 15 MCP tools that sit between
 | Rewrite entire file to change one function | `tg_semantic_edit` patches only the AST node | **98% output saved** |
 | Claude gets stuck in write-test-fail loops | `tg_circuit_breaker` detects and stops doom loops | **Saves session** |
 | Claude forgets "always use fetch, not axios" | `tg_pin` keeps rules in every response | **Never forgotten** |
+| Surgical edit went wrong, need to revert | `tg_undo` restores the pre-edit backup | **One command** |
 
 ## 3 Features Nobody Else Has
 
@@ -58,21 +59,21 @@ Edits a single function/class/interface by name without reading or rewriting the
 Every `tg_session_report` generates an ASCII receipt showing exactly what TokenGuard saved:
 
 ```
-╔══════════════════════════════════════════════════╗
-║          TOKENGUARD SESSION RECEIPT              ║
-╠══════════════════════════════════════════════════╣
-║  Input Tokens Saved:              12,847    ║
-║  Output Tokens Avoided:           34,291    ║
-║  Search Queries:                      23    ║
-║  Surgical Edits:                       7    ║
-║  Syntax Errors Blocked:               3    ║
-║  Doom Loops Prevented:                1    ║
-║  Pinned Rules Active:                 4    ║
-╠══════════════════════════════════════════════════╣
-║  ESTIMATED SAVINGS:                $1.42    ║
-║  MODEL:                            Opus    ║
-║  TOOLS USED:                    23 calls    ║
-╚══════════════════════════════════════════════════╝
++--------------------------------------------------+
+|          TOKENGUARD SESSION RECEIPT               |
++--------------------------------------------------+
+|  Input Tokens Saved:              12,847    |
+|  Output Tokens Avoided:           34,291    |
+|  Search Queries:                      23    |
+|  Surgical Edits:                       7    |
+|  Syntax Errors Blocked:               3    |
+|  Doom Loops Prevented:                1    |
+|  Pinned Rules Active:                 4    |
++--------------------------------------------------+
+|  ESTIMATED SAVINGS:                $1.42    |
+|  MODEL:                            Opus    |
+|  TOOLS USED:                    23 calls    |
++--------------------------------------------------+
 ```
 
 ## Two-Layer Architecture
@@ -82,7 +83,7 @@ TokenGuard uses a cache-friendly two-layer design that exploits Anthropic's prom
 ```
 Layer 1: Static Context (cached at $0.30/M input tokens)
 ├── tg_map — deterministic repo map (identical output for same repo state)
-├── tg_pin — pinned rules prepended to every map response
+├── tg_pin — pinned rules appended to every map response
 ├── File signatures, exports, imports
 └── Place early in context -> Anthropic caches it automatically
 
@@ -91,12 +92,13 @@ Layer 2: Dynamic Context ($3.00/M but tiny per query)
 ├── tg_def / tg_refs / tg_outline -> AST-precise navigation
 ├── tg_compress / tg_read -> compressed file content
 ├── tg_semantic_edit -> surgical AST patching
+├── tg_undo -> revert last semantic edit
 ├── tg_validate -> syntax check before write
 ├── tg_circuit_breaker -> doom loop detection
 └── tg_terminal -> filtered error output
 ```
 
-## All 15 Tools
+## All 16 Tools
 
 ### Search & Navigation
 
@@ -115,6 +117,7 @@ Layer 2: Dynamic Context ($3.00/M but tiny per query)
 | **`tg_read`** | Drop-in replacement for Read. Auto-compresses files > 1KB. Three levels: light/medium/aggressive. |
 | **`tg_compress`** | Full-control compression. LLMLingua-2-inspired 3-stage pipeline or classic tiers. Focus mode ranks by query. |
 | **`tg_semantic_edit`** | Surgically edit a function/class by name. Replaces only the AST node bytes. Validates syntax before saving. 98% output token savings. |
+| **`tg_undo`** | Undo the last `tg_semantic_edit` on a file. Restores from auto-backup. One-shot: backup is consumed after restore. |
 
 ### Validation & Safety
 
@@ -142,8 +145,8 @@ Layer 2: Dynamic Context ($3.00/M but tiny per query)
 
 | Feature | TokenGuard | GrepAI | Claude Context | Aider |
 |---|:---:|:---:|:---:|:---:|
-| MCP tools | 15 | ~3 | 4 | N/A |
-| Tests | 282 | ~20 | ~50 | ~200 |
+| MCP tools | 16 | ~3 | 4 | N/A |
+| Tests | 305 | ~20 | ~50 | ~200 |
 | AST sandbox | Yes | No | No | No |
 | Circuit breaker | Yes | No | No | No |
 | Surgical edit | Yes | No | No | No |
@@ -220,7 +223,7 @@ tg_session_report
 
 ## Stress Tested
 
-**282 tests. 0 failures. 11 test suites.**
+**305 tests. 0 failures. 11 test suites.**
 
 | Scenario | What We Tested | Result |
 |---|---|---|
@@ -259,7 +262,7 @@ tg_session_report
 └────────────────────────┬────────────────────────────────────┘
                          │ stdio
 ┌────────────────────────▼────────────────────────────────────┐
-│                TokenGuard MCP Server (15 tools)              │
+│                TokenGuard MCP Server (16 tools)              │
 │                                                              │
 │  Layer 1: Static Context (prompt-cacheable)                  │
 │  ┌───────────────────────────────────────────────────────┐   │
@@ -271,7 +274,7 @@ tg_session_report
 │  ┌──────────┬──────────┬──────────┬───────────┬──────────┐  │
 │  │tg_search │tg_def    │tg_read   │tg_validate│tg_status │  │
 │  │tg_compress│tg_refs  │tg_terminal│tg_audit  │tg_report │  │
-│  │tg_sem_ed │tg_outline│tg_circuit│tg_pin    │          │  │
+│  │tg_sem_ed │tg_outline│tg_circuit│tg_pin    │tg_undo   │  │
 │  └────┬─────┴────┬─────┴────┬─────┴─────┬─────┴────┬─────┘  │
 │       │          │          │           │          │         │
 │  ┌────▼──────────▼──────────▼───────────▼──────────▼─────┐  │

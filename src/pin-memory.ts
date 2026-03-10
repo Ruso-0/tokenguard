@@ -67,6 +67,18 @@ function nextId(pins: PinnedRule[]): string {
     return `pin_${String(maxNum + 1).padStart(3, "0")}`;
 }
 
+// ─── XML Escaping ────────────────────────────────────────────────
+
+/** Escape XML/HTML special characters to prevent prompt injection. */
+function escapePinContent(text: string): string {
+    return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&apos;");
+}
+
 // ─── Public API ──────────────────────────────────────────────────────
 
 export function addPin(
@@ -96,7 +108,7 @@ export function addPin(
 
     const pin: PinnedRule = {
         id: nextId(pins),
-        text: text.trim(),
+        text: escapePinContent(text.trim()),
         createdAt: Date.now(),
         source,
     };

@@ -2,6 +2,37 @@
 
 All notable changes to TokenGuard will be documented in this file.
 
+## [2.1.1] - 2026-03-10
+
+### Headline
+TokenGuard v2.1.1 — Final audit fixes, tg_undo, 16 tools, 305 tests.
+
+### Added — New Tool
+- **`tg_undo`** — Undo the last `tg_semantic_edit` on a file. Auto-restores from backup with one-shot semantics (backup is consumed after restore).
+
+### Added — New Module
+- `src/undo.ts` — Backup/restore engine using base64url-encoded file paths. Stores pre-edit snapshots in `.tokenguard/backups/`.
+- `src/utils/read-source.ts` — Shared BOM-safe file reader. Strips U+FEFF byte order marks from Windows-created source files.
+
+### Security
+- **FIX 2 — XML injection prevention**: Pin content is now escaped (`&`, `<`, `>`, `"`, `'`) before storage to prevent prompt injection via pinned rules.
+
+### Fixed
+- **FIX 1 — BOM stripping**: All source file readers now use `readSource()` to strip U+FEFF BOM, fixing parse failures on Windows-created files.
+- **FIX 3 — Code tokenizer**: Rewritten to correctly handle `$scope`, `__proto__`, `_privateVar`, and other edge-case identifiers with `$`/`_` prefixes.
+- **FIX 4 — Fast dot product**: Replaced cosine similarity with direct dot product for L2-normalized vectors. Removes sqrt/division overhead; mathematically equivalent for unit vectors.
+- **FIX 6 — Pin order**: Pinned rules now appear AFTER repo map text (was before). Preserves Anthropic prompt cache hits since the static map stays at the start of context.
+- **FIX 7 — Circuit breaker normalization**: `hashError()` now normalizes ISO timestamps and improved memory address normalization. Added 5-minute TTL eviction to prevent stale errors from tripping the breaker.
+- **FIX 8 — ASCII receipt**: Replaced all Unicode box-drawing characters and emojis in session receipt and reports with ASCII equivalents for terminal compatibility.
+
+### Changed
+- **Tool count**: 15 -> 16 MCP tools.
+- **Test count**: 282 -> 305 tests across 11 test suites.
+- **tg_map**: Pinned rules now appended after repo map (was prepended before).
+- **package.json**: Version bumped to 2.1.1.
+
+---
+
 ## [2.1.0] - 2026-03-10
 
 ### Headline

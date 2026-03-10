@@ -211,7 +211,7 @@ describe("Pin Memory — getPinnedText()", () => {
 });
 
 describe("Pin Memory — tg_map Integration", () => {
-    it("should prepend pinned rules to repo map text", async () => {
+    it("should append pinned rules after repo map text", async () => {
         addPin(testDir, "Always use fetch", "user");
         addPin(testDir, "Use Tailwind, not CSS modules", "claude");
 
@@ -219,13 +219,13 @@ describe("Pin Memory — tg_map Integration", () => {
         const mapText = repoMapToText(map);
         const pinnedText = getPinnedText(testDir);
 
-        const fullText = pinnedText + mapText;
+        // FIX 6: repo map first, pins after (preserves prompt cache)
+        const fullText = mapText + "\n" + pinnedText;
 
-        // Pinned rules should come before the repo map header
-        const pinIdx = fullText.indexOf("=== PINNED RULES");
         const mapIdx = fullText.indexOf("=== Repo Map");
-        expect(pinIdx).toBeGreaterThanOrEqual(0);
-        expect(mapIdx).toBeGreaterThan(pinIdx);
+        const pinIdx = fullText.indexOf("=== PINNED RULES");
+        expect(mapIdx).toBeGreaterThanOrEqual(0);
+        expect(pinIdx).toBeGreaterThan(mapIdx);
     });
 
     it("should not affect repo map when no pins exist", async () => {

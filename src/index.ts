@@ -42,6 +42,8 @@ import { AstSandbox } from "./ast-sandbox.js";
 import { CircuitBreaker } from "./circuit-breaker.js";
 import { semanticEdit } from "./semantic-edit.js";
 import { addPin, removePin, listPins, getPinnedText } from "./pin-memory.js";
+import { readSource } from "./utils/read-source.js";
+import { restoreBackup } from "./undo.js";
 
 // ─── Initialization ──────────────────────────────────────────────────
 
@@ -176,9 +178,9 @@ server.tool(
         const prediction = monitor.predictExhaustion();
 
         const report = [
-            "═══════════════════════════════════════════════════",
+            "===================================================",
             "  TokenGuard — Token Consumption Audit",
-            "═══════════════════════════════════════════════════",
+            "===================================================",
             "",
             "  📊 Session Overview (from Claude usage log):",
             `     Input tokens:    ${burnRate.inputTokens.toLocaleString()}`,
@@ -201,7 +203,7 @@ server.tool(
             `     Files indexed:   ${engine.getStats().filesIndexed}`,
             `     AST chunks:      ${engine.getStats().totalChunks}`,
             `     Compression:     ${(engine.getStats().compressionRatio * 100).toFixed(1)}%`,
-            "═══════════════════════════════════════════════════",
+            "===================================================",
         ].join("\n");
 
         return {
@@ -466,27 +468,27 @@ server.tool(
 
         const receipt = [
             "",
-            "╔══════════════════════════════════════════════════╗",
-            "║          TOKENGUARD SESSION RECEIPT              ║",
-            "╠══════════════════════════════════════════════════╣",
-            `║  Input Tokens Saved:      ${pad(sessionReport.totalTokensSaved.toLocaleString(), 16)}    ║`,
-            `║  Output Tokens Avoided:   ${pad(usageStats.total_saved.toLocaleString(), 16)}    ║`,
-            `║  Search Queries:          ${pad(usageStats.tool_calls, 16)}    ║`,
-            `║  Surgical Edits:          ${pad(cbStats.totalToolCalls, 16)}    ║`,
-            `║  Syntax Errors Blocked:   ${pad(cbStats.loopsPrevented, 16)}    ║`,
-            `║  Doom Loops Prevented:    ${pad(cbStats.loopsDetected, 16)}    ║`,
-            `║  Pinned Rules Active:     ${pad(pins.length, 16)}    ║`,
-            "╠══════════════════════════════════════════════════╣",
-            `║  ESTIMATED SAVINGS:       ${pad("$" + usdStr, 16)}    ║`,
-            `║  MODEL:                   ${pad(modelName, 16)}    ║`,
-            `║  TOOLS USED:              ${pad(usageStats.tool_calls + " calls", 16)}    ║`,
-            "╚══════════════════════════════════════════════════╝",
+            "+--------------------------------------------------+",
+            "|          TOKENGUARD SESSION RECEIPT               |",
+            "+--------------------------------------------------+",
+            `|  Input Tokens Saved:      ${pad(sessionReport.totalTokensSaved.toLocaleString(), 16)}    |`,
+            `|  Output Tokens Avoided:   ${pad(usageStats.total_saved.toLocaleString(), 16)}    |`,
+            `|  Search Queries:          ${pad(usageStats.tool_calls, 16)}    |`,
+            `|  Surgical Edits:          ${pad(cbStats.totalToolCalls, 16)}    |`,
+            `|  Syntax Errors Blocked:   ${pad(cbStats.loopsPrevented, 16)}    |`,
+            `|  Doom Loops Prevented:    ${pad(cbStats.loopsDetected, 16)}    |`,
+            `|  Pinned Rules Active:     ${pad(pins.length, 16)}    |`,
+            "+--------------------------------------------------+",
+            `|  ESTIMATED SAVINGS:       ${pad("$" + usdStr, 16)}    |`,
+            `|  MODEL:                   ${pad(modelName, 16)}    |`,
+            `|  TOOLS USED:              ${pad(usageStats.tool_calls + " calls", 16)}    |`,
+            "+--------------------------------------------------+",
         ].join("\n");
 
         const report = [
-            "═══════════════════════════════════════════════════",
+            "===================================================",
             "  TokenGuard — Session Report",
-            "═══════════════════════════════════════════════════",
+            "===================================================",
             "",
             `  Session Duration:     ${sessionReport.durationMinutes} min`,
             `  Total Tokens Saved:   ${sessionReport.totalTokensSaved.toLocaleString()}`,
@@ -505,7 +507,7 @@ server.tool(
             `  Prediction:           ${prediction.message}`,
             "",
             `  Model Recommendation: ${modelRec}`,
-            "═══════════════════════════════════════════════════",
+            "===================================================",
         ].join("\n");
 
         return {
@@ -544,9 +546,10 @@ server.tool(
 
         const { text, fromCache } = await engine.getRepoMap(refresh);
 
-        // Prepend pinned rules so they're always in Claude's attention window
+        // Append pinned rules AFTER repo map so the static map text stays
+        // at the start of context — preserving Anthropic prompt cache hits.
         const pinnedText = getPinnedText(process.cwd());
-        const fullText = pinnedText + text;
+        const fullText = text + (pinnedText ? "\n" + pinnedText : "");
         const tokens = Embedder.estimateTokens(fullText);
 
         engine.logUsage("tg_map", tokens, tokens, 0);
@@ -858,7 +861,7 @@ server.tool(
 
         // Estimate savings: reading full file vs outline
         try {
-            const fullContent = fs.readFileSync(resolvedPath, "utf-8");
+            const fullContent = readSource(resolvedPath);
             const fullTokens = Embedder.estimateTokens(fullContent);
             const saved = Math.max(0, fullTokens - outlineTokens);
 
@@ -935,7 +938,7 @@ server.tool(
 
             // Skip compression for small files (< 1KB)
             if (stat.size < 1024) {
-                const content = fs.readFileSync(resolvedPath, "utf-8");
+                const content = readSource(resolvedPath);
                 return {
                     content: [
                         {
@@ -1023,7 +1026,7 @@ server.tool(
         if (file_path) {
             try {
                 const resolvedPath = safePath(process.cwd(), file_path);
-                const original = fs.readFileSync(resolvedPath, "utf-8");
+                const original = readSource(resolvedPath);
                 result = await sandbox.validateDiff(original, code, language);
             } catch {
                 // File doesn't exist or path error — validate code only
@@ -1391,6 +1394,56 @@ server.tool(
                 },
             ],
         };
+    }
+);
+
+// ─── Tool 16: tg_undo ───────────────────────────────────────────────
+
+server.tool(
+    "tg_undo",
+    "Undo the last tg_semantic_edit on a file. " +
+    "Restores the file to its state before the edit. " +
+    "Only one level of undo is available per file.",
+    {
+        file: z
+            .string()
+            .describe("File path to restore (same path used in tg_semantic_edit)"),
+    },
+    async ({ file }) => {
+        let resolvedPath: string;
+        try {
+            resolvedPath = safePath(process.cwd(), file);
+        } catch (err) {
+            return {
+                content: [
+                    {
+                        type: "text" as const,
+                        text: `Security error: ${(err as Error).message}\n\n[TokenGuard saved ~0 tokens]`,
+                    },
+                ],
+            };
+        }
+
+        try {
+            const message = restoreBackup(process.cwd(), resolvedPath);
+            return {
+                content: [
+                    {
+                        type: "text" as const,
+                        text: `## tg_undo: SUCCESS\n\n${message}\n\n[TokenGuard: file restored]`,
+                    },
+                ],
+            };
+        } catch (err) {
+            return {
+                content: [
+                    {
+                        type: "text" as const,
+                        text: `## tg_undo: FAILED\n\n${(err as Error).message}\n\n[TokenGuard saved ~0 tokens]`,
+                    },
+                ],
+            };
+        }
     }
 );
 

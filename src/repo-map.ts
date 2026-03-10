@@ -11,6 +11,7 @@ import path from "path";
 import crypto from "crypto";
 import { ASTParser } from "./parser.js";
 import { shouldProcess } from "./utils/file-filter.js";
+import { readSource } from "./utils/read-source.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -234,7 +235,7 @@ export async function generateRepoMap(
     for (const filePath of files) {
         let content: string;
         try {
-            content = fs.readFileSync(filePath, "utf-8");
+            content = readSource(filePath);
         } catch {
             continue;
         }

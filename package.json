@@ -1,6 +1,6 @@
 {
   "name": "tokenguard",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "MCP plugin for Claude Code that optimizes and reduces token consumption automatically via semantic search, AST compression, and proactive monitoring.",
   "main": "dist/index.js",
   "type": "module",

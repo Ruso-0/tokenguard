@@ -14,6 +14,7 @@
 import fs from "fs";
 import path from "path";
 import { Embedder } from "../embedder.js";
+import { readSource } from "../utils/read-source.js";
 import type { CompressionLevel } from "../compressor-advanced.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
@@ -101,7 +102,7 @@ export class PreToolUseHook {
         }
 
         // Estimate token waste using advanced compression ratios
-        const content = fs.readFileSync(filePath, "utf-8");
+        const content = readSource(filePath);
         const fullTokens = Embedder.estimateTokens(content);
 
         // Advanced compression ratios by level

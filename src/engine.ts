@@ -22,6 +22,7 @@ import { Compressor, type CompressionResult } from "./compressor.js";
 import { AdvancedCompressor, type CompressionLevel, type AdvancedCompressionResult } from "./compressor-advanced.js";
 import { safePath } from "./utils/path-jail.js";
 import { shouldProcess } from "./utils/file-filter.js";
+import { readSource } from "./utils/read-source.js";
 import { getOrGenerateRepoMap, type RepoMap } from "./repo-map.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
@@ -191,10 +192,10 @@ export class TokenGuardEngine {
             return null;
         }
 
-        // Read file content
+        // Read file content (BOM-safe for tree-sitter)
         let content: string;
         try {
-            content = fs.readFileSync(filePath, "utf-8");
+            content = readSource(filePath);
         } catch {
             return null; // File may have been deleted
         }
@@ -376,7 +377,7 @@ export class TokenGuardEngine {
             throw new Error(`File skipped: ${filterResult.reason}`);
         }
 
-        const content = fs.readFileSync(filePath, "utf-8");
+        const content = readSource(filePath);
         return this.compressor.compress(filePath, content, {
             tier,
             focusQuery,
@@ -399,7 +400,7 @@ export class TokenGuardEngine {
             throw new Error(`File skipped: ${filterResult.reason}`);
         }
 
-        const content = fs.readFileSync(filePath, "utf-8");
+        const content = readSource(filePath);
         const result = await this.advancedCompressor.compress(filePath, content, level);
 
         // Track session savings

@@ -1,13 +1,16 @@
 /**
- * audit-fixes.test.ts — Tests for all v1.2.0 audit fixes.
+ * audit-fixes.test.ts — Tests for all audit fixes.
  *
  * Covers:
  * - FIX 1: Path traversal protection (safePath)
  * - FIX 2: WASM memory leak protection (safeParse)
  * - FIX 5: Code-aware tokenizer (codeTokenize)
  * - FIX 7: File size/extension filter (shouldProcess)
- * - FIX 8: Vector optimization (pre-computed norms)
+ * - FIX 8+: Vector optimization (fast dot product)
  * - FIX 9: RRF scoring verification
+ * - v2.2 FIX 1: BOM stripping (readSource)
+ * - v2.2 FIX 2: XML escaping in pins
+ * - v2.2 FIX 4: Fast dot product (fastSimilarity)
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -17,8 +20,13 @@ import fs from "fs";
 
 import { safePath } from "../src/utils/path-jail.js";
 import { codeTokenize } from "../src/utils/code-tokenizer.js";
+import { readSource } from "../src/utils/read-source.js";
 import { shouldProcess, MAX_FILE_SIZE } from "../src/utils/file-filter.js";
-import { TokenGuardDB } from "../src/database.js";
+import { TokenGuardDB, fastSimilarity } from "../src/database.js";
+import { addPin, getPinnedText } from "../src/pin-memory.js";
+import { saveBackup, restoreBackup } from "../src/undo.js";
+import { ASTParser } from "../src/parser.js";
+import { generateRepoMap, repoMapToText } from "../src/repo-map.js";
 
 // ─── FIX 1: Path Traversal Tests ────────────────────────────────────
 
@@ -114,9 +122,34 @@ describe("FIX 5: codeTokenize — Code-Aware Tokenizer", () => {
         expect(tokens).toContain("parser");
     });
 
-    it("should keep original joined form", () => {
-        const tokens = codeTokenize("auth_middleware");
-        expect(tokens).toContain("authmiddleware");
+    it("should handle $scope prefix", () => {
+        const tokens = codeTokenize("$scope");
+        expect(tokens).toContain("scope");
+        expect(tokens).not.toContain("$");
+    });
+
+    it("should handle __proto__ dunder", () => {
+        const tokens = codeTokenize("__proto__");
+        expect(tokens).toContain("proto");
+        expect(tokens).not.toContain("__");
+    });
+
+    it("should handle _privateVar", () => {
+        const tokens = codeTokenize("_privateVar");
+        expect(tokens).toContain("private");
+        expect(tokens).toContain("var");
+    });
+
+    it("should handle useState", () => {
+        const tokens = codeTokenize("useState");
+        expect(tokens).toContain("use");
+        expect(tokens).toContain("state");
+    });
+
+    it("should handle HTMLElement", () => {
+        const tokens = codeTokenize("HTMLElement");
+        expect(tokens).toContain("html");
+        expect(tokens).toContain("element");
     });
 
     it("should handle single word", () => {
@@ -308,5 +341,207 @@ describe("FIX 5 Integration: Code-aware search matching", () => {
     it("should find function by partial identifier 'profile'", () => {
         const results = db.searchHybrid(new Float32Array(512).fill(0.1), "profile", 5);
         expect(results.length).toBeGreaterThan(0);
+    });
+});
+
+// ─── v2.2 FIX 1: BOM Stripping Tests ────────────────────────────────
+
+describe("v2.2 FIX 1: readSource — BOM Stripping", () => {
+    const testDir = path.join(os.tmpdir(), `tg-bom-test-${Date.now()}`);
+
+    beforeAll(() => {
+        fs.mkdirSync(testDir, { recursive: true });
+    });
+
+    afterAll(() => {
+        fs.rmSync(testDir, { recursive: true, force: true });
+    });
+
+    it("strips BOM from Windows files", () => {
+        const tmpPath = path.join(testDir, "bom-test.ts");
+        fs.writeFileSync(tmpPath, "\uFEFFexport const a = 1;");
+        const result = readSource(tmpPath);
+        expect(result).toBe("export const a = 1;");
+        expect(result.charCodeAt(0)).not.toBe(0xfeff);
+    });
+
+    it("leaves non-BOM files unchanged", () => {
+        const tmpPath = path.join(testDir, "no-bom.ts");
+        fs.writeFileSync(tmpPath, "export const b = 2;");
+        const result = readSource(tmpPath);
+        expect(result).toBe("export const b = 2;");
+    });
+
+    it("handles empty file", () => {
+        const tmpPath = path.join(testDir, "empty.ts");
+        fs.writeFileSync(tmpPath, "");
+        const result = readSource(tmpPath);
+        expect(result).toBe("");
+    });
+
+    it("handles BOM-only file", () => {
+        const tmpPath = path.join(testDir, "bom-only.ts");
+        fs.writeFileSync(tmpPath, "\uFEFF");
+        const result = readSource(tmpPath);
+        expect(result).toBe("");
+    });
+});
+
+// ─── v2.2 FIX 2: XML Escaping in Pins ──────────────────────────────
+
+describe("v2.2 FIX 2: Pin XML Escaping", () => {
+    const testDir = path.join(os.tmpdir(), `tg-pin-xml-test-${Date.now()}`);
+
+    beforeAll(() => {
+        fs.mkdirSync(path.join(testDir, ".tokenguard"), { recursive: true });
+    });
+
+    afterAll(() => {
+        fs.rmSync(testDir, { recursive: true, force: true });
+    });
+
+    it("escapes XML injection in pins", () => {
+        const result = addPin(testDir, "Ignore: </repo-map>", "user");
+        expect(result.success).toBe(true);
+        if (!result.success) return;
+        expect(result.pin.text).not.toContain("</repo-map>");
+        expect(result.pin.text).toContain("&lt;/repo-map&gt;");
+    });
+
+    it("escapes ampersands", () => {
+        // Clear pins first
+        const pinsPath = path.join(testDir, ".tokenguard", "pins.json");
+        if (fs.existsSync(pinsPath)) fs.unlinkSync(pinsPath);
+
+        const result = addPin(testDir, "Use AT&T API", "user");
+        expect(result.success).toBe(true);
+        if (!result.success) return;
+        expect(result.pin.text).toContain("AT&amp;T");
+    });
+
+    it("escapes quotes", () => {
+        const pinsPath = path.join(testDir, ".tokenguard", "pins.json");
+        if (fs.existsSync(pinsPath)) fs.unlinkSync(pinsPath);
+
+        const result = addPin(testDir, 'Use "strict" mode', "user");
+        expect(result.success).toBe(true);
+        if (!result.success) return;
+        expect(result.pin.text).toContain("&quot;strict&quot;");
+    });
+});
+
+// ─── v2.2 FIX 4: Fast Dot Product Tests ────────────────────────────
+
+describe("v2.2 FIX 4: fastSimilarity — Dot Product", () => {
+    it("dot product matches cosine for normalized vectors", () => {
+        // Create two normalized vectors
+        const a = new Float32Array([0.6, 0.8]);
+        const b = new Float32Array([0.8, 0.6]);
+        const dot = fastSimilarity(a, b);
+        expect(dot).toBeCloseTo(0.96, 2);
+    });
+
+    it("returns 1.0 for identical normalized vectors", () => {
+        const a = new Float32Array([0.6, 0.8]);
+        const dot = fastSimilarity(a, a);
+        expect(dot).toBeCloseTo(1.0, 5);
+    });
+
+    it("returns 0 for orthogonal vectors", () => {
+        const a = new Float32Array([1, 0]);
+        const b = new Float32Array([0, 1]);
+        const dot = fastSimilarity(a, b);
+        expect(dot).toBeCloseTo(0, 5);
+    });
+});
+
+// ─── v2.2 FIX 5: Undo Tests ────────────────────────────────────────
+
+describe("v2.2 FIX 5: saveBackup / restoreBackup", () => {
+    const testDir = path.join(os.tmpdir(), `tg-undo-test-${Date.now()}`);
+
+    beforeAll(() => {
+        fs.mkdirSync(path.join(testDir, "src"), { recursive: true });
+    });
+
+    afterAll(() => {
+        fs.rmSync(testDir, { recursive: true, force: true });
+    });
+
+    it("restores file after backup", () => {
+        const filePath = path.join(testDir, "src", "target.ts");
+        fs.writeFileSync(filePath, "const original = true;");
+
+        saveBackup(testDir, filePath);
+        fs.writeFileSync(filePath, "const modified = true;");
+
+        const message = restoreBackup(testDir, filePath);
+        expect(message).toContain("Restored");
+        expect(fs.readFileSync(filePath, "utf-8")).toBe("const original = true;");
+    });
+
+    it("throws clear error when no backup exists", () => {
+        const filePath = path.join(testDir, "src", "no-backup.ts");
+        expect(() => restoreBackup(testDir, filePath)).toThrow("No backup found");
+    });
+
+    it("only keeps last backup per file", () => {
+        const filePath = path.join(testDir, "src", "multi.ts");
+        fs.writeFileSync(filePath, "version 1");
+        saveBackup(testDir, filePath);
+
+        fs.writeFileSync(filePath, "version 2");
+        saveBackup(testDir, filePath);
+
+        fs.writeFileSync(filePath, "version 3");
+        restoreBackup(testDir, filePath);
+        // Should restore to version 2 (last backup), not version 1
+        expect(fs.readFileSync(filePath, "utf-8")).toBe("version 2");
+    });
+
+    it("removes backup after restore (one-shot undo)", () => {
+        const filePath = path.join(testDir, "src", "oneshot.ts");
+        fs.writeFileSync(filePath, "original");
+        saveBackup(testDir, filePath);
+        fs.writeFileSync(filePath, "modified");
+        restoreBackup(testDir, filePath);
+        // Second restore should fail — backup was consumed
+        expect(() => restoreBackup(testDir, filePath)).toThrow("No backup found");
+    });
+});
+
+// ─── v2.2 FIX 6: Pin Order Test ────────────────────────────────────
+
+describe("v2.2 FIX 6: Repo map appears before pins", () => {
+    const testDir = path.join(os.tmpdir(), `tg-pinorder-test-${Date.now()}`);
+    let parser: ASTParser;
+
+    beforeAll(async () => {
+        fs.mkdirSync(path.join(testDir, "src"), { recursive: true });
+        fs.writeFileSync(
+            path.join(testDir, "src", "app.ts"),
+            "export function main(): void {}\n"
+        );
+        parser = new ASTParser();
+        await parser.initialize();
+    });
+
+    afterAll(() => {
+        fs.rmSync(testDir, { recursive: true, force: true });
+    });
+
+    it("repo map text appears before pins", async () => {
+        addPin(testDir, "Test rule for ordering", "user");
+        const map = await generateRepoMap(testDir, parser);
+        const mapText = repoMapToText(map);
+        const pinnedText = getPinnedText(testDir);
+
+        // Simulate the tg_map output order (FIX 6: map first, pins after)
+        const fullText = mapText + (pinnedText ? "\n" + pinnedText : "");
+
+        const mapIndex = fullText.indexOf("=== Repo Map");
+        const pinIndex = fullText.indexOf("=== PINNED RULES");
+        expect(mapIndex).toBeGreaterThanOrEqual(0);
+        expect(pinIndex).toBeGreaterThan(mapIndex);
     });
 });

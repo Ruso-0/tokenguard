@@ -10,6 +10,7 @@ import fs from "fs";
 import path from "path";
 import { ASTParser, type ParsedChunk } from "./parser.js";
 import { shouldProcess } from "./utils/file-filter.js";
+import { readSource } from "./utils/read-source.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -211,7 +212,7 @@ export async function findDefinition(
 
         let content: string;
         try {
-            content = fs.readFileSync(filePath, "utf-8");
+            content = readSource(filePath);
         } catch {
             continue;
         }
@@ -266,7 +267,7 @@ export async function findReferences(
     for (const filePath of files) {
         let content: string;
         try {
-            content = fs.readFileSync(filePath, "utf-8");
+            content = readSource(filePath);
         } catch {
             continue;
         }
@@ -308,7 +309,7 @@ export async function getFileSymbols(
 
     let content: string;
     try {
-        content = fs.readFileSync(filePath, "utf-8");
+        content = readSource(filePath);
     } catch {
         return [];
     }

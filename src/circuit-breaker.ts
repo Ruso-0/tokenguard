@@ -54,6 +54,9 @@ const WRITE_TEST_FAIL_THRESHOLD = 3;
 // Average tokens burned per failed loop iteration (write + test + read error)
 const TOKENS_PER_FAILED_ITERATION = 2000;
 
+// TTL for history entries (5 minutes)
+const HISTORY_TTL_MS = 300_000;
+
 // ─── Error Hashing ──────────────────────────────────────────────────
 
 /**
@@ -62,13 +65,14 @@ const TOKENS_PER_FAILED_ITERATION = 2000;
  * (e.g., same type error in different locations) hashes identically.
  */
 export function hashError(errorText: string): string {
-    // Normalize: strip line/col numbers, timestamps, ANSI codes
+    // Normalize: strip line/col numbers, timestamps, ANSI codes, addresses
     const normalized = errorText
-        .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")     // ANSI
-        .replace(/:\d+:\d+/g, ":L:C")                // line:col
-        .replace(/line \d+/gi, "line N")              // "line 42"
-        .replace(/\d{13,}/g, "TS")                    // epoch timestamps
-        .replace(/0x[a-fA-F0-9]+/gi, "0xADDR")       // memory addresses
+        .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")                  // ANSI
+        .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z?/g, "[TIME]")      // ISO timestamps
+        .replace(/:\d+:\d+/g, ":[L]:[C]")                        // line:col
+        .replace(/line \d+/gi, "line N")                          // "line 42"
+        .replace(/\d{13,}/g, "[TS]")                              // epoch timestamps
+        .replace(/0x[a-fA-F0-9]+/gi, "[MEM]")                    // memory addresses
         .trim();
 
     return crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 16);
@@ -166,6 +170,12 @@ export class CircuitBreaker {
                 reason: this.state.tripReason!,
             };
         }
+
+        // TTL eviction: remove entries older than 5 minutes
+        const now = Date.now();
+        this.state.history = this.state.history.filter(
+            (r) => now - r.timestamp <= HISTORY_TTL_MS
+        );
 
         const history = this.state.history;
 

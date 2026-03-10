@@ -299,22 +299,22 @@ export class TokenMonitor {
         const prediction = this.predictExhaustion();
 
         const lines = [
-            "═══════════════════════════════════════════",
-            "  TokenGuard — Session Status Report",
-            "═══════════════════════════════════════════",
+            "===========================================",
+            "  TokenGuard -- Session Status Report",
+            "===========================================",
             "",
-            `  🔥 Burn Rate:     ${burnRate.tokensPerMinute.toLocaleString()} tok/min (${burnRate.tokensPerHour.toLocaleString()} tok/hr)`,
-            `  📊 Total Used:    ${burnRate.totalConsumed.toLocaleString()} tokens`,
-            `  📥 Input:         ${burnRate.inputTokens.toLocaleString()} tokens`,
-            `  📤 Output:        ${burnRate.outputTokens.toLocaleString()} tokens`,
-            `  💾 Cache Reads:   ${burnRate.cacheReadTokens.toLocaleString()} tokens (saved)`,
-            `  💰 Est. Cost:     $${burnRate.estimatedCostUsd.toFixed(2)}`,
-            `  ⏱️  Session:       ${burnRate.sessionDurationMinutes} min`,
-            `  📞 API Calls:     ${burnRate.apiCalls}`,
+            `  Burn Rate:     ${burnRate.tokensPerMinute.toLocaleString()} tok/min (${burnRate.tokensPerHour.toLocaleString()} tok/hr)`,
+            `  Total Used:    ${burnRate.totalConsumed.toLocaleString()} tokens`,
+            `  Input:         ${burnRate.inputTokens.toLocaleString()} tokens`,
+            `  Output:        ${burnRate.outputTokens.toLocaleString()} tokens`,
+            `  Cache Reads:   ${burnRate.cacheReadTokens.toLocaleString()} tokens (saved)`,
+            `  Est. Cost:     $${burnRate.estimatedCostUsd.toFixed(2)}`,
+            `  Session:       ${burnRate.sessionDurationMinutes} min`,
+            `  API Calls:     ${burnRate.apiCalls}`,
             "",
-            "───────────────────────────────────────────",
+            "-------------------------------------------",
             `  ${prediction.message}`,
-            "═══════════════════════════════════════════",
+            "===========================================",
         ];
 
         return lines.join("\n");
