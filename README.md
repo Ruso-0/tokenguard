@@ -1,10 +1,10 @@
-# TokenGuard v3.0 — 3 Tools. 361 Tests. Zero Cloud. Instant Startup.
+# TokenGuard v3.0 — 3 Tools. 423 Tests. Zero Cloud. Instant Startup.
 
 <p align="center">
   <img src="https://img.shields.io/badge/MCP-Plugin-blue?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyem0wIDE4Yy00LjQyIDAtOC0zLjU4LTgtOHMzLjU4LTggOC04IDggMy41OCA4IDgtMy41OCA0LTggOHoiLz48L3N2Zz4=" alt="MCP Plugin">
   <img src="https://img.shields.io/badge/Tools-3-blue?style=for-the-badge" alt="3 Tools">
   <img src="https://img.shields.io/badge/Token%20Savings-91%25-green?style=for-the-badge" alt="91% Savings">
-  <img src="https://img.shields.io/badge/Tests-361%20passed-brightgreen?style=for-the-badge" alt="361 Tests">
+  <img src="https://img.shields.io/badge/Tests-423%20passed-brightgreen?style=for-the-badge" alt="423 Tests">
   <img src="https://img.shields.io/badge/Cloud-Zero-red?style=for-the-badge" alt="Zero Cloud">
   <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="MIT License">
   <img src="https://img.shields.io/badge/TypeScript-5.7-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
@@ -59,10 +59,10 @@ TokenGuard sits between you and token waste with 3 smart tools:
 
 | What You Do Now | What TokenGuard Does | Savings |
 |---|---|---|
-| `grep "auth" ./src` reads 50 files | `tg_navigate action:"search" target:"authentication"` returns 5 relevant chunks | **97%** |
+| `grep "auth" ./src` reads 50 files | `tg_navigate action:"search" query:"authentication"` returns 5 relevant chunks | **97%** |
 | `Read src/engine.ts` dumps 5,502 tokens | `tg_code action:"compress" path:"src/engine.ts"` sends 1,753 tokens | **68%** |
-| Read file + skim for function | `tg_navigate action:"definition" target:"AuthService"` jumps straight there | **300x faster** |
-| Copy-paste 500 lines of npm errors | `tg_code action:"terminal"` extracts the 3 actual errors | **89%** |
+| Read file + skim for function | `tg_navigate action:"definition" symbol:"AuthService"` jumps straight there | **300x faster** |
+| Copy-paste 500 lines of npm errors | `tg_code action:"filter_output"` extracts the 3 actual errors | **89%** |
 | Rewrite entire file to change one function | `tg_code action:"edit"` patches only the AST node | **98% output saved** |
 | Write broken code → see error → retry loop | Automatic AST validation blocks bad writes before disk | **Prevents loop** |
 | Claude gets stuck in write-test-fail loops | Circuit breaker auto-detects and stops doom loops | **Saves session** |
@@ -88,7 +88,7 @@ TokenGuard sits between you and token waste with 3 smart tools:
 | `compress` | Full-control compression. 3 levels (light/medium/aggressive) or 6 tiers. |
 | `edit` | Surgically edit a function/class by name. **Auto-validated via AST before write.** |
 | `undo` | Revert the last edit. One-shot backup restore. |
-| `terminal` | Filter noisy terminal output. Strips ANSI, deduplicates, extracts errors. |
+| `filter_output` | Filter noisy terminal output. Strips ANSI, deduplicates, extracts errors. |
 
 ### `tg_guard` — Safety & Memory
 
@@ -152,23 +152,23 @@ For Pro mode, add `"--enable-embeddings"` to the args array.
 # TokenGuard runs as an MCP server — just use the tools:
 
 # 1. Pin your project rules (they'll never be forgotten)
-tg_guard action:"pin" options:{text: "Always use fetch, not axios"}
-tg_guard action:"pin" options:{text: "API base URL is /api/v2"}
+tg_guard action:"pin" text:"Always use fetch, not axios"
+tg_guard action:"pin" text:"API base URL is /api/v2"
 
 # 2. Get the repo map (cached by Anthropic prompt cache, includes pinned rules)
 tg_navigate action:"map"
 
 # 3. Search semantically (replaces grep)
-tg_navigate action:"search" target:"authentication middleware"
+tg_navigate action:"search" query:"authentication middleware"
 
 # 4. Jump to a definition (replaces Read + Ctrl+F)
-tg_navigate action:"definition" target:"AuthService"
+tg_navigate action:"definition" symbol:"AuthService"
 
 # 5. Surgically edit a function (auto-validated, no file rewrite needed)
-tg_code action:"edit" path:"src/auth.ts" options:{symbol: "validateToken", new_code: "..."}
+tg_code action:"edit" path:"src/auth.ts" symbol:"validateToken" new_code:"..."
 
 # 6. Filter noisy terminal output
-tg_code action:"terminal" options:{output: "<paste error output>"}
+tg_code action:"filter_output" output:"<paste error output>"
 
 # 7. Full session report with receipt
 tg_guard action:"report"
@@ -198,7 +198,7 @@ tg_guard action:"report"
 |  | definition       | compress         | status           |  |
 |  | references       | edit (validated) | report           |  |
 |  | outline          | undo             |                  |  |
-|  | map              | terminal         |                  |  |
+|  | map              | filter_output    |                  |  |
 |  +--------+---------+--------+---------+--------+---------+  |
 |           |                  |                  |            |
 |  +--------v------------------v------------------v---------+  |
@@ -213,7 +213,7 @@ tg_guard action:"report"
 
 ## Stress Tested
 
-**361 tests. 0 failures. 14 test suites.**
+**423 tests. 0 failures. 16 test suites.**
 
 | Scenario | What We Tested | Result |
 |---|---|---|
@@ -235,7 +235,7 @@ tg_guard action:"report"
 Tested against a 57-file production Next.js + Supabase app (SICAEP):
 - **94.1% token reduction** (tier 1 compression)
 - **10,532 tokens saved** on a single search query
-- **361/361 tests passed** (305 unit + 56 new for v3)
+- **423/423 tests passed** (305 unit + 118 new for v3)
 - Surgically fixed a real `.single()` → `.maybeSingle()` bug via `tg_code action:"edit"`
 - Circuit breaker correctly detected repeated error patterns
 - Path traversal attack (`../../../../etc/passwd`) → **BLOCKED**
@@ -247,6 +247,10 @@ Tested against a 57-file production Next.js + Supabase app (SICAEP):
 - **Zero cloud**: All processing is local. No API keys, no telemetry, no network calls.
 - **No data leaves your machine**: Embeddings computed locally via ONNX Runtime.
 - **Path traversal protection**: All file paths validated with `safePath()`.
+- **Symlink resolution**: All file paths resolved via `realpathSync()` to prevent symlink escapes.
+- **Sensitive file blocklist**: `.env`, `.ssh`, `.git/credentials`, `.pem`, `.key` files are blocked automatically.
+- **Pin sanitization**: Pinned rules are sanitized to block URLs, shell commands, and path traversal.
+- **File-level mutex**: Concurrent edits to the same file are blocked to prevent corruption.
 - **SQLite storage**: Your code index stays in `.tokenguard.db` in your project root.
 - **WASM memory safety**: All tree-sitter parsing wrapped in `safeParse()` with guaranteed cleanup.
 - **MIT licensed**: Fully open source, audit the code yourself.

@@ -2,6 +2,28 @@
 
 All notable changes to TokenGuard will be documented in this file.
 
+## [3.0.2] - 2026-03-10
+
+### Headline
+docs: fix README Quick Start syntax, update test count to 423, update keywords, add security documentation.
+
+### Fixed
+- **README Quick Start**: Replaced v2 `options:{}` syntax with v3 flat params (`text:`, `symbol:`, `new_code:`, `output:`).
+- **README Quick Start**: Replaced `target:` with correct param names (`query:`, `symbol:`).
+- **README**: Renamed `terminal` → `filter_output` in tg_code actions table, comparison table, architecture diagram, and Quick Start.
+- **README**: Updated test count from 361 → 423 in title, badges, stress test section, and real-world validation.
+- **README**: Updated test suites from 14 → 16.
+
+### Added
+- **README Security section**: Documented symlink resolution, sensitive file blocklist, pin sanitization, and file-level mutex.
+
+### Changed
+- **package.json**: Updated keywords to reflect v3 security focus (`code-safety`, `ast-validation`, `circuit-breaker`, `defensive-coding`, `ai-safety`, `surgical-edit`).
+- **package.json**: Set author to `Ruso-0 (https://github.com/Ruso-0)`.
+- **package.json**: Version bumped to 3.0.2.
+
+---
+
 ## [3.0.0] - 2026-03-10
 
 ### Headline
