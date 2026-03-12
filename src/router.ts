@@ -1,5 +1,5 @@
 /**
- * router.ts — Central dispatcher for TokenGuard v3.1.1 router tools.
+ * router.ts — Central dispatcher for TokenGuard v3.1.2 router tools.
  *
  * Maps {toolName, action} pairs to existing handler functions.
  * All business logic remains in the original modules — this file
@@ -259,8 +259,17 @@ async function handleSearch(
         return `${header}\n${shorthand}\n${score}${rawSection}`;
     });
 
-    const grepEstimate =
-        results.reduce((sum, r) => sum + Embedder.estimateTokens(r.rawCode), 0) * 3;
+    // Estimate: grep would read entire files, not just matched functions.
+    // Count each unique file's raw code once (conservative estimate).
+    const seenFiles = new Set<string>();
+    let grepEstimate = 0;
+    for (const r of results) {
+        if (!seenFiles.has(r.path)) {
+            seenFiles.add(r.path);
+            // Estimate full file as ~5x the matched chunk (conservative)
+            grepEstimate += Embedder.estimateTokens(r.rawCode) * 5;
+        }
+    }
     const searchTokens = results.reduce(
         (sum, r) => sum + Embedder.estimateTokens(r.shorthand), 0,
     );
@@ -275,7 +284,7 @@ async function handleSearch(
                 `## TokenGuard Search: "${query}"\n` +
                 `Found ${results.length} results across ${new Set(results.map(r => r.path)).size} files.\n\n` +
                 formatted.join("\n\n") +
-                `\n\n[TokenGuard saved ~${saved.toLocaleString()} tokens on this query]`,
+                `\n\n[TokenGuard saved ~${saved.toLocaleString()} tokens on this query (estimated)]`,
         }],
     };
 }

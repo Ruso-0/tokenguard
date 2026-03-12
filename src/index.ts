@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * index.ts — TokenGuard v3.1.1 MCP Server entry point.
+ * index.ts — TokenGuard v3.1.2 MCP Server entry point.
  *
  * Exposes 3 router tools to Claude Code (replaces 16 individual tools):
  *
@@ -46,7 +46,7 @@ import { PreToolUseHook } from "./hooks/preToolUse.js";
 // ─── CLI Flag Parsing ───────────────────────────────────────────────
 
 const args = process.argv.slice(2);
-const VERSION = "3.1.1";
+const VERSION = "3.1.2";
 
 if (args.includes("--version") || args.includes("-v")) {
     console.log(VERSION);

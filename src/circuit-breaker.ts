@@ -362,11 +362,6 @@ export class CircuitBreaker {
     }
 
     /**
-     * Soft reset: clear tripped state but preserve per-file failure tracking.
-     * Used by middleware auto-reset when a different tool/action is called.
-     * Prevents the bypass where Edit(fail) → Read → Edit(fail) circumvents detection.
-     */
-    /**
      * Soft reset: clear tripped state and purge history of the problematic file.
      * This gives Claude a clean slate (3 real attempts) with the new strategy,
      * while preserving escalationLevel so it escalates if the retry also fails.

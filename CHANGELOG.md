@@ -2,6 +2,13 @@
 
 All notable changes to TokenGuard will be documented in this file.
 
+## [3.1.2] - 2026-03-12
+
+### Fixed
+- **Duplicate JSDoc on softReset**: Removed stale v3.0 comment that contradicted actual behavior.
+- **Inflated grepEstimate**: Replaced arbitrary `× 3` multiplier with per-unique-file estimation. Added "(estimated)" to savings output.
+- **@xenova/transformers moved to optionalDependencies**: `npm install` no longer downloads ~200MB of ONNX runtime for Lite mode users. Pro mode users can install it separately with `npm install @xenova/transformers`.
+
 ## [3.1.1] - 2026-03-12
 
 ### Fixed

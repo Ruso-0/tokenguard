@@ -1,6 +1,6 @@
 {
   "name": "@ruso-0/tokenguard",
-  "version": "3.1.1",
+  "version": "3.1.2",
   "description": "MCP plugin for Claude Code — 3 router tools with invisible middleware for token-optimized code navigation, compression, and safety. Lite mode (instant) or Pro mode (semantic search).",
   "main": "dist/index.js",
   "type": "module",
@@ -32,7 +32,6 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@xenova/transformers": "^2.17.2",
     "chokidar": "^4.0.3",
     "sql.js": "^1.12.0",
     "tree-sitter-wasms": "^0.1.13",
@@ -40,6 +39,7 @@
     "zod": "^3.24.2"
   },
   "optionalDependencies": {
+    "@xenova/transformers": "^2.17.2",
     "sharp": "^0.34.5"
   },
   "devDependencies": {

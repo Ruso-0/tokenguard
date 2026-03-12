@@ -81,7 +81,15 @@ export class Embedder {
 
     private async _loadModel(): Promise<void> {
         // Dynamic import to avoid loading 32 MB at require-time
-        const { pipeline } = await import("@xenova/transformers");
+        let pipeline: any;
+        try {
+            ({ pipeline } = await import("@xenova/transformers"));
+        } catch (err) {
+            throw new Error(
+                "[TokenGuard] Pro mode requires @xenova/transformers. Install it with: npm install @xenova/transformers\n" +
+                "Or run TokenGuard in Lite mode (default, no flag needed)."
+            );
+        }
 
         // If a specific model was pinned, try only that one
         if (this.pinnedModelId) {
