@@ -1,5 +1,5 @@
 /**
- * router.ts — Central dispatcher for TokenGuard v3.2.0 router tools.
+ * router.ts — Central dispatcher for TokenGuard v3.3.0 router tools.
  *
  * Maps {toolName, action} pairs to existing handler functions.
  * All business logic remains in the original modules — this file
@@ -11,7 +11,7 @@
  * 3 router tools replace 16 individual tools:
  *   tg_navigate → search, definition, references, outline, map
  *   tg_code     → read, compress, edit, undo, filter_output
- *   tg_guard    → pin, unpin, status, report
+ *   tg_guard    → pin, unpin, status, report, reset, set_plan, memorize
  */
 
 import fs from "fs";
@@ -42,6 +42,157 @@ import { acquireFileLock, releaseFileLock } from "./middleware/file-lock.js";
 import { PreToolUseHook } from "./hooks/preToolUse.js";
 import { extractDependencies, cleanSignature, isSensitiveSignature, escapeRegExp } from "./utils/imports.js";
 import type { CompressionLevel } from "./compressor-advanced.js";
+
+// ─── Neural State Consolidation ─────────────────────────────────────
+
+/**
+ * Neural State Consolidation — Adaptive Anti-Amnesia Heartbeat.
+ *
+ * Re-injects a 4-layer cognitive state every ~15 tool calls to survive
+ * Claude Code's context compaction. Uses the "Attention Sandwich" pattern:
+ * memory ABOVE, tool result BELOW (respects U-shaped attention curve).
+ *
+ * Psychological Filter: Only fires during context-gathering actions
+ * (read, search, map, status, definition, references, outline).
+ * Never fires during edit, undo, or filter_output.
+ *
+ * Layers:
+ * 1. Cortex — Master Plan (PLAN.md, schemas, constraints)
+ * 2. Working Memory — Claude's scratchpad notes
+ * 3. Hippocampus — Recent successful edits (spatial awareness)
+ * 4. Executive Attention — Circuit Breaker emergencies
+ */
+function applyAntiAmnesiaHeartbeat(
+    action: string,
+    response: McpToolResponse,
+    deps: RouterDependencies,
+): McpToolResponse {
+    if (response.isError || !response.content || response.content[0]?.type !== "text") {
+        return response;
+    }
+
+    try {
+        const currentCalls = deps.circuitBreaker.getStats().totalToolCalls;
+        let lastInjectCalls = parseInt(
+            deps.engine.getMetadata("tg_plan_last_inject") || "0",
+            10,
+        );
+
+        // FIX: Session restart detection — if counter reset, reset the injection marker
+        if (currentCalls < lastInjectCalls) {
+            lastInjectCalls = 0;
+            deps.engine.setMetadata("tg_plan_last_inject", "0");
+        }
+
+        if (currentCalls - lastInjectCalls >= 15) {
+            const safeActions = [
+                "read", "search", "map", "status",
+                "definition", "references", "outline",
+            ];
+
+            if (safeActions.includes(action)) {
+                let memoryPayload = "";
+
+                // LAYER 1: Cortex — Master Plan
+                const planPath = deps.engine.getMetadata("tg_master_plan");
+                if (planPath && fs.existsSync(planPath)) {
+                    const planContent = readSource(planPath);
+                    if (planContent.length < 15000) {
+                        memoryPayload +=
+                            `=== MASTER PLAN (${path.basename(planPath)}) ===\n` +
+                            `${planContent}\n\n`;
+                    }
+                }
+
+                // LAYER 2: Working Memory — Scratchpad
+                const scratchpad = deps.engine.getMetadata("tg_scratchpad");
+                if (scratchpad) {
+                    memoryPayload +=
+                        `=== ACTIVE SCRATCHPAD (Your Notes) ===\n` +
+                        `${scratchpad}\n\n`;
+                }
+
+                // LAYER 2b: Pinned Rules
+                try {
+                    const pinnedText = getPinnedText(process.cwd());
+                    if (pinnedText) {
+                        memoryPayload += `${pinnedText}\n\n`;
+                    }
+                } catch {
+                    // getPinnedText may fail — skip gracefully
+                }
+
+                // LAYER 3: Hippocampus — Recent Successful Edits
+                const history = deps.circuitBreaker.getState().history;
+                const recentEdits = new Set<string>();
+                const scanWindow = Math.max(0, history.length - 15);
+                for (let i = history.length - 1; i >= scanWindow; i--) {
+                    const record = history[i];
+                    if (
+                        record.filePath &&
+                        !record.errorHash
+                    ) {
+                        recentEdits.add(path.basename(record.filePath));
+                    }
+                }
+                if (recentEdits.size > 0) {
+                    memoryPayload +=
+                        `=== SPATIAL AWARENESS (Recent Edits) ===\n` +
+                        `You recently modified: ${Array.from(recentEdits).join(", ")}.\n\n`;
+                }
+
+                // LAYER 4: Executive Attention — Circuit Breaker State
+                const cbState = deps.circuitBreaker.getState();
+                if (cbState.escalationLevel > 0) {
+                    const target =
+                        cbState.lastTrippedSymbol ||
+                        cbState.lastTrippedFile ||
+                        "a critical component";
+                    memoryPayload +=
+                        `=== EMERGENCY FOCUS (CIRCUIT BREAKER LEVEL ${cbState.escalationLevel}) ===\n` +
+                        `You are executing a "Break & Build" strategy on \`${target}\`.\n` +
+                        `Do not deviate until this is resolved.\n\n`;
+                }
+
+                // ATTENTION SANDWICH: Memory ABOVE, tool result BELOW
+                if (memoryPayload.trim().length > 0) {
+                    const header =
+                        `=================================================================\n` +
+                        ` [TOKENGUARD NEURAL SYNC: STATE CONSOLIDATION]\n` +
+                        ` Context compaction detected. Restoring cognitive state:\n` +
+                        `=================================================================\n\n`;
+
+                    const footer =
+                        `=================================================================\n` +
+                        `[END NEURAL SYNC] Proceed with the tool result below:\n` +
+                        `=================================================================\n\n`;
+
+                    const newResponse = {
+                        ...response,
+                        content: [...response.content],
+                    };
+                    const originalText = response.content[0].text;
+
+                    newResponse.content[0] = {
+                        type: "text" as const,
+                        text: header + memoryPayload + footer + originalText,
+                    };
+
+                    deps.engine.setMetadata(
+                        "tg_plan_last_inject",
+                        String(currentCalls),
+                    );
+
+                    return newResponse;
+                }
+            }
+        }
+    } catch {
+        // Fail silently — never break the core tool response
+    }
+
+    return response;
+}
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -104,17 +255,13 @@ export async function handleNavigate(
     params: NavigateParams,
     deps: RouterDependencies,
 ): Promise<McpToolResponse> {
+    let response: McpToolResponse;
     switch (action) {
-        case "search":
-            return handleSearch(params, deps);
-        case "definition":
-            return handleDefinition(params, deps);
-        case "references":
-            return handleReferences(params, deps);
-        case "outline":
-            return handleOutline(params, deps);
-        case "map":
-            return handleMap(params, deps);
+        case "search": response = await handleSearch(params, deps); break;
+        case "definition": response = await handleDefinition(params, deps); break;
+        case "references": response = await handleReferences(params, deps); break;
+        case "outline": response = await handleOutline(params, deps); break;
+        case "map": response = await handleMap(params, deps); break;
         default:
             return {
                 content: [{
@@ -124,6 +271,7 @@ export async function handleNavigate(
                 isError: true,
             };
     }
+    return applyAntiAmnesiaHeartbeat(action, response, deps);
 }
 
 // ─── tg_code ────────────────────────────────────────────────────────
@@ -133,17 +281,13 @@ export async function handleCode(
     params: CodeParams,
     deps: RouterDependencies,
 ): Promise<McpToolResponse> {
+    let response: McpToolResponse;
     switch (action) {
-        case "read":
-            return handleRead(params, deps);
-        case "compress":
-            return handleCompress(params, deps);
-        case "edit":
-            return handleEdit(params, deps);
-        case "undo":
-            return handleUndo(params, deps);
-        case "filter_output":
-            return handleFilterOutput(params, deps);
+        case "read": response = await handleRead(params, deps); break;
+        case "compress": response = await handleCompress(params, deps); break;
+        case "edit": response = await handleEdit(params, deps); break;
+        case "undo": response = await handleUndo(params, deps); break;
+        case "filter_output": response = await handleFilterOutput(params, deps); break;
         default: {
             const hint = action === "terminal"
                 ? ' (Note: "terminal" was renamed to "filter_output" in v3.0.1)'
@@ -157,6 +301,7 @@ export async function handleCode(
             };
         }
     }
+    return applyAntiAmnesiaHeartbeat(action, response, deps);
 }
 
 // ─── tg_guard ───────────────────────────────────────────────────────
@@ -166,26 +311,25 @@ export async function handleGuard(
     params: GuardParams,
     deps: RouterDependencies,
 ): Promise<McpToolResponse> {
+    let response: McpToolResponse;
     switch (action) {
-        case "pin":
-            return handlePin(params, deps);
-        case "unpin":
-            return handleUnpin(params, deps);
-        case "status":
-            return handleStatus(deps);
-        case "report":
-            return handleReport(deps);
-        case "reset":
-            return handleReset(deps);
+        case "pin": response = await handlePin(params, deps); break;
+        case "unpin": response = await handleUnpin(params, deps); break;
+        case "status": response = await handleStatus(deps); break;
+        case "report": response = await handleReport(deps); break;
+        case "reset": response = await handleReset(deps); break;
+        case "set_plan": response = await handleSetPlan(params, deps); break;
+        case "memorize": response = await handleMemorize(params, deps); break;
         default:
             return {
                 content: [{
                     type: "text" as const,
-                    text: `Unknown tg_guard action: "${action}". Valid actions: pin, unpin, status, report, reset.`,
+                    text: `Unknown tg_guard action: "${action}". Valid actions: pin, unpin, status, report, reset, set_plan, memorize.`,
                 }],
                 isError: true,
             };
     }
+    return applyAntiAmnesiaHeartbeat(action, response, deps);
 }
 
 async function handleReset(
@@ -1271,6 +1415,107 @@ async function handleReport(
         content: [{
             type: "text" as const,
             text: report + receipt,
+        }],
+    };
+}
+
+// ─── Heartbeat Handlers ─────────────────────────────────────────────
+
+async function handleSetPlan(
+    params: GuardParams,
+    deps: RouterDependencies,
+): Promise<McpToolResponse> {
+    await deps.engine.initialize();
+
+    if (!params.text) {
+        return {
+            content: [{ type: "text" as const, text: "Error: provide the file path to your plan via 'text'." }],
+            isError: true,
+        };
+    }
+
+    let resolvedPath: string;
+    try {
+        resolvedPath = safePath(process.cwd(), params.text);
+        if (!fs.existsSync(resolvedPath)) throw new Error("File does not exist.");
+    } catch (err) {
+        return {
+            content: [{ type: "text" as const, text: `## Set Plan: FAILED\n\n${(err as Error).message}` }],
+            isError: true,
+        };
+    }
+
+    const planContent = readSource(resolvedPath);
+    const planTokens = Embedder.estimateTokens(planContent);
+
+    // Bankruptcy Shield: reject plans that would burn too much context per heartbeat
+    if (planTokens > 4000) {
+        return {
+            content: [{
+                type: "text" as const,
+                text:
+                    `## Set Plan: REJECTED (Too Large)\n\n` +
+                    `Your plan is estimated at **~${planTokens.toLocaleString()} tokens**.\n` +
+                    `TokenGuard injects this every ~15 tool calls. A plan this large will burn ` +
+                    `context rapidly and accelerate compaction instead of preventing it.\n\n` +
+                    `**Action:** Summarize your \`${path.basename(resolvedPath)}\` into strict ` +
+                    `bullet points (aim for < 1,500 tokens), then try again.`,
+            }],
+            isError: true,
+        };
+    }
+
+    deps.engine.setMetadata("tg_master_plan", resolvedPath);
+    deps.engine.setMetadata(
+        "tg_plan_last_inject",
+        String(deps.circuitBreaker.getStats().totalToolCalls),
+    );
+
+    return {
+        content: [{
+            type: "text" as const,
+            text:
+                `## Master Plan Anchored\n\n` +
+                `**Path:** ${resolvedPath}\n` +
+                `**Cost:** ~${planTokens.toLocaleString()} tokens per heartbeat\n\n` +
+                `TokenGuard's Anti-Amnesia Protocol is now ACTIVE. It will silently re-inject ` +
+                `these constraints every ~15 tool calls during context-gathering operations.\n\n` +
+                `*Tip: Use \`tg_guard action:"memorize"\` as you progress to leave notes for your future self.*`,
+        }],
+    };
+}
+
+async function handleMemorize(
+    params: GuardParams,
+    deps: RouterDependencies,
+): Promise<McpToolResponse> {
+    await deps.engine.initialize();
+
+    if (!params.text) {
+        return {
+            content: [{ type: "text" as const, text: "Error: provide thoughts to memorize via 'text'." }],
+            isError: true,
+        };
+    }
+
+    // Limit scratchpad size to prevent context bloat
+    if (params.text.length > 5000) {
+        return {
+            content: [{ type: "text" as const, text: "Error: scratchpad text too long (max 5,000 chars). Summarize your notes." }],
+            isError: true,
+        };
+    }
+
+    deps.engine.setMetadata("tg_scratchpad", params.text);
+
+    return {
+        content: [{
+            type: "text" as const,
+            text:
+                `## Memory Saved\n\n` +
+                `TokenGuard has written your thoughts to the Active Scratchpad. ` +
+                `If context compaction occurs, these notes will be automatically ` +
+                `re-injected so you don't lose your train of thought.`,
         }],
     };
 }

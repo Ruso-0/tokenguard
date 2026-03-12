@@ -82,13 +82,16 @@ src/types/sql.js.d.ts
 src/undo.ts
 src/utils/code-tokenizer.ts
 src/utils/file-filter.ts
+src/utils/imports.ts
 src/utils/path-jail.ts
 src/utils/read-source.ts
 src/utils/safe-parse.ts
 tests/ast-navigator.test.ts
 tests/ast-sandbox.test.ts
 tests/audit-fixes.test.ts
+tests/auto-context.test.ts
 tests/backward-compat.test.ts
+tests/bugfix-audit.test.ts
 tests/circuit-breaker.test.ts
 tests/compressor-advanced.test.ts
 tests/e2e-breaker.test.ts
@@ -2308,6 +2311,184 @@ export function shouldProcess(filePath: string, size: number): {
 export { BLOCKED_EXTENSIONS, MAX_FILE_SIZE };
 </file>
 
+<file path="src/utils/imports.ts">
+/**
+ * imports.ts — Dependency extraction and security filters for Auto-Context.
+ * Anchors searches to explicit import declarations instead of blind regex on code bodies.
+ * Supports: ESM named/default, CommonJS require, Python from-import, Go namespace inference.
+ */
+
+export interface ImportDependency {
+    /** Original exported name — used for BM25 search in SQLite */
+    symbol: string;
+    /** Name used in THIS file (may differ due to alias) — used for the Gold Filter */
+    localName: string;
+    /** Last segment of the import path — used for homonym disambiguation */
+    pathHint: string;
+}
+
+// Security: exact auth-related tokens only. "tokenize", "TokenStream" pass through.
+const SENSITIVE_PATTERNS = [
+    /password/i, /secret/i, /private.?key/i, /api.?key/i,
+    /credential/i, /encrypt/i, /decrypt/i, /master.?key/i,
+    /(auth|access|refresh|secret|api|csrf|bearer|session)_?token/i,
+];
+
+/** Prevent leakage of credential-related signatures in auto-injected context */
+export function isSensitiveSignature(sig: string): boolean {
+    return SENSITIVE_PATTERNS.some(p => p.test(sig));
+}
+
+/** Escape special regex characters — prevents ReDoS with symbols like $store */
+export function escapeRegExp(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Clean a shorthand signature for safe injection.
+ * - Strips JS/TS block and line comments
+ * - Strips ONLY TokenGuard-specific Python stubs (not legitimate # comments)
+ * - Collapses multiline signatures into one line
+ * - Falls back to first line if cleanup produces empty string
+ */
+export function cleanSignature(shorthand: string): string {
+    const sig = shorthand
+        .replace(/\/\*[\s\S]*?\*\//g, "")              // JS/TS block comments & /*[tg:4L]*/ stubs
+        .replace(/\/\/.*/g, "")                         // JS/TS line comments
+        .replace(/#\s*(?:\[TG\]|TG:L\d+).*$/gm, "")   // Strip ONLY TokenGuard stubs in Python
+        .replace(/\{\s*$/, "")                          // Remove trailing open brace
+        .replace(/\s+/g, " ")                           // Collapse whitespace
+        .trim();
+
+    return sig || shorthand.split("\n")[0].trim();
+}
+
+/**
+ * Extract EXPLICIT dependencies from file imports.
+ * Returns symbol (original name for search), localName (alias for Gold Filter),
+ * and pathHint (file hint for homonym disambiguation).
+ */
+export function extractDependencies(code: string, ext: string): ImportDependency[] {
+    const deps: ImportDependency[] = [];
+
+    // Local path heuristic: Node needs ./, ~/, @/; Go needs /
+    const isLocalPath = (p: string) =>
+        ext === ".go" ? p.includes("/") : /^[./~@]/.test(p);
+
+    if ([".ts", ".tsx", ".js", ".jsx"].includes(ext)) {
+        // ── Named ESM: import { foo, bar as baz } from "./utils/math" ──
+        const namedRe =
+            /import\s+(?:type\s+)?\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g;
+        let match;
+        while ((match = namedRe.exec(code)) !== null) {
+            if (!isLocalPath(match[2])) continue;
+            const pathHint =
+                match[2].split("/").pop()?.replace(/\.(ts|js)x?$/, "") || match[2];
+            for (const s of match[1].split(",")) {
+                if (!s.trim()) continue;
+                const parts = s.trim().split(/\s+as\s+/);
+                const symbol = parts[0].trim();
+                const localName = (parts[1] || parts[0]).trim();
+                if (symbol.length > 2) deps.push({ symbol, localName, pathHint });
+            }
+        }
+
+        // ── Default ESM: import Foo from "../services/auth" ──
+        const defaultRe =
+            /import\s+(?!\s*\{)(?:\*\s+as\s+)?([a-zA-Z0-9_$]+)\s+from\s+['"]([^'"]+)['"]/g;
+        while ((match = defaultRe.exec(code)) !== null) {
+            if (!isLocalPath(match[2])) continue;
+            const pathHint =
+                match[2].split("/").pop()?.replace(/\.(ts|js)x?$/, "") || match[2];
+            const symbol = match[1].trim();
+            if (symbol !== "type" && symbol.length > 2) {
+                deps.push({ symbol, localName: symbol, pathHint });
+            }
+        }
+
+        // ── CommonJS: const { hash: myHash } = require('./utils') ──
+        const reqRe =
+            /(?:const|let|var)\s+\{([^}]+)\}\s*=\s*require\(['"]([^'"]+)['"]\)/g;
+        while ((match = reqRe.exec(code)) !== null) {
+            if (!isLocalPath(match[2])) continue;
+            const pathHint =
+                match[2].split("/").pop()?.replace(/\.(ts|js)x?$/, "") || match[2];
+            for (const s of match[1].split(",")) {
+                if (!s.trim()) continue;
+                const parts = s.trim().split(/\s*:\s*/);
+                const symbol = parts[0].trim();
+                const localName = (parts[1] || parts[0]).trim();
+                if (symbol.length > 2) deps.push({ symbol, localName, pathHint });
+            }
+        }
+    } else if (ext === ".py") {
+        // ── Python: from app.core.auth import validate as check_auth ──
+        const pyFromRe = /^from\s+([a-zA-Z0-9_.]+)\s+import\s+([^#\n]+)/gm;
+        let match;
+        while ((match = pyFromRe.exec(code)) !== null) {
+            const pathHint = match[1].split(".").pop() || match[1];
+            for (const s of match[2].split(",")) {
+                if (!s.trim()) continue;
+                const parts = s.trim().split(/\s+as\s+/);
+                const symbol = parts[0].trim();
+                const localName = (parts[1] || parts[0]).trim();
+                if (symbol.length > 2) deps.push({ symbol, localName, pathHint });
+            }
+        }
+    } else if (ext === ".go") {
+        // ── Go: Namespace-to-Symbol Inference Engine ──
+        // Go imports packages, not symbols. We scan the code for Package.ExportedSymbol usage.
+        const pkgMap = new Map<string, string>();
+        const importBlocks = code.match(
+            /import\s*\([\s\S]*?\)|import\s+(?:[a-zA-Z0-9_.]+\s+)?["'][^"']+["']/g,
+        );
+
+        if (importBlocks) {
+            const lineRe = /(?:([a-zA-Z0-9_.]+)\s+)?"([^"]+)"/g;
+            for (const block of importBlocks) {
+                // Strip 'import' keyword and parens so lineRe doesn't capture "import" as alias
+                const inner = block.replace(/^import\s*\(?\s*/, "").replace(/\)\s*$/, "");
+                lineRe.lastIndex = 0;
+                let m;
+                while ((m = lineRe.exec(inner)) !== null) {
+                    const alias = m[1];
+                    const fullPath = m[2];
+                    // Skip Go stdlib (no slash, no dot)
+                    if (!fullPath.includes("/") && !fullPath.includes(".")) continue;
+
+                    const pathHint = fullPath.split("/").pop() || fullPath;
+                    const localName = alias || pathHint;
+                    if (localName !== "_" && localName !== ".") {
+                        pkgMap.set(localName, pathHint);
+                    }
+                }
+            }
+        }
+
+        // Scan body for Package.ExportedSymbol (Go exports start with uppercase)
+        for (const [localName, pathHint] of pkgMap.entries()) {
+            const usageRe = new RegExp(
+                `\\b${escapeRegExp(localName)}\\.([A-Z]\\w*)`,
+                "g",
+            );
+            let uMatch;
+            while ((uMatch = usageRe.exec(code)) !== null) {
+                deps.push({
+                    symbol: uMatch[1],
+                    localName: `${localName}.${uMatch[1]}`,
+                    pathHint,
+                });
+            }
+        }
+    }
+
+    // Deduplicate
+    const unique = new Map<string, ImportDependency>();
+    for (const d of deps) unique.set(`${d.symbol}:${d.pathHint}`, d);
+    return Array.from(unique.values());
+}
+</file>
+
 <file path="src/utils/read-source.ts">
 /**
  * read-source.ts — BOM-safe source file reader for TokenGuard.
@@ -3006,6 +3187,236 @@ describe("Performance", () => {
         expect(errorLine).toBeGreaterThanOrEqual(990);
 
         expect(elapsed).toBeLessThan(200);
+    });
+});
+</file>
+
+<file path="tests/auto-context.test.ts">
+/**
+ * auto-context.test.ts — Tests for Import-Anchored Auto-Context injection.
+ */
+
+import { describe, it, expect } from "vitest";
+import {
+    extractDependencies,
+    cleanSignature,
+    isSensitiveSignature,
+    escapeRegExp,
+} from "../src/utils/imports.js";
+
+describe("Auto-Context: extractDependencies", () => {
+    it("handles ESM named imports with aliases (TS/JS)", () => {
+        const code = `import { foo, bar as baz } from "./utils/math";`;
+        const deps = extractDependencies(code, ".ts");
+
+        expect(deps).toHaveLength(2);
+        expect(deps[0]).toEqual({ symbol: "foo", localName: "foo", pathHint: "math" });
+        expect(deps[1]).toEqual({ symbol: "bar", localName: "baz", pathHint: "math" });
+    });
+
+    it("handles CommonJS require with aliases", () => {
+        const code = `const { hash: myHash, verify } = require('../core/crypto.js');`;
+        const deps = extractDependencies(code, ".js");
+
+        expect(deps).toHaveLength(2);
+        expect(deps[0]).toEqual({ symbol: "hash", localName: "myHash", pathHint: "crypto" });
+        expect(deps[1]).toEqual({ symbol: "verify", localName: "verify", pathHint: "crypto" });
+    });
+
+    it("ignores node_modules in TS/JS (non-local paths)", () => {
+        const code = `import express from "express";\nimport { z } from "zod";`;
+        const deps = extractDependencies(code, ".ts");
+        expect(deps).toHaveLength(0);
+    });
+
+    it("extracts Python from-imports with aliases", () => {
+        const code = `from app.core.auth import validate as check_auth, get_user`;
+        const deps = extractDependencies(code, ".py");
+
+        expect(deps).toHaveLength(2);
+        expect(deps[0]).toEqual({ symbol: "validate", localName: "check_auth", pathHint: "auth" });
+        expect(deps[1]).toEqual({ symbol: "get_user", localName: "get_user", pathHint: "auth" });
+    });
+
+    it("infers symbols from Go namespace usage", () => {
+        const code = `
+            import "fmt"
+            import "github.com/org/myproject/utils"
+            import alias "github.com/org/myproject/crypto"
+
+            func main() {
+                utils.HashPassword("secret")
+                alias.EncryptData()
+                fmt.Println("ignored")
+            }
+        `;
+        const deps = extractDependencies(code, ".go");
+
+        const hash = deps.find(d => d.symbol === "HashPassword");
+        expect(hash).toBeDefined();
+        expect(hash?.pathHint).toBe("utils");
+        expect(hash?.localName).toBe("utils.HashPassword");
+
+        const encrypt = deps.find(d => d.symbol === "EncryptData");
+        expect(encrypt?.pathHint).toBe("crypto");
+        expect(encrypt?.localName).toBe("alias.EncryptData");
+
+        // fmt.Println should NOT be extracted (stdlib, no slash)
+        const println = deps.find(d => d.symbol === "Println");
+        expect(println).toBeUndefined();
+    });
+
+    it("deduplicates identical imports", () => {
+        const code = [
+            `import { Hash } from "./crypto";`,
+            `import { Hash } from "./crypto";`,
+        ].join("\n");
+        const deps = extractDependencies(code, ".ts");
+        expect(deps).toHaveLength(1);
+    });
+
+    it("handles type imports without crashing", () => {
+        const code = `import type { UserType } from "./models/user";`;
+        const deps = extractDependencies(code, ".ts");
+        expect(deps).toHaveLength(1);
+        expect(deps[0].symbol).toBe("UserType");
+    });
+});
+
+describe("Auto-Context: Security Filters", () => {
+    it("filters auth-related tokens but allows generic ones", () => {
+        expect(isSensitiveSignature("const authToken = '123'")).toBe(true);
+        expect(isSensitiveSignature("function getApiKey()")).toBe(true);
+        expect(isSensitiveSignature("let master_key = '123'")).toBe(true);
+        expect(isSensitiveSignature("const refreshToken = x")).toBe(true);
+
+        // These must NOT be filtered
+        expect(isSensitiveSignature("function tokenize(text: string)")).toBe(false);
+        expect(isSensitiveSignature("class TokenGuardEngine")).toBe(false);
+        expect(isSensitiveSignature("function parseTokenStream()")).toBe(false);
+    });
+
+    it("cleanSignature strips multiline without breaking Python", () => {
+        const tsSig = `export function foo(\n  a: string\n) /* TG:L1-L3 */`;
+        expect(cleanSignature(tsSig)).toBe("export function foo( a: string )");
+
+        const pySig = `def hex_color(): # returns color like #FF0000\n # [TG] compressed`;
+        const cleaned = cleanSignature(pySig);
+        expect(cleaned).toContain("def hex_color()");
+        expect(cleaned).not.toContain("[TG]");
+    });
+
+    it("cleanSignature handles empty input", () => {
+        expect(cleanSignature("")).toBe("");
+        expect(cleanSignature("   ")).toBe("");
+    });
+
+    it("escapeRegExp handles ReDoS symbols", () => {
+        const escaped = escapeRegExp("$store");
+        expect(escaped).toBe("\\$store");
+
+        const regex = new RegExp(
+            `(^|[^a-zA-Z0-9_$])${escaped}(?=[^a-zA-Z0-9_$]|$)`,
+        );
+        expect(regex.test("const a = $store.get()")).toBe(true);
+        expect(regex.test("const my$store = 1")).toBe(false);
+    });
+});
+</file>
+
+<file path="tests/bugfix-audit.test.ts">
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import path from "path";
+import fs from "fs";
+import os from "os";
+import { CircuitBreaker } from "../src/circuit-breaker.js";
+
+describe("Bug 1: Path normalization in Circuit Breaker", () => {
+    it("should treat relative and absolute paths as the same file", () => {
+        const cb = new CircuitBreaker();
+        const cwd = process.cwd();
+        const relativePath = "src/app.ts";
+        const absolutePath = path.resolve(cwd, relativePath);
+
+        // Simulate 3 failures with mixed path formats
+        cb.recordToolCall("tg_code:edit", "TypeError: fail", relativePath);
+        cb.recordToolCall("tg_code:edit", "TypeError: fail", absolutePath);
+        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/app.ts");
+
+        const state = cb.getState();
+        // Should be tripped — all 3 failures are on the SAME normalized file
+        expect(state.tripped).toBe(true);
+    });
+
+    it("should normalize Windows backslashes", () => {
+        const cb = new CircuitBreaker();
+
+        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src\\app.ts");
+        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/app.ts");
+
+        const state = cb.getState();
+        // Both should map to the same key
+        const uniqueFiles = new Set(
+            state.history.map(r => r.filePath).filter(Boolean)
+        );
+        expect(uniqueFiles.size).toBe(1);
+    });
+});
+
+describe("Bug 3: Plaintext fallback for unsupported languages", () => {
+    it("should index a .rs file as plaintext chunk", async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tg-lang-"));
+        const rustFile = path.join(tmpDir, "main.rs");
+        fs.writeFileSync(rustFile, 'fn main() {\n    println!("hello");\n}');
+
+        const { TokenGuardEngine } = await import("../src/engine.js");
+        const engine = new TokenGuardEngine({
+            dbPath: path.join(tmpDir, "test.db"),
+            watchPaths: [tmpDir],
+        });
+        await engine.initialize();
+
+        const result = await engine.indexFile(rustFile);
+
+        // Should NOT be null — should have indexed as plaintext
+        expect(result).not.toBeNull();
+        expect(result!.chunks.length).toBeGreaterThan(0);
+        expect(result!.chunks[0].nodeType).toBe("file");
+        expect(result!.chunks[0].rawCode).toContain("fn main()");
+
+        // Cleanup
+        engine.shutdown();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("should find Rust code via BM25 search after plaintext indexing", async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tg-search-"));
+        const rustFile = path.join(tmpDir, "auth.rs");
+        fs.writeFileSync(rustFile, [
+            "pub fn validate_token(token: &str) -> bool {",
+            "    token.len() > 0",
+            "}",
+            "",
+            "pub fn hash_password(pwd: &str) -> String {",
+            '    format!("hashed_{}", pwd)',
+            "}",
+        ].join("\n"));
+
+        const { TokenGuardEngine } = await import("../src/engine.js");
+        const engine = new TokenGuardEngine({
+            dbPath: path.join(tmpDir, "test.db"),
+            watchPaths: [tmpDir],
+        });
+        await engine.initialize();
+        await engine.indexFile(rustFile);
+
+        // BM25 search should find the Rust file
+        const results = await engine.search("validate_token", 5);
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0].rawCode).toContain("validate_token");
+
+        engine.shutdown();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 });
 </file>
@@ -5545,96 +5956,6 @@ TokenGuard v2.0 — 12 MCP tools, 194 tests, cache-aware two-layer architecture.
 ```
 </file>
 
-<file path="CONTRIBUTING.md">
-# Contributing to TokenGuard
-
-Thank you for your interest in contributing to TokenGuard! This guide will help you get started.
-
-## Development Setup
-
-### Prerequisites
-- Node.js >= 20.0.0
-- npm >= 9.0.0
-
-### Setup
-```bash
-git clone https://github.com/YOUR_USERNAME/tokenguard.git
-cd tokenguard
-npm ci
-```
-
-### Building
-```bash
-npm run build
-```
-
-### Running Tests
-```bash
-npm test                # Run all tests once
-npm run test:watch      # Run tests in watch mode
-```
-
-### Running Locally
-```bash
-npm run dev             # Run with tsx (development)
-npm start               # Run compiled version
-```
-
-## Code Style
-
-- **Language**: TypeScript (strict mode enabled)
-- **Module System**: ES Modules (Node16)
-- **Target**: ES2022
-- **Formatting**: Use consistent 4-space indentation
-- **Comments**: JSDoc for all public APIs
-
-### Lint Check
-```bash
-npm run lint
-```
-
-## Project Structure
-
-```
-src/
-├── index.ts                 # MCP server entry point
-├── engine.ts                # Core search engine orchestrator
-├── database.ts              # SQLite + in-memory vector/keyword indexes
-├── parser.ts                # Tree-sitter AST parsing
-├── embedder.ts              # Local embedding generation
-├── compressor.ts            # Classic tier-based compression
-├── compressor-advanced.ts   # LLMLingua-2-inspired compression
-├── monitor.ts               # Token consumption monitoring
-├── hooks/
-│   └── preToolUse.ts        # Pre-tool-use interception hook
-└── utils/
-    ├── path-jail.ts         # Path traversal protection
-    ├── safe-parse.ts        # WASM memory-safe parsing
-    ├── file-filter.ts       # File size/extension filtering
-    └── code-tokenizer.ts    # Code-aware identifier tokenizer
-```
-
-## Pull Request Guidelines
-
-1. **Fork** the repository and create a feature branch from `main`
-2. **Write tests** for any new functionality
-3. **Run the full test suite** before submitting: `npm test`
-4. **Keep commits focused**: one fix/feature per commit
-5. **Write clear commit messages** following conventional commits
-6. **Update documentation** if you change any public APIs
-7. **Do not include** build artifacts (`dist/`) in your PR
-
-## Reporting Issues
-
-Please use the GitHub Issues templates:
-- **Bug Report**: for bugs and unexpected behavior
-- **Feature Request**: for new features and enhancements
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the MIT License.
-</file>
-
 <file path="scripts/download-wasm.js">
 /**
  * download-wasm.js — Postinstall script to fetch Tree-sitter WASM grammars.
@@ -7953,6 +8274,111 @@ describe("Stress: Repeated 100x indexing (idempotency)", () => {
         db.close();
     });
 });
+</file>
+
+<file path="CONTRIBUTING.md">
+# Contributing to TokenGuard
+
+Thank you for your interest in contributing to TokenGuard! This guide will help you get started.
+
+## Development Setup
+
+### Prerequisites
+- Node.js >= 20.0.0
+- npm >= 9.0.0
+
+### Setup
+```bash
+git clone https://github.com/YOUR_USERNAME/tokenguard.git
+cd tokenguard
+npm ci
+```
+
+### Building
+```bash
+npm run build
+```
+
+### Running Tests
+```bash
+npm test                # Run all tests once
+npm run test:watch      # Run tests in watch mode
+```
+
+### Running Locally
+```bash
+npm run dev             # Run with tsx (development)
+npm start               # Run compiled version
+```
+
+## Code Style
+
+- **Language**: TypeScript (strict mode enabled)
+- **Module System**: ES Modules (Node16)
+- **Target**: ES2022
+- **Formatting**: Use consistent 4-space indentation
+- **Comments**: JSDoc for all public APIs
+
+### Lint Check
+```bash
+npm run lint
+```
+
+## Project Structure
+
+```
+src/
+├── index.ts                 # MCP server entry point (3 router registrations)
+├── router.ts                # Central dispatcher for {tool, action} pairs
+├── engine.ts                # Core search engine orchestrator
+├── database.ts              # SQLite + in-memory vector/keyword indexes
+├── parser.ts                # Tree-sitter AST parsing
+├── embedder.ts              # Local embedding generation
+├── compressor.ts            # Classic tier-based compression
+├── compressor-advanced.ts   # LLMLingua-2-inspired compression
+├── semantic-edit.ts         # Surgical AST patching by symbol name
+├── circuit-breaker.ts       # Loop detection + 3-level creative escalation
+├── pin-memory.ts            # Persistent pinned rules
+├── repo-map.ts              # Static deterministic repo map
+├── terminal-filter.ts       # Terminal output entropy filter
+├── ast-navigator.ts         # AST navigation (def, refs, outline)
+├── ast-sandbox.ts           # AST sandbox validator
+├── monitor.ts               # Token consumption monitoring
+├── undo.ts                  # Backup/restore for semantic edits
+├── hooks/
+│   └── preToolUse.ts        # Behavioral advisor hook
+├── middleware/
+│   ├── circuit-breaker.ts   # Circuit breaker middleware wrapper
+│   ├── validator.ts         # AST validation middleware
+│   └── file-lock.ts         # File-level mutex for edits
+└── utils/
+    ├── path-jail.ts         # Path traversal protection
+    ├── safe-parse.ts        # WASM memory-safe parsing
+    ├── file-filter.ts       # File size/extension filtering
+    ├── read-source.ts       # BOM-safe file reader
+    ├── code-tokenizer.ts    # Code-aware identifier tokenizer
+    └── imports.ts           # Dependency extraction + security filters for Auto-Context
+```
+
+## Pull Request Guidelines
+
+1. **Fork** the repository and create a feature branch from `main`
+2. **Write tests** for any new functionality
+3. **Run the full test suite** before submitting: `npm test`
+4. **Keep commits focused**: one fix/feature per commit
+5. **Write clear commit messages** following conventional commits
+6. **Update documentation** if you change any public APIs
+7. **Do not include** build artifacts (`dist/`) in your PR
+
+## Reporting Issues
+
+Please use the GitHub Issues templates:
+- **Bug Report**: for bugs and unexpected behavior
+- **Feature Request**: for new features and enhancements
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the MIT License.
 </file>
 
 <file path="src/ast-navigator.ts">
@@ -10428,437 +10854,6 @@ describe("Response format", () => {
     it("successful responses do not set isError", async () => {
         const success = await handleNavigate("search", { action: "search", query: "test" }, deps);
         expect(success.isError).toBeUndefined();
-    });
-});
-</file>
-
-<file path="tests/security.test.ts">
-/**
- * security.test.ts — Tests for v3.0.1 security hardening.
- *
- * Covers:
- * - Fix 3A: Symlink resolution + sensitive file blocklist
- * - Fix 3B: Per-file circuit breaker error tracking
- * - Fix 3C: Terminal → filter_output rename
- * - Fix 3D: Pin text sanitization
- */
-
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import fs from "fs";
-import path from "path";
-import os from "os";
-import { safePath, isSensitivePath } from "../src/utils/path-jail.js";
-import { CircuitBreaker } from "../src/circuit-breaker.js";
-import {
-    wrapWithCircuitBreaker,
-    resetMiddlewareState,
-} from "../src/middleware/circuit-breaker.js";
-import { sanitizePin } from "../src/pin-memory.js";
-import type { McpToolResponse } from "../src/router.js";
-
-// ─── Fix 3A: Symlink Resolution + Sensitive File Blocklist ──────────
-
-describe("safePath — Symlink Resolution", () => {
-    let tmpDir: string;
-
-    beforeEach(() => {
-        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tg-security-"));
-    });
-
-    it("allows normal files within workspace", () => {
-        const testFile = path.join(tmpDir, "src", "index.ts");
-        fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
-        fs.writeFileSync(testFile, "const x = 1;");
-
-        const result = safePath(tmpDir, "src/index.ts");
-        expect(result).toBe(path.resolve(tmpDir, "src/index.ts"));
-    });
-
-    it("blocks path traversal with ../", () => {
-        expect(() => safePath(tmpDir, "../../etc/passwd")).toThrow("Path traversal blocked");
-    });
-
-    it("blocks symlinks that escape workspace", () => {
-        // Create a symlink pointing outside the workspace
-        const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "tg-outside-"));
-        const outsideFile = path.join(outsideDir, "secret.txt");
-        fs.writeFileSync(outsideFile, "secret data");
-
-        const symlinkPath = path.join(tmpDir, "escape-link");
-        try {
-            fs.symlinkSync(outsideFile, symlinkPath);
-        } catch {
-            // Symlinks may require elevated permissions on Windows — skip test
-            return;
-        }
-
-        expect(() => safePath(tmpDir, "escape-link")).toThrow("Symlink escape blocked");
-
-        // Cleanup
-        fs.rmSync(outsideDir, { recursive: true });
-    });
-
-    it("allows symlinks that stay within workspace", () => {
-        const srcDir = path.join(tmpDir, "src");
-        fs.mkdirSync(srcDir, { recursive: true });
-        const realFile = path.join(srcDir, "real.ts");
-        fs.writeFileSync(realFile, "const y = 2;");
-
-        const linkPath = path.join(tmpDir, "link.ts");
-        try {
-            fs.symlinkSync(realFile, linkPath);
-        } catch {
-            // Symlinks may require elevated permissions on Windows — skip test
-            return;
-        }
-
-        const result = safePath(tmpDir, "link.ts");
-        expect(result).toBeTruthy();
-    });
-
-    it("allows non-existent files (new file creation)", () => {
-        // Should not throw ENOENT — just validate path structure
-        const result = safePath(tmpDir, "new-file.ts");
-        expect(result).toBe(path.resolve(tmpDir, "new-file.ts"));
-    });
-});
-
-describe("safePath — Sensitive File Blocklist", () => {
-    let tmpDir: string;
-
-    beforeEach(() => {
-        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tg-security-"));
-    });
-
-    it("blocks .env files", () => {
-        expect(() => safePath(tmpDir, ".env")).toThrow("sensitive file blocked");
-    });
-
-    it("blocks .env.local files", () => {
-        expect(() => safePath(tmpDir, ".env.local")).toThrow("sensitive file blocked");
-    });
-
-    it("blocks .ssh/ paths", () => {
-        expect(() => safePath(tmpDir, ".ssh/id_rsa")).toThrow("sensitive file blocked");
-    });
-
-    it("blocks id_rsa files anywhere", () => {
-        expect(() => safePath(tmpDir, "keys/id_rsa")).toThrow("sensitive file blocked");
-    });
-
-    it("blocks id_ed25519 files", () => {
-        expect(() => safePath(tmpDir, "keys/id_ed25519")).toThrow("sensitive file blocked");
-    });
-
-    it("blocks .pem files", () => {
-        expect(() => safePath(tmpDir, "certs/server.pem")).toThrow("sensitive file blocked");
-    });
-
-    it("blocks .key files", () => {
-        expect(() => safePath(tmpDir, "ssl/private.key")).toThrow("sensitive file blocked");
-    });
-
-    it("blocks .npmrc", () => {
-        expect(() => safePath(tmpDir, ".npmrc")).toThrow("sensitive file blocked");
-    });
-
-    it("blocks .pypirc", () => {
-        expect(() => safePath(tmpDir, ".pypirc")).toThrow("sensitive file blocked");
-    });
-
-    it("blocks .git/credentials", () => {
-        expect(() => safePath(tmpDir, ".git/credentials")).toThrow("sensitive file blocked");
-    });
-
-    it("blocks .git/config", () => {
-        expect(() => safePath(tmpDir, ".git/config")).toThrow("sensitive file blocked");
-    });
-
-    it("allows normal project files", () => {
-        const result = safePath(tmpDir, "src/app.ts");
-        expect(result).toBeTruthy();
-    });
-
-    it("allows package.json", () => {
-        const result = safePath(tmpDir, "package.json");
-        expect(result).toBeTruthy();
-    });
-});
-
-describe("isSensitivePath helper", () => {
-    it("returns true for .env", () => {
-        expect(isSensitivePath("/project/.env")).toBe(true);
-    });
-
-    it("returns true for .env.production", () => {
-        expect(isSensitivePath("/project/.env.production")).toBe(true);
-    });
-
-    it("returns false for normal files", () => {
-        expect(isSensitivePath("/project/src/index.ts")).toBe(false);
-    });
-
-    it("returns false for .envrc (not matching .env pattern)", () => {
-        // .envrc doesn't match /.env($|\.)/ because 'r' follows
-        expect(isSensitivePath("/project/.envrc")).toBe(false);
-    });
-});
-
-// ─── Fix 3B: Per-File Circuit Breaker Error Tracking ────────────────
-
-describe("CircuitBreaker — Per-File Failure Tracking", () => {
-    let cb: CircuitBreaker;
-
-    beforeEach(() => {
-        cb = new CircuitBreaker();
-    });
-
-    it("increments per-file counter on error", () => {
-        cb.recordToolCall("tg_code:edit", "TypeError: something", "src/foo.ts");
-        const state = cb.getState();
-        expect(state.perFileFailures.get("src/foo.ts")).toBe(1);
-    });
-
-    it("resets per-file counter on success for that file", () => {
-        cb.recordToolCall("tg_code:edit", "TypeError: something", "src/foo.ts");
-        cb.recordToolCall("tg_code:edit", "TypeError: something", "src/foo.ts");
-        expect(cb.getState().perFileFailures.get("src/foo.ts")).toBe(2);
-
-        // Success resets
-        cb.recordToolCall("tg_code:edit", "Edit successful", "src/foo.ts");
-        expect(cb.getState().perFileFailures.get("src/foo.ts")).toBeUndefined();
-    });
-
-    it("tracks errors independently per file", () => {
-        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/a.ts");
-        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/b.ts");
-
-        const state = cb.getState();
-        expect(state.perFileFailures.get("src/a.ts")).toBe(1);
-        expect(state.perFileFailures.get("src/b.ts")).toBe(1);
-    });
-
-    it("trips after 3 per-file failures (Pattern 4)", () => {
-        // Use different error messages so Pattern 1 (same error hash) doesn't trip first
-        cb.recordToolCall("tg_code:edit", "TypeError: x is not a function", "src/broken.ts");
-        cb.recordToolCall("tg_code:edit", "ReferenceError: y is not defined", "src/broken.ts");
-        const result = cb.recordToolCall("tg_code:edit", "SyntaxError: unexpected token", "src/broken.ts");
-
-        expect(result.tripped).toBe(true);
-        expect(result.reason).toContain("src/broken.ts");
-    });
-
-    it("does NOT trip if errors are on different files with different messages", () => {
-        // Different files + different error messages avoids both Pattern 1 and Pattern 4
-        cb.recordToolCall("tg_code:edit", "TypeError: property x", "src/a.ts");
-        cb.recordToolCall("tg_code:edit", "ReferenceError: y undefined", "src/b.ts");
-        const result = cb.recordToolCall("tg_code:edit", "SyntaxError: unexpected", "src/c.ts");
-
-        expect(result.tripped).toBe(false);
-    });
-
-    it("softReset clears tripped state and purges file history (amnesia total)", () => {
-        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/broken.ts");
-        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/broken.ts");
-        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/broken.ts");
-
-        expect(cb.getState().tripped).toBe(true);
-
-        cb.softReset();
-
-        expect(cb.getState().tripped).toBe(false);
-        // Amnesia total: perFileFailures for the tripped file are cleared
-        expect(cb.getState().perFileFailures.has("src/broken.ts")).toBe(false);
-        // But escalation level is preserved
-        expect(cb.getState().escalationLevel).toBe(1);
-    });
-
-    it("full reset clears everything including per-file counters", () => {
-        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/broken.ts");
-        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/broken.ts");
-
-        cb.reset();
-
-        expect(cb.getState().perFileFailures.size).toBe(0);
-        expect(cb.getState().tripped).toBe(false);
-        expect(cb.getState().history.length).toBe(0);
-    });
-});
-
-describe("CircuitBreaker Middleware — Bypass Prevention", () => {
-    let cb: CircuitBreaker;
-
-    beforeEach(() => {
-        cb = new CircuitBreaker();
-        resetMiddlewareState();
-    });
-
-    it("alternating edit/read on same file still trips per-file breaker", async () => {
-        const editErrorHandler = async (): Promise<McpToolResponse> => ({
-            content: [{ type: "text", text: "TypeError: Cannot find property" }],
-            isError: true,
-        });
-
-        const readSuccessHandler = async (): Promise<McpToolResponse> => ({
-            content: [{ type: "text", text: "File contents..." }],
-        });
-
-        // Alternate: edit fails, read succeeds, edit fails, read succeeds, edit fails
-        await wrapWithCircuitBreaker(cb, "tg_code", "edit", editErrorHandler, "src/target.ts");
-        await wrapWithCircuitBreaker(cb, "tg_code", "read", readSuccessHandler, "src/other.ts");
-        await wrapWithCircuitBreaker(cb, "tg_code", "edit", editErrorHandler, "src/target.ts");
-        await wrapWithCircuitBreaker(cb, "tg_code", "read", readSuccessHandler, "src/other.ts");
-        const result = await wrapWithCircuitBreaker(cb, "tg_code", "edit", editErrorHandler, "src/target.ts");
-
-        // Per-file tracking should catch this even though the global pattern alternates
-        expect(result.isError).toBe(true);
-        expect(result.content[0].text).toContain("BREAK & BUILD");
-    });
-
-    it("soft reset on tool change preserves per-file failure count", async () => {
-        const editErrorHandler = async (): Promise<McpToolResponse> => ({
-            content: [{ type: "text", text: "TypeError: Cannot find property" }],
-            isError: true,
-        });
-
-        // Build up per-file failures
-        await wrapWithCircuitBreaker(cb, "tg_code", "edit", editErrorHandler, "src/target.ts");
-        await wrapWithCircuitBreaker(cb, "tg_code", "edit", editErrorHandler, "src/target.ts");
-
-        // Per-file counter should be 2
-        expect(cb.getState().perFileFailures.get("src/target.ts")).toBe(2);
-
-        // Switch to a different tool (triggers soft reset if tripped)
-        const searchHandler = async (): Promise<McpToolResponse> => ({
-            content: [{ type: "text", text: "Search results..." }],
-        });
-        await wrapWithCircuitBreaker(cb, "tg_navigate", "search", searchHandler);
-
-        // Per-file counter should be preserved (soft reset doesn't clear it)
-        expect(cb.getState().perFileFailures.get("src/target.ts")).toBe(2);
-    });
-});
-
-// ─── Fix 3C: Terminal → filter_output Rename ────────────────────────
-
-describe("Terminal → filter_output Rename", () => {
-    // Covered by router.test.ts and backward-compat.test.ts
-    // Additional coverage here for action enum correctness
-
-    it("filter_output is in valid action list for tg_code", async () => {
-        // This is a compile-time check — the Zod schema in index.ts
-        // accepts "filter_output" and rejects "terminal"
-        // Runtime behavior tested in router.test.ts
-        expect(true).toBe(true);
-    });
-});
-
-// ─── Fix 3D: Pin Sanitization ───────────────────────────────────────
-
-describe("Pin Sanitization", () => {
-    it("accepts normal pin text", () => {
-        const result = sanitizePin("Always use camelCase for variables");
-        expect(result.valid).toBe(true);
-    });
-
-    it("accepts pin text mentioning coding patterns", () => {
-        const result = sanitizePin("Use TypeScript strict mode");
-        expect(result.valid).toBe(true);
-    });
-
-    it("blocks full URLs", () => {
-        const result = sanitizePin("See https://evil.com/instructions for details");
-        expect(result.valid).toBe(false);
-        if (!result.valid) {
-            expect(result.reason).toContain("URLs");
-        }
-    });
-
-    it("blocks http URLs", () => {
-        const result = sanitizePin("Download from http://example.com/payload");
-        expect(result.valid).toBe(false);
-    });
-
-    it("allows the word HTTPS without a full URL", () => {
-        const result = sanitizePin("Always use HTTPS for API calls");
-        expect(result.valid).toBe(true);
-    });
-
-    it("blocks sudo commands", () => {
-        const result = sanitizePin("Run sudo rm -rf / to fix");
-        expect(result.valid).toBe(false);
-        if (!result.valid) {
-            expect(result.reason).toContain("sudo");
-        }
-    });
-
-    it("blocks curl commands", () => {
-        const result = sanitizePin("Use curl to download updates");
-        expect(result.valid).toBe(false);
-        if (!result.valid) {
-            expect(result.reason).toContain("download");
-        }
-    });
-
-    it("blocks wget commands", () => {
-        const result = sanitizePin("Run wget to fetch the file");
-        expect(result.valid).toBe(false);
-    });
-
-    it("blocks path traversal", () => {
-        const result = sanitizePin("Read from ../../etc/passwd");
-        expect(result.valid).toBe(false);
-        if (!result.valid) {
-            expect(result.reason).toContain("path traversal");
-        }
-    });
-
-    it("blocks command substitution $(...)", () => {
-        const result = sanitizePin("Set value to $(whoami)");
-        expect(result.valid).toBe(false);
-        if (!result.valid) {
-            expect(result.reason).toContain("command substitution");
-        }
-    });
-
-    it("blocks backtick execution", () => {
-        const result = sanitizePin("Set variable to `whoami` output");
-        expect(result.valid).toBe(false);
-        if (!result.valid) {
-            expect(result.reason).toContain("backtick");
-        }
-    });
-
-    it("blocks script injection", () => {
-        const result = sanitizePin("Add <script>alert(1)</script> to the page");
-        expect(result.valid).toBe(false);
-        if (!result.valid) {
-            expect(result.reason).toContain("script");
-        }
-    });
-
-    it("blocks eval() calls", () => {
-        const result = sanitizePin("Use eval( user_input ) for flexibility");
-        expect(result.valid).toBe(false);
-        if (!result.valid) {
-            expect(result.reason).toContain("eval");
-        }
-    });
-
-    it("blocks exec() calls", () => {
-        const result = sanitizePin("Call exec( command ) to run");
-        expect(result.valid).toBe(false);
-        if (!result.valid) {
-            expect(result.reason).toContain("exec");
-        }
-    });
-
-    it("blocks rm -rf", () => {
-        const result = sanitizePin("First rm -rf node_modules then reinstall");
-        expect(result.valid).toBe(false);
-        if (!result.valid) {
-            expect(result.reason).toContain("destructive");
-        }
     });
 });
 </file>
@@ -13600,6 +13595,756 @@ describe("v2.2 FIX 6: Repo map appears before pins", () => {
 });
 </file>
 
+<file path="tests/security.test.ts">
+/**
+ * security.test.ts — Tests for v3.0.1 security hardening.
+ *
+ * Covers:
+ * - Fix 3A: Symlink resolution + sensitive file blocklist
+ * - Fix 3B: Per-file circuit breaker error tracking
+ * - Fix 3C: Terminal → filter_output rename
+ * - Fix 3D: Pin text sanitization
+ */
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import fs from "fs";
+import path from "path";
+import os from "os";
+import { safePath, isSensitivePath } from "../src/utils/path-jail.js";
+import { CircuitBreaker } from "../src/circuit-breaker.js";
+import {
+    wrapWithCircuitBreaker,
+    resetMiddlewareState,
+} from "../src/middleware/circuit-breaker.js";
+import { sanitizePin } from "../src/pin-memory.js";
+import type { McpToolResponse } from "../src/router.js";
+
+// ─── Fix 3A: Symlink Resolution + Sensitive File Blocklist ──────────
+
+describe("safePath — Symlink Resolution", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tg-security-"));
+    });
+
+    it("allows normal files within workspace", () => {
+        const testFile = path.join(tmpDir, "src", "index.ts");
+        fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+        fs.writeFileSync(testFile, "const x = 1;");
+
+        const result = safePath(tmpDir, "src/index.ts");
+        expect(result).toBe(path.resolve(tmpDir, "src/index.ts"));
+    });
+
+    it("blocks path traversal with ../", () => {
+        expect(() => safePath(tmpDir, "../../etc/passwd")).toThrow("Path traversal blocked");
+    });
+
+    it("blocks symlinks that escape workspace", () => {
+        // Create a symlink pointing outside the workspace
+        const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "tg-outside-"));
+        const outsideFile = path.join(outsideDir, "secret.txt");
+        fs.writeFileSync(outsideFile, "secret data");
+
+        const symlinkPath = path.join(tmpDir, "escape-link");
+        try {
+            fs.symlinkSync(outsideFile, symlinkPath);
+        } catch {
+            // Symlinks may require elevated permissions on Windows — skip test
+            return;
+        }
+
+        expect(() => safePath(tmpDir, "escape-link")).toThrow("Symlink escape blocked");
+
+        // Cleanup
+        fs.rmSync(outsideDir, { recursive: true });
+    });
+
+    it("allows symlinks that stay within workspace", () => {
+        const srcDir = path.join(tmpDir, "src");
+        fs.mkdirSync(srcDir, { recursive: true });
+        const realFile = path.join(srcDir, "real.ts");
+        fs.writeFileSync(realFile, "const y = 2;");
+
+        const linkPath = path.join(tmpDir, "link.ts");
+        try {
+            fs.symlinkSync(realFile, linkPath);
+        } catch {
+            // Symlinks may require elevated permissions on Windows — skip test
+            return;
+        }
+
+        const result = safePath(tmpDir, "link.ts");
+        expect(result).toBeTruthy();
+    });
+
+    it("allows non-existent files (new file creation)", () => {
+        // Should not throw ENOENT — just validate path structure
+        const result = safePath(tmpDir, "new-file.ts");
+        expect(result).toBe(path.resolve(tmpDir, "new-file.ts"));
+    });
+});
+
+describe("safePath — Sensitive File Blocklist", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tg-security-"));
+    });
+
+    it("blocks .env files", () => {
+        expect(() => safePath(tmpDir, ".env")).toThrow("sensitive file blocked");
+    });
+
+    it("blocks .env.local files", () => {
+        expect(() => safePath(tmpDir, ".env.local")).toThrow("sensitive file blocked");
+    });
+
+    it("blocks .ssh/ paths", () => {
+        expect(() => safePath(tmpDir, ".ssh/id_rsa")).toThrow("sensitive file blocked");
+    });
+
+    it("blocks id_rsa files anywhere", () => {
+        expect(() => safePath(tmpDir, "keys/id_rsa")).toThrow("sensitive file blocked");
+    });
+
+    it("blocks id_ed25519 files", () => {
+        expect(() => safePath(tmpDir, "keys/id_ed25519")).toThrow("sensitive file blocked");
+    });
+
+    it("blocks .pem files", () => {
+        expect(() => safePath(tmpDir, "certs/server.pem")).toThrow("sensitive file blocked");
+    });
+
+    it("blocks .key files", () => {
+        expect(() => safePath(tmpDir, "ssl/private.key")).toThrow("sensitive file blocked");
+    });
+
+    it("blocks .npmrc", () => {
+        expect(() => safePath(tmpDir, ".npmrc")).toThrow("sensitive file blocked");
+    });
+
+    it("blocks .pypirc", () => {
+        expect(() => safePath(tmpDir, ".pypirc")).toThrow("sensitive file blocked");
+    });
+
+    it("blocks .git/credentials", () => {
+        expect(() => safePath(tmpDir, ".git/credentials")).toThrow("sensitive file blocked");
+    });
+
+    it("blocks .git/config", () => {
+        expect(() => safePath(tmpDir, ".git/config")).toThrow("sensitive file blocked");
+    });
+
+    it("allows normal project files", () => {
+        const result = safePath(tmpDir, "src/app.ts");
+        expect(result).toBeTruthy();
+    });
+
+    it("allows package.json", () => {
+        const result = safePath(tmpDir, "package.json");
+        expect(result).toBeTruthy();
+    });
+});
+
+describe("isSensitivePath helper", () => {
+    it("returns true for .env", () => {
+        expect(isSensitivePath("/project/.env")).toBe(true);
+    });
+
+    it("returns true for .env.production", () => {
+        expect(isSensitivePath("/project/.env.production")).toBe(true);
+    });
+
+    it("returns false for normal files", () => {
+        expect(isSensitivePath("/project/src/index.ts")).toBe(false);
+    });
+
+    it("returns false for .envrc (not matching .env pattern)", () => {
+        // .envrc doesn't match /.env($|\.)/ because 'r' follows
+        expect(isSensitivePath("/project/.envrc")).toBe(false);
+    });
+});
+
+// ─── Fix 3B: Per-File Circuit Breaker Error Tracking ────────────────
+
+describe("CircuitBreaker — Per-File Failure Tracking", () => {
+    let cb: CircuitBreaker;
+
+    beforeEach(() => {
+        cb = new CircuitBreaker();
+    });
+
+    it("increments per-file counter on error", () => {
+        cb.recordToolCall("tg_code:edit", "TypeError: something", "src/foo.ts");
+        const state = cb.getState();
+        const normalized = path.resolve(process.cwd(), "src/foo.ts").replace(/\\/g, "/");
+        expect(state.perFileFailures.get(normalized)).toBe(1);
+    });
+
+    it("resets per-file counter on success for that file", () => {
+        const normalized = path.resolve(process.cwd(), "src/foo.ts").replace(/\\/g, "/");
+        cb.recordToolCall("tg_code:edit", "TypeError: something", "src/foo.ts");
+        cb.recordToolCall("tg_code:edit", "TypeError: something", "src/foo.ts");
+        expect(cb.getState().perFileFailures.get(normalized)).toBe(2);
+
+        // Success resets
+        cb.recordToolCall("tg_code:edit", "Edit successful", "src/foo.ts");
+        expect(cb.getState().perFileFailures.get(normalized)).toBeUndefined();
+    });
+
+    it("tracks errors independently per file", () => {
+        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/a.ts");
+        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/b.ts");
+
+        const state = cb.getState();
+        const normA = path.resolve(process.cwd(), "src/a.ts").replace(/\\/g, "/");
+        const normB = path.resolve(process.cwd(), "src/b.ts").replace(/\\/g, "/");
+        expect(state.perFileFailures.get(normA)).toBe(1);
+        expect(state.perFileFailures.get(normB)).toBe(1);
+    });
+
+    it("trips after 3 per-file failures (Pattern 4)", () => {
+        // Use different error messages so Pattern 1 (same error hash) doesn't trip first
+        cb.recordToolCall("tg_code:edit", "TypeError: x is not a function", "src/broken.ts");
+        cb.recordToolCall("tg_code:edit", "ReferenceError: y is not defined", "src/broken.ts");
+        const result = cb.recordToolCall("tg_code:edit", "SyntaxError: unexpected token", "src/broken.ts");
+
+        expect(result.tripped).toBe(true);
+        expect(result.reason).toContain("src/broken.ts");
+    });
+
+    it("does NOT trip if errors are on different files with different messages", () => {
+        // Different files + different error messages avoids both Pattern 1 and Pattern 4
+        cb.recordToolCall("tg_code:edit", "TypeError: property x", "src/a.ts");
+        cb.recordToolCall("tg_code:edit", "ReferenceError: y undefined", "src/b.ts");
+        const result = cb.recordToolCall("tg_code:edit", "SyntaxError: unexpected", "src/c.ts");
+
+        expect(result.tripped).toBe(false);
+    });
+
+    it("softReset clears tripped state and purges file history (amnesia total)", () => {
+        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/broken.ts");
+        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/broken.ts");
+        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/broken.ts");
+
+        expect(cb.getState().tripped).toBe(true);
+
+        cb.softReset();
+
+        expect(cb.getState().tripped).toBe(false);
+        // Amnesia total: perFileFailures for the tripped file are cleared
+        const normBroken = path.resolve(process.cwd(), "src/broken.ts").replace(/\\/g, "/");
+        expect(cb.getState().perFileFailures.has(normBroken)).toBe(false);
+        // But escalation level is preserved
+        expect(cb.getState().escalationLevel).toBe(1);
+    });
+
+    it("full reset clears everything including per-file counters", () => {
+        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/broken.ts");
+        cb.recordToolCall("tg_code:edit", "TypeError: fail", "src/broken.ts");
+
+        cb.reset();
+
+        expect(cb.getState().perFileFailures.size).toBe(0);
+        expect(cb.getState().tripped).toBe(false);
+        expect(cb.getState().history.length).toBe(0);
+    });
+});
+
+describe("CircuitBreaker Middleware — Bypass Prevention", () => {
+    let cb: CircuitBreaker;
+
+    beforeEach(() => {
+        cb = new CircuitBreaker();
+        resetMiddlewareState();
+    });
+
+    it("alternating edit/read on same file still trips per-file breaker", async () => {
+        const editErrorHandler = async (): Promise<McpToolResponse> => ({
+            content: [{ type: "text", text: "TypeError: Cannot find property" }],
+            isError: true,
+        });
+
+        const readSuccessHandler = async (): Promise<McpToolResponse> => ({
+            content: [{ type: "text", text: "File contents..." }],
+        });
+
+        // Alternate: edit fails, read succeeds, edit fails, read succeeds, edit fails
+        await wrapWithCircuitBreaker(cb, "tg_code", "edit", editErrorHandler, "src/target.ts");
+        await wrapWithCircuitBreaker(cb, "tg_code", "read", readSuccessHandler, "src/other.ts");
+        await wrapWithCircuitBreaker(cb, "tg_code", "edit", editErrorHandler, "src/target.ts");
+        await wrapWithCircuitBreaker(cb, "tg_code", "read", readSuccessHandler, "src/other.ts");
+        const result = await wrapWithCircuitBreaker(cb, "tg_code", "edit", editErrorHandler, "src/target.ts");
+
+        // Per-file tracking should catch this even though the global pattern alternates
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain("BREAK & BUILD");
+    });
+
+    it("soft reset on tool change preserves per-file failure count", async () => {
+        const editErrorHandler = async (): Promise<McpToolResponse> => ({
+            content: [{ type: "text", text: "TypeError: Cannot find property" }],
+            isError: true,
+        });
+
+        // Build up per-file failures
+        await wrapWithCircuitBreaker(cb, "tg_code", "edit", editErrorHandler, "src/target.ts");
+        await wrapWithCircuitBreaker(cb, "tg_code", "edit", editErrorHandler, "src/target.ts");
+
+        // Per-file counter should be 2
+        const normTarget = path.resolve(process.cwd(), "src/target.ts").replace(/\\/g, "/");
+        expect(cb.getState().perFileFailures.get(normTarget)).toBe(2);
+
+        // Switch to a different tool (triggers soft reset if tripped)
+        const searchHandler = async (): Promise<McpToolResponse> => ({
+            content: [{ type: "text", text: "Search results..." }],
+        });
+        await wrapWithCircuitBreaker(cb, "tg_navigate", "search", searchHandler);
+
+        // Per-file counter should be preserved (soft reset doesn't clear it)
+        expect(cb.getState().perFileFailures.get(normTarget)).toBe(2);
+    });
+});
+
+// ─── Fix 3C: Terminal → filter_output Rename ────────────────────────
+
+describe("Terminal → filter_output Rename", () => {
+    // Covered by router.test.ts and backward-compat.test.ts
+    // Additional coverage here for action enum correctness
+
+    it("filter_output is in valid action list for tg_code", async () => {
+        // This is a compile-time check — the Zod schema in index.ts
+        // accepts "filter_output" and rejects "terminal"
+        // Runtime behavior tested in router.test.ts
+        expect(true).toBe(true);
+    });
+});
+
+// ─── Fix 3D: Pin Sanitization ───────────────────────────────────────
+
+describe("Pin Sanitization", () => {
+    it("accepts normal pin text", () => {
+        const result = sanitizePin("Always use camelCase for variables");
+        expect(result.valid).toBe(true);
+    });
+
+    it("accepts pin text mentioning coding patterns", () => {
+        const result = sanitizePin("Use TypeScript strict mode");
+        expect(result.valid).toBe(true);
+    });
+
+    it("blocks full URLs", () => {
+        const result = sanitizePin("See https://evil.com/instructions for details");
+        expect(result.valid).toBe(false);
+        if (!result.valid) {
+            expect(result.reason).toContain("URLs");
+        }
+    });
+
+    it("blocks http URLs", () => {
+        const result = sanitizePin("Download from http://example.com/payload");
+        expect(result.valid).toBe(false);
+    });
+
+    it("allows the word HTTPS without a full URL", () => {
+        const result = sanitizePin("Always use HTTPS for API calls");
+        expect(result.valid).toBe(true);
+    });
+
+    it("blocks sudo commands", () => {
+        const result = sanitizePin("Run sudo rm -rf / to fix");
+        expect(result.valid).toBe(false);
+        if (!result.valid) {
+            expect(result.reason).toContain("sudo");
+        }
+    });
+
+    it("blocks curl commands", () => {
+        const result = sanitizePin("Use curl to download updates");
+        expect(result.valid).toBe(false);
+        if (!result.valid) {
+            expect(result.reason).toContain("download");
+        }
+    });
+
+    it("blocks wget commands", () => {
+        const result = sanitizePin("Run wget to fetch the file");
+        expect(result.valid).toBe(false);
+    });
+
+    it("blocks path traversal", () => {
+        const result = sanitizePin("Read from ../../etc/passwd");
+        expect(result.valid).toBe(false);
+        if (!result.valid) {
+            expect(result.reason).toContain("path traversal");
+        }
+    });
+
+    it("blocks command substitution $(...)", () => {
+        const result = sanitizePin("Set value to $(whoami)");
+        expect(result.valid).toBe(false);
+        if (!result.valid) {
+            expect(result.reason).toContain("command substitution");
+        }
+    });
+
+    it("blocks backtick execution", () => {
+        const result = sanitizePin("Set variable to `whoami` output");
+        expect(result.valid).toBe(false);
+        if (!result.valid) {
+            expect(result.reason).toContain("backtick");
+        }
+    });
+
+    it("blocks script injection", () => {
+        const result = sanitizePin("Add <script>alert(1)</script> to the page");
+        expect(result.valid).toBe(false);
+        if (!result.valid) {
+            expect(result.reason).toContain("script");
+        }
+    });
+
+    it("blocks eval() calls", () => {
+        const result = sanitizePin("Use eval( user_input ) for flexibility");
+        expect(result.valid).toBe(false);
+        if (!result.valid) {
+            expect(result.reason).toContain("eval");
+        }
+    });
+
+    it("blocks exec() calls", () => {
+        const result = sanitizePin("Call exec( command ) to run");
+        expect(result.valid).toBe(false);
+        if (!result.valid) {
+            expect(result.reason).toContain("exec");
+        }
+    });
+
+    it("blocks rm -rf", () => {
+        const result = sanitizePin("First rm -rf node_modules then reinstall");
+        expect(result.valid).toBe(false);
+        if (!result.valid) {
+            expect(result.reason).toContain("destructive");
+        }
+    });
+});
+</file>
+
+<file path="src/embedder.ts">
+/**
+ * embedder.ts — Local embedding generation for TokenGuard.
+ *
+ * Uses Xenova/transformers (ONNX Runtime) to run embedding models
+ * entirely on-device. No Ollama, no API keys, no cloud calls.
+ * Tries code-aware models first, falls back to general-purpose ones.
+ */
+
+// ─── Types ───────────────────────────────────────────────────────────
+
+export interface EmbeddingResult {
+    /** Normalized embedding vector. */
+    embedding: Float32Array;
+    /** Time taken in milliseconds. */
+    durationMs: number;
+}
+
+export interface BatchEmbeddingResult {
+    /** Array of normalized embedding vectors. */
+    embeddings: Float32Array[];
+    /** Total time taken in milliseconds. */
+    durationMs: number;
+    /** Number of texts embedded. */
+    count: number;
+}
+
+// ─── Model Priority ─────────────────────────────────────────────────
+
+export interface ModelSpec {
+    name: string;
+    dim: number;
+    type: "code" | "general";
+}
+
+export const MODEL_PRIORITY: ModelSpec[] = [
+    { name: "Xenova/jina-embeddings-v2-small-code", dim: 512, type: "code" },
+    { name: "Xenova/codebert-base", dim: 768, type: "code" },
+    { name: "Xenova/jina-embeddings-v2-small-en", dim: 512, type: "general" },
+    { name: "Xenova/all-MiniLM-L6-v2", dim: 384, type: "general" },
+];
+
+// ─── Embedder ────────────────────────────────────────────────────────
+
+/**
+ * Singleton embedding engine with model fallback chain.
+ *
+ * Design decisions:
+ * - Model priority: tries code-aware models first (higher NDCG on CodeSearchNet),
+ *   falls back to general-purpose models if unavailable
+ * - Lazy initialization: model loads only when first embedding is requested
+ * - Quantized mode: uses INT8 quantization for faster inference & smaller memory
+ * - Mean pooling + L2 normalization: standard for sentence embeddings
+ * - Singleton pattern: avoids loading model multiple times
+ */
+export class Embedder {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- FeatureExtractionPipeline from @xenova/transformers uses Tensor with incompatible DataArray union type
+    private pipeline: any = null; // FeatureExtractionPipeline
+    private initPromise: Promise<void> | null = null;
+    private loadedModel: ModelSpec | null = null;
+    private isReady = false;
+
+    /** Optional: pin to a specific model, skipping the fallback chain. */
+    private pinnedModelId: string | null;
+
+    constructor(modelId?: string) {
+        this.pinnedModelId = modelId ?? null;
+    }
+
+    // ─── Initialization ────────────────────────────────────────────
+
+    /** Lazy-load the transformer pipeline. Thread-safe via promise dedup. */
+    async initialize(): Promise<void> {
+        if (this.isReady) return;
+
+        if (!this.initPromise) {
+            this.initPromise = this._loadModel();
+        }
+
+        await this.initPromise;
+    }
+
+    private async _loadModel(): Promise<void> {
+        // Dynamic import to avoid loading 32 MB at require-time
+        let pipeline: any;
+        try {
+            ({ pipeline } = await import("@xenova/transformers"));
+        } catch (err) {
+            throw new Error(
+                "[TokenGuard] Pro mode requires @xenova/transformers. Install it with: npm install @xenova/transformers\n" +
+                "Or run TokenGuard in Lite mode (default, no flag needed)."
+            );
+        }
+
+        // If a specific model was pinned, try only that one
+        if (this.pinnedModelId) {
+            const spec = MODEL_PRIORITY.find(m => m.name === this.pinnedModelId)
+                ?? { name: this.pinnedModelId, dim: 512, type: "general" as const };
+
+            this.pipeline = await pipeline("feature-extraction", spec.name, {
+                quantized: true,
+            });
+            this.loadedModel = spec;
+            this.isReady = true;
+            console.log(`[TokenGuard] Loaded embedding model: ${spec.name} (${spec.type})`);
+            return;
+        }
+
+        // Try models in priority order
+        for (const spec of MODEL_PRIORITY) {
+            try {
+                this.pipeline = await pipeline("feature-extraction", spec.name, {
+                    quantized: true,
+                });
+                this.loadedModel = spec;
+                this.isReady = true;
+                console.log(`[TokenGuard] Loaded embedding model: ${spec.name} (${spec.type})`);
+                return;
+            } catch {
+                console.log(`[TokenGuard] Model ${spec.name} not available, trying next...`);
+            }
+        }
+
+        throw new Error(
+            "[TokenGuard] No embedding model could be loaded. Tried: " +
+            MODEL_PRIORITY.map(m => m.name).join(", ")
+        );
+    }
+
+    // ─── Single Embedding ──────────────────────────────────────────
+
+    /** Generate a normalized embedding for a single text. */
+    async embed(text: string): Promise<EmbeddingResult> {
+        await this.initialize();
+
+        const start = performance.now();
+
+        const output = await this.pipeline(text, {
+            pooling: "mean",
+            normalize: true,
+        });
+
+        const embedding = new Float32Array(output.data);
+        const durationMs = Math.round(performance.now() - start);
+
+        return { embedding, durationMs };
+    }
+
+    // ─── Batch Embedding ──────────────────────────────────────────
+
+    /**
+     * Generate embeddings for multiple texts.
+     * Processes sequentially to avoid OOM on large batches.
+     */
+    async embedBatch(texts: string[]): Promise<BatchEmbeddingResult> {
+        await this.initialize();
+
+        const start = performance.now();
+        const embeddings: Float32Array[] = [];
+
+        for (const text of texts) {
+            const output = await this.pipeline(text, {
+                pooling: "mean",
+                normalize: true,
+            });
+            embeddings.push(new Float32Array(output.data));
+        }
+
+        const durationMs = Math.round(performance.now() - start);
+
+        return { embeddings, durationMs, count: texts.length };
+    }
+
+    // ─── Utilities ────────────────────────────────────────────────
+
+    /** Get the dimensionality of the loaded (or default) embedding model. */
+    getDimension(): number {
+        if (this.loadedModel) return this.loadedModel.dim;
+        // Before initialization, return dimension of the first priority model
+        // (or the pinned model if set)
+        if (this.pinnedModelId) {
+            const spec = MODEL_PRIORITY.find(m => m.name === this.pinnedModelId);
+            return spec?.dim ?? 512;
+        }
+        return MODEL_PRIORITY[0].dim;
+    }
+
+    /** Get the spec of the currently loaded model, or null if not yet loaded. */
+    getLoadedModel(): ModelSpec | null {
+        return this.loadedModel;
+    }
+
+    /** Check if the model is loaded and ready. */
+    ready(): boolean {
+        return this.isReady;
+    }
+
+    /**
+     * Estimate the approximate token count of a string.
+     * Uses a simple heuristic: ~4 chars per token for English text,
+     * ~3.5 for code (more symbols/short identifiers).
+     */
+    static estimateTokens(text: string, isCode: boolean = true): number {
+        const charsPerToken = isCode ? 3.5 : 4.0;
+        return Math.ceil(text.length / charsPerToken);
+    }
+}
+
+// ─── Singleton Instance ──────────────────────────────────────────────
+
+let _instance: Embedder | null = null;
+
+/** Get or create the global Embedder singleton. */
+export function getEmbedder(modelId?: string): Embedder {
+    if (!_instance) {
+        _instance = new Embedder(modelId);
+    }
+    return _instance;
+}
+</file>
+
+<file path="src/utils/path-jail.ts">
+/**
+ * path-jail.ts — Path traversal protection for TokenGuard.
+ *
+ * Ensures all file paths resolve within the workspace root,
+ * preventing directory traversal attacks (e.g., ../../etc/passwd),
+ * symlink escapes, and access to sensitive files.
+ */
+
+import fs from "fs";
+import path from "path";
+
+// ─── Sensitive File Blocklist ───────────────────────────────────────
+
+const SENSITIVE_PATTERNS: RegExp[] = [
+    /\.env($|\.)/i,                     // .env, .env.local, .env.production
+    /[/\\]\.ssh[/\\]/i,                 // .ssh/*
+    /[/\\]\.gnupg[/\\]/i,              // .gnupg/*
+    /[/\\]\.aws[/\\]/i,                // .aws/*
+    /id_rsa/i,                          // SSH RSA keys
+    /id_ed25519/i,                      // SSH Ed25519 keys
+    /\.pem$/i,                          // PEM certificates/keys
+    /\.key$/i,                          // Private key files
+    /[/\\]\.npmrc$/i,                   // npm auth tokens
+    /[/\\]\.pypirc$/i,                  // PyPI auth tokens
+    /[/\\]\.git[/\\]credentials$/i,     // Git credential store
+    /[/\\]\.git[/\\]config$/i,          // Git config (may contain tokens)
+];
+
+/**
+ * Check if a file path matches known sensitive file patterns.
+ * These files should never be read/written by an LLM tool.
+ */
+export function isSensitivePath(filePath: string): boolean {
+    const normalized = filePath.replace(/\\/g, "/");
+    return SENSITIVE_PATTERNS.some(pattern => pattern.test(normalized));
+}
+
+/**
+ * Resolve and validate a file path, ensuring it stays within the workspace root.
+ *
+ * Security layers:
+ *   1. Path traversal check (../ sequences)
+ *   2. Symlink resolution (prevents symlink escapes)
+ *   3. Sensitive file blocklist (.env, .ssh, .pem, etc.)
+ *
+ * @param workspaceRoot - The allowed root directory
+ * @param inputPath - User-supplied file path (relative or absolute)
+ * @returns The resolved absolute path within the workspace
+ * @throws Error if the path resolves outside the workspace root or is sensitive
+ */
+export function safePath(workspaceRoot: string, inputPath: string): string {
+    // Normalize backslashes to forward slashes so traversal detection works on Linux/macOS
+    const normalized = inputPath.replace(/\\/g, "/");
+    const resolved = path.resolve(workspaceRoot, normalized);
+    const resolvedRoot = path.resolve(workspaceRoot);
+
+    if (!resolved.startsWith(resolvedRoot)) {
+        throw new Error(`Path traversal blocked: ${inputPath}`);
+    }
+
+    // Resolve symlinks to detect symlink escapes.
+    // Both resolved and root must be real-pathed so that systems where the
+    // workspace sits under a symlinked directory (e.g. macOS /tmp → /private/tmp)
+    // don't produce false-positive "escape" errors.
+    try {
+        const realPath = fs.realpathSync(resolved);
+        let realRoot: string;
+        try {
+            realRoot = fs.realpathSync(resolvedRoot);
+        } catch {
+            realRoot = resolvedRoot;
+        }
+        if (!realPath.startsWith(realRoot)) {
+            throw new Error(`Symlink escape blocked: ${inputPath} resolves outside workspace`);
+        }
+    } catch (err) {
+        // File doesn't exist yet (e.g., new file creation) — skip symlink check
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw err;
+        }
+    }
+
+    // Block access to sensitive files
+    if (isSensitivePath(resolved)) {
+        throw new Error(`Access to sensitive file blocked: ${inputPath}`);
+    }
+
+    return resolved;
+}
+</file>
+
 <file path="tests/circuit-breaker.test.ts">
 /**
  * circuit-breaker.test.ts — Tests for infinite loop detection.
@@ -13616,6 +14361,7 @@ describe("v2.2 FIX 6: Repo map appears before pins", () => {
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
+import path from "path";
 import {
     CircuitBreaker,
     hashError,
@@ -13975,7 +14721,7 @@ describe("CircuitBreaker", () => {
             }
             const state = cb.getState();
             expect(state.escalationLevel).toBe(1);
-            expect(state.lastTrippedFile).toBe("src/foo.ts");
+            expect(state.lastTrippedFile).toBe(path.resolve(process.cwd(), "src/foo.ts").replace(/\\/g, "/"));
             expect(state.lastTrippedSymbol).toBe("myFunction");
         });
 
@@ -14088,319 +14834,6 @@ describe("CircuitBreaker", () => {
 });
 </file>
 
-<file path="src/embedder.ts">
-/**
- * embedder.ts — Local embedding generation for TokenGuard.
- *
- * Uses Xenova/transformers (ONNX Runtime) to run embedding models
- * entirely on-device. No Ollama, no API keys, no cloud calls.
- * Tries code-aware models first, falls back to general-purpose ones.
- */
-
-// ─── Types ───────────────────────────────────────────────────────────
-
-export interface EmbeddingResult {
-    /** Normalized embedding vector. */
-    embedding: Float32Array;
-    /** Time taken in milliseconds. */
-    durationMs: number;
-}
-
-export interface BatchEmbeddingResult {
-    /** Array of normalized embedding vectors. */
-    embeddings: Float32Array[];
-    /** Total time taken in milliseconds. */
-    durationMs: number;
-    /** Number of texts embedded. */
-    count: number;
-}
-
-// ─── Model Priority ─────────────────────────────────────────────────
-
-export interface ModelSpec {
-    name: string;
-    dim: number;
-    type: "code" | "general";
-}
-
-export const MODEL_PRIORITY: ModelSpec[] = [
-    { name: "Xenova/jina-embeddings-v2-small-code", dim: 512, type: "code" },
-    { name: "Xenova/codebert-base", dim: 768, type: "code" },
-    { name: "Xenova/jina-embeddings-v2-small-en", dim: 512, type: "general" },
-    { name: "Xenova/all-MiniLM-L6-v2", dim: 384, type: "general" },
-];
-
-// ─── Embedder ────────────────────────────────────────────────────────
-
-/**
- * Singleton embedding engine with model fallback chain.
- *
- * Design decisions:
- * - Model priority: tries code-aware models first (higher NDCG on CodeSearchNet),
- *   falls back to general-purpose models if unavailable
- * - Lazy initialization: model loads only when first embedding is requested
- * - Quantized mode: uses INT8 quantization for faster inference & smaller memory
- * - Mean pooling + L2 normalization: standard for sentence embeddings
- * - Singleton pattern: avoids loading model multiple times
- */
-export class Embedder {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- FeatureExtractionPipeline from @xenova/transformers uses Tensor with incompatible DataArray union type
-    private pipeline: any = null; // FeatureExtractionPipeline
-    private initPromise: Promise<void> | null = null;
-    private loadedModel: ModelSpec | null = null;
-    private isReady = false;
-
-    /** Optional: pin to a specific model, skipping the fallback chain. */
-    private pinnedModelId: string | null;
-
-    constructor(modelId?: string) {
-        this.pinnedModelId = modelId ?? null;
-    }
-
-    // ─── Initialization ────────────────────────────────────────────
-
-    /** Lazy-load the transformer pipeline. Thread-safe via promise dedup. */
-    async initialize(): Promise<void> {
-        if (this.isReady) return;
-
-        if (!this.initPromise) {
-            this.initPromise = this._loadModel();
-        }
-
-        await this.initPromise;
-    }
-
-    private async _loadModel(): Promise<void> {
-        // Dynamic import to avoid loading 32 MB at require-time
-        let pipeline: any;
-        try {
-            ({ pipeline } = await import("@xenova/transformers"));
-        } catch (err) {
-            throw new Error(
-                "[TokenGuard] Pro mode requires @xenova/transformers. Install it with: npm install @xenova/transformers\n" +
-                "Or run TokenGuard in Lite mode (default, no flag needed)."
-            );
-        }
-
-        // If a specific model was pinned, try only that one
-        if (this.pinnedModelId) {
-            const spec = MODEL_PRIORITY.find(m => m.name === this.pinnedModelId)
-                ?? { name: this.pinnedModelId, dim: 512, type: "general" as const };
-
-            this.pipeline = await pipeline("feature-extraction", spec.name, {
-                quantized: true,
-            });
-            this.loadedModel = spec;
-            this.isReady = true;
-            console.log(`[TokenGuard] Loaded embedding model: ${spec.name} (${spec.type})`);
-            return;
-        }
-
-        // Try models in priority order
-        for (const spec of MODEL_PRIORITY) {
-            try {
-                this.pipeline = await pipeline("feature-extraction", spec.name, {
-                    quantized: true,
-                });
-                this.loadedModel = spec;
-                this.isReady = true;
-                console.log(`[TokenGuard] Loaded embedding model: ${spec.name} (${spec.type})`);
-                return;
-            } catch {
-                console.log(`[TokenGuard] Model ${spec.name} not available, trying next...`);
-            }
-        }
-
-        throw new Error(
-            "[TokenGuard] No embedding model could be loaded. Tried: " +
-            MODEL_PRIORITY.map(m => m.name).join(", ")
-        );
-    }
-
-    // ─── Single Embedding ──────────────────────────────────────────
-
-    /** Generate a normalized embedding for a single text. */
-    async embed(text: string): Promise<EmbeddingResult> {
-        await this.initialize();
-
-        const start = performance.now();
-
-        const output = await this.pipeline(text, {
-            pooling: "mean",
-            normalize: true,
-        });
-
-        const embedding = new Float32Array(output.data);
-        const durationMs = Math.round(performance.now() - start);
-
-        return { embedding, durationMs };
-    }
-
-    // ─── Batch Embedding ──────────────────────────────────────────
-
-    /**
-     * Generate embeddings for multiple texts.
-     * Processes sequentially to avoid OOM on large batches.
-     */
-    async embedBatch(texts: string[]): Promise<BatchEmbeddingResult> {
-        await this.initialize();
-
-        const start = performance.now();
-        const embeddings: Float32Array[] = [];
-
-        for (const text of texts) {
-            const output = await this.pipeline(text, {
-                pooling: "mean",
-                normalize: true,
-            });
-            embeddings.push(new Float32Array(output.data));
-        }
-
-        const durationMs = Math.round(performance.now() - start);
-
-        return { embeddings, durationMs, count: texts.length };
-    }
-
-    // ─── Utilities ────────────────────────────────────────────────
-
-    /** Get the dimensionality of the loaded (or default) embedding model. */
-    getDimension(): number {
-        if (this.loadedModel) return this.loadedModel.dim;
-        // Before initialization, return dimension of the first priority model
-        // (or the pinned model if set)
-        if (this.pinnedModelId) {
-            const spec = MODEL_PRIORITY.find(m => m.name === this.pinnedModelId);
-            return spec?.dim ?? 512;
-        }
-        return MODEL_PRIORITY[0].dim;
-    }
-
-    /** Get the spec of the currently loaded model, or null if not yet loaded. */
-    getLoadedModel(): ModelSpec | null {
-        return this.loadedModel;
-    }
-
-    /** Check if the model is loaded and ready. */
-    ready(): boolean {
-        return this.isReady;
-    }
-
-    /**
-     * Estimate the approximate token count of a string.
-     * Uses a simple heuristic: ~4 chars per token for English text,
-     * ~3.5 for code (more symbols/short identifiers).
-     */
-    static estimateTokens(text: string, isCode: boolean = true): number {
-        const charsPerToken = isCode ? 3.5 : 4.0;
-        return Math.ceil(text.length / charsPerToken);
-    }
-}
-
-// ─── Singleton Instance ──────────────────────────────────────────────
-
-let _instance: Embedder | null = null;
-
-/** Get or create the global Embedder singleton. */
-export function getEmbedder(modelId?: string): Embedder {
-    if (!_instance) {
-        _instance = new Embedder(modelId);
-    }
-    return _instance;
-}
-</file>
-
-<file path="src/utils/path-jail.ts">
-/**
- * path-jail.ts — Path traversal protection for TokenGuard.
- *
- * Ensures all file paths resolve within the workspace root,
- * preventing directory traversal attacks (e.g., ../../etc/passwd),
- * symlink escapes, and access to sensitive files.
- */
-
-import fs from "fs";
-import path from "path";
-
-// ─── Sensitive File Blocklist ───────────────────────────────────────
-
-const SENSITIVE_PATTERNS: RegExp[] = [
-    /\.env($|\.)/i,                     // .env, .env.local, .env.production
-    /[/\\]\.ssh[/\\]/i,                 // .ssh/*
-    /[/\\]\.gnupg[/\\]/i,              // .gnupg/*
-    /[/\\]\.aws[/\\]/i,                // .aws/*
-    /id_rsa/i,                          // SSH RSA keys
-    /id_ed25519/i,                      // SSH Ed25519 keys
-    /\.pem$/i,                          // PEM certificates/keys
-    /\.key$/i,                          // Private key files
-    /[/\\]\.npmrc$/i,                   // npm auth tokens
-    /[/\\]\.pypirc$/i,                  // PyPI auth tokens
-    /[/\\]\.git[/\\]credentials$/i,     // Git credential store
-    /[/\\]\.git[/\\]config$/i,          // Git config (may contain tokens)
-];
-
-/**
- * Check if a file path matches known sensitive file patterns.
- * These files should never be read/written by an LLM tool.
- */
-export function isSensitivePath(filePath: string): boolean {
-    const normalized = filePath.replace(/\\/g, "/");
-    return SENSITIVE_PATTERNS.some(pattern => pattern.test(normalized));
-}
-
-/**
- * Resolve and validate a file path, ensuring it stays within the workspace root.
- *
- * Security layers:
- *   1. Path traversal check (../ sequences)
- *   2. Symlink resolution (prevents symlink escapes)
- *   3. Sensitive file blocklist (.env, .ssh, .pem, etc.)
- *
- * @param workspaceRoot - The allowed root directory
- * @param inputPath - User-supplied file path (relative or absolute)
- * @returns The resolved absolute path within the workspace
- * @throws Error if the path resolves outside the workspace root or is sensitive
- */
-export function safePath(workspaceRoot: string, inputPath: string): string {
-    // Normalize backslashes to forward slashes so traversal detection works on Linux/macOS
-    const normalized = inputPath.replace(/\\/g, "/");
-    const resolved = path.resolve(workspaceRoot, normalized);
-    const resolvedRoot = path.resolve(workspaceRoot);
-
-    if (!resolved.startsWith(resolvedRoot)) {
-        throw new Error(`Path traversal blocked: ${inputPath}`);
-    }
-
-    // Resolve symlinks to detect symlink escapes.
-    // Both resolved and root must be real-pathed so that systems where the
-    // workspace sits under a symlinked directory (e.g. macOS /tmp → /private/tmp)
-    // don't produce false-positive "escape" errors.
-    try {
-        const realPath = fs.realpathSync(resolved);
-        let realRoot: string;
-        try {
-            realRoot = fs.realpathSync(resolvedRoot);
-        } catch {
-            realRoot = resolvedRoot;
-        }
-        if (!realPath.startsWith(realRoot)) {
-            throw new Error(`Symlink escape blocked: ${inputPath} resolves outside workspace`);
-        }
-    } catch (err) {
-        // File doesn't exist yet (e.g., new file creation) — skip symlink check
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-            throw err;
-        }
-    }
-
-    // Block access to sensitive files
-    if (isSensitivePath(resolved)) {
-        throw new Error(`Access to sensitive file blocked: ${inputPath}`);
-    }
-
-    return resolved;
-}
-</file>
-
 <file path="src/circuit-breaker.ts">
 /**
  * circuit-breaker.ts — Detects and stops infinite failure loops.
@@ -14417,6 +14850,7 @@ export function safePath(workspaceRoot: string, inputPath: string): string {
  */
 
 import crypto from "crypto";
+import path from "path";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -14558,11 +14992,17 @@ export class CircuitBreaker {
         const hasError = isError ?? containsError(result);
         const errorHash = hasError ? hashError(result) : null;
 
+        // Normalize path to absolute + forward slashes — prevents split counters
+        // when the same file arrives as "src/app.ts" vs "/Users/.../src/app.ts"
+        const normalizedPath = filePath
+            ? path.resolve(process.cwd(), filePath).replace(/\\/g, "/")
+            : null;
+
         const record: ToolCallRecord = {
             toolName,
             timestamp: Date.now(),
             errorHash,
-            filePath: filePath ?? null,
+            filePath: normalizedPath,
             symbolName: symbolName ?? null,
         };
 
@@ -14586,13 +15026,13 @@ export class CircuitBreaker {
         }
 
         // Track per-file failures (prevents bypass via action alternation)
-        if (filePath) {
+        if (normalizedPath) {
             if (hasError) {
-                const current = this.state.perFileFailures.get(filePath) ?? 0;
-                this.state.perFileFailures.set(filePath, current + 1);
+                const current = this.state.perFileFailures.get(normalizedPath) ?? 0;
+                this.state.perFileFailures.set(normalizedPath, current + 1);
             } else {
                 // Success on a file resets that file's counter
-                this.state.perFileFailures.delete(filePath);
+                this.state.perFileFailures.delete(normalizedPath);
             }
         }
 
@@ -14823,7 +15263,7 @@ export class CircuitBreaker {
 
 <file path="src/router.ts">
 /**
- * router.ts — Central dispatcher for TokenGuard v3.1.2 router tools.
+ * router.ts — Central dispatcher for TokenGuard v3.2.0 router tools.
  *
  * Maps {toolName, action} pairs to existing handler functions.
  * All business logic remains in the original modules — this file
@@ -14864,6 +15304,8 @@ import { validateBeforeWrite } from "./middleware/validator.js";
 import { wrapWithCircuitBreaker } from "./middleware/circuit-breaker.js";
 import { acquireFileLock, releaseFileLock } from "./middleware/file-lock.js";
 import { PreToolUseHook } from "./hooks/preToolUse.js";
+import { extractDependencies, cleanSignature, isSensitiveSignature, escapeRegExp } from "./utils/imports.js";
+import type { CompressionLevel } from "./compressor-advanced.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -14892,6 +15334,7 @@ export interface NavigateParams {
     kind?: string;
     signatures?: boolean;
     refresh?: boolean;
+    auto_context?: boolean;
 }
 
 /** Flat params for tg_code (replaces path + options bag). */
@@ -14907,6 +15350,7 @@ export interface CodeParams {
     output?: string;
     max_lines?: number;
     mode?: string;
+    auto_context?: boolean;
 }
 
 /** Flat params for tg_guard (replaces options bag). */
@@ -15151,7 +15595,48 @@ async function handleDefinition(
         (sum, r) => sum + Embedder.estimateTokens(r.body), 0,
     );
 
-    engine.logUsage("tg_def", bodyTokens, bodyTokens, 0);
+    // Auto-Context: resolve signatures of imported dependencies used in the body
+    const autoContext = params.auto_context !== false;
+    let autoContextBlock = "";
+    let extraTokens = 0;
+
+    if (autoContext && results.length > 0) {
+        try {
+            const targetResult = results[0];
+            const ext = path.extname(targetResult.filePath).toLowerCase();
+            const fileContent = readSource(safePath(root, targetResult.filePath));
+
+            const allImports = extractDependencies(fileContent, ext);
+
+            // THE GOLD FILTER: Only inject deps that are actually USED in the body.
+            // Uses localName (alias) for matching, symbol (original) for search.
+            const usedDeps = allImports.filter(d => {
+                const safeName = escapeRegExp(d.localName);
+                const regex = new RegExp(`(^|[^a-zA-Z0-9_$])${safeName}(?=[^a-zA-Z0-9_$]|$)`);
+                return results.some(r => regex.test(r.body));
+            });
+
+            if (usedDeps.length > 0) {
+                const rawSignatures = engine.resolveImportSignatures(usedDeps.slice(0, 10));
+                const safeSigs = rawSignatures
+                    .map(s => `- \`${cleanSignature(s.raw)}\` (from ${path.basename(s.path)})`)
+                    .filter(s => !isSensitiveSignature(s));
+
+                if (safeSigs.length > 0) {
+                    autoContextBlock =
+                        `\n\n### Related Signatures (auto-detected, may be incomplete)\n` +
+                        `TokenGuard resolved these external dependencies used in the definition:\n` +
+                        safeSigs.join("\n");
+                    extraTokens = Embedder.estimateTokens(autoContextBlock);
+                    engine.incrementAutoContext();
+                }
+            }
+        } catch {
+            // Never crash the tool on auto-context failure
+        }
+    }
+
+    engine.logUsage("tg_def", bodyTokens + extraTokens, bodyTokens + extraTokens, 0);
 
     return {
         content: [{
@@ -15160,7 +15645,8 @@ async function handleDefinition(
                 `## Definition: ${symbol}\n` +
                 `Found ${results.length} definition(s).\n\n` +
                 formatted.join("\n\n") +
-                `\n\n[TokenGuard: ${bodyTokens.toLocaleString()} tokens — exact AST lookup, no search overhead]`,
+                autoContextBlock +
+                `\n\n[TokenGuard: ${(bodyTokens + extraTokens).toLocaleString()} tokens — exact AST lookup, no search overhead]`,
         }],
     };
 }
@@ -15358,36 +15844,67 @@ async function handleRead(
             };
         }
 
+        // Read file ONCE — reused for auto-context extraction and compression
+        const rawContent = readSource(resolvedPath);
+
+        // Auto-Context extraction (runs before compress/raw branch)
+        const autoContext = params.auto_context !== false;
+        let autoContextBlock = "";
+        let extraTokens = 0;
+
+        if (autoContext) {
+            try {
+                const ext = path.extname(resolvedPath).toLowerCase();
+                const depsList = extractDependencies(rawContent, ext);
+
+                if (depsList.length > 0) {
+                    const rawSignatures = engine.resolveImportSignatures(depsList.slice(0, 15));
+                    const safeSigs = rawSignatures
+                        .map(s => `- \`${cleanSignature(s.raw)}\` (from ${path.basename(s.path)})`)
+                        .filter(s => !isSensitiveSignature(s));
+
+                    if (safeSigs.length > 0) {
+                        autoContextBlock =
+                            `\n\n### Related Signatures (auto-detected, may be incomplete)\n` +
+                            `TokenGuard resolved these external dependencies imported in this file:\n` +
+                            safeSigs.join("\n");
+                        extraTokens = Embedder.estimateTokens(autoContextBlock);
+                        engine.incrementAutoContext();
+                    }
+                }
+            } catch {
+                // Never crash on auto-context failure
+            }
+        }
+
         // Skip compression for small files (< 1KB)
         if (stat.size < 1024) {
-            const content = readSource(resolvedPath);
             return {
                 content: [{
                     type: "text" as const,
                     text:
                         `## ${path.basename(resolvedPath)} (raw — ${stat.size} bytes, below 1KB threshold)\n\n` +
-                        `\`\`\`\n${content}\n\`\`\`\n\n` +
+                        `\`\`\`\n${rawContent}\n\`\`\`\n\n` +
+                        autoContextBlock +
                         `[TokenGuard: file too small to compress]`,
                 }],
             };
         }
 
         const compress = params.compress !== false;
-        const level = (typeof params.level === "string" &&
+        const level: CompressionLevel = (typeof params.level === "string" &&
             ["light", "medium", "aggressive"].includes(params.level))
-            ? params.level as "light" | "medium" | "aggressive"
+            ? params.level as CompressionLevel
             : "medium";
 
         if (!compress) {
-            const content = readSource(resolvedPath);
-
             // Mark as safely read (removes from Danger Zones)
             engine.markFileRead(resolvedPath);
 
             // Behavioral advisor: teach Claude to use compression next time
             let advice = "";
             if (deps.hook) {
-                const intercept = deps.hook.evaluateFileRead(resolvedPath, content);
+                const intercept = deps.hook.evaluateFileRead(resolvedPath, rawContent);
                 if (intercept.shouldIntercept) {
                     advice = `\n\n${intercept.suggestion}`;
                 }
@@ -15398,20 +15915,21 @@ async function handleRead(
                     type: "text" as const,
                     text:
                         `## ${path.basename(resolvedPath)} (raw)\n\n` +
-                        `\`\`\`\n${content}\n\`\`\`\n\n` +
+                        `\`\`\`\n${rawContent}\n\`\`\`\n\n` +
+                        autoContextBlock +
                         `[TokenGuard: raw read, no compression applied]${advice}`,
                 }],
             };
         }
 
-        const result = await engine.compressFileAdvanced(resolvedPath, level);
+        const result = await engine.compressFileAdvanced(resolvedPath, level, rawContent);
         engine.markFileRead(resolvedPath);
         const saved = result.tokensSaved;
 
         engine.logUsage(
             "tg_read",
-            Embedder.estimateTokens(result.compressed),
-            Embedder.estimateTokens(result.compressed),
+            Embedder.estimateTokens(result.compressed) + extraTokens,
+            Embedder.estimateTokens(result.compressed) + extraTokens,
             saved,
         );
 
@@ -15430,6 +15948,7 @@ async function handleRead(
                     `(${(result.ratio * 100).toFixed(1)}% reduction)\n\n` +
                     mapHint +
                     `\`\`\`\n${result.compressed}\n\`\`\`\n\n` +
+                    autoContextBlock +
                     `[TokenGuard saved ~${saved.toLocaleString()} tokens | ` +
                     `Session: ~${sessionReport.totalTokensSaved.toLocaleString()} tokens saved]`,
             }],
@@ -15467,7 +15986,7 @@ async function handleCompress(
     try {
         const compression_level = typeof params.level === "string" &&
             ["light", "medium", "aggressive"].includes(params.level)
-            ? params.level as "light" | "medium" | "aggressive"
+            ? params.level as CompressionLevel
             : undefined;
 
         const focus = typeof params.focus === "string" ? params.focus : undefined;
@@ -15976,6 +16495,7 @@ async function handleReport(
         `|  Breaker Redirects:      ${pad(cbStats.redirectsIssued, 16)}    |`,
         `|  Redirects Recovered:    ${pad(cbStats.redirectsSuccessful, 16)}    |`,
         `|  Pinned Rules Active:     ${pad(pins.length, 16)}    |`,
+        `|  Context Injections:      ${pad(sessionReport.autoContextInjections, 16)}    |`,
         "+--------------------------------------------------+",
         `|  ESTIMATED SAVINGS:       ${pad("$" + usdStr, 16)}    |`,
         `|  MODEL:                   ${pad(modelName, 16)}    |`,
@@ -16443,6 +16963,42 @@ describe("Compressor (static)", () => {
 
 All notable changes to TokenGuard will be documented in this file.
 
+## [3.2.0] - 2026-03-13
+
+### Added
+- **Auto-Context Inlining**: When Claude requests a definition or reads a file, TokenGuard
+  automatically resolves signatures of imported dependencies and injects them in the response.
+  Reduces follow-up tool calls by providing "X-ray vision" in a single turn.
+  - Import extraction supports ESM (named + default), CommonJS require, Python from-import,
+    and Go namespace inference.
+  - "Gold Filter": only injects dependencies actually used in the function body, using the
+    local alias name (not the original export name) for accurate matching.
+  - Security filter: signatures containing passwords, API keys, auth tokens, or encryption
+    keys are automatically excluded from injection.
+  - Anti-prompt-injection: JSDoc comments and TokenGuard stubs are stripped from signatures
+    before injection, preventing malicious content from entering Claude's context.
+  - Homonym disambiguation: BM25 searches combine symbol name + import path hint to find
+    the correct signature even when multiple files export the same name.
+  - 150ms hard timeout prevents event loop blocking on large codebases.
+  - `auto_context: false` parameter available on both `tg_navigate` and `tg_code` to disable.
+  - Session report tracks `autoContextInjections` count.
+- **Go import support**: Auto-Context infers exported symbols from Go namespace usage patterns
+  (e.g., `utils.HashPassword()` resolves to `HashPassword` in the `utils` package).
+- **Preloaded content in compressFileAdvanced**: Eliminates double file I/O when both
+  auto-context and compression are active on the same read.
+
+### Changed
+- `CompressionLevel` type is now used explicitly instead of `as any` for level casting.
+- `handleRead` reads the file exactly once and reuses the content for both auto-context
+  extraction and compression.
+
+## [3.1.3] - 2026-03-12
+
+### Fixed
+- **Path normalization in Circuit Breaker**: All file paths are now resolved to absolute + forward slashes before recording. Prevents split counters where `"src/app.ts"` and `"/abs/path/src/app.ts"` were tracked as different files, causing Pattern 4 to never trigger.
+- **Ghost data after file deletion**: `db.save()` is now called after the watcher's `unlink` event, ensuring deleted files don't reappear from disk on next session.
+- **Plaintext fallback for unsupported languages**: Files with unsupported extensions (.rs, .java, .cpp, etc.) are now indexed as single plaintext chunks. BM25 keyword search works on all file types as documented in the README. AST features (validation, structural compression, semantic edit) still require TS/JS/Python/Go.
+
 ## [3.1.2] - 2026-03-12
 
 ### Fixed
@@ -16847,6 +17403,8 @@ export interface SessionReport {
         originalTokens: number;
         ratio: number;
     }>;
+    /** Number of auto-context injections in this session */
+    autoContextInjections: number;
 }
 
 export class TokenGuardEngine {
@@ -16871,6 +17429,7 @@ export class TokenGuardEngine {
         totalOriginalTokens: 0,
         compressionsByType: new Map<string, { count: number; saved: number; original: number }>(),
         startTime: Date.now(),
+        autoContextInjections: 0,
     };
 
     constructor(config: EngineConfig = {}) {
@@ -16962,9 +17521,38 @@ export class TokenGuardEngine {
             return null; // File may have been deleted
         }
 
-        // Check extension support
+        // Check extension support — unsupported files get plaintext fallback
         const ext = path.extname(filePath).toLowerCase();
-        if (!this.parser.isSupported(ext)) return null;
+        if (!this.parser.isSupported(ext)) {
+            // Plaintext fallback: index entire file as one chunk for BM25 keyword search.
+            // No AST features (no validation, no structural compression, no semantic edit)
+            // but search WILL find content in this file.
+            if (!this.db.fileNeedsUpdate(filePath, content)) return null;
+
+            const lineCount = content.split("\n").length;
+            // Use content as shorthand so BM25 keyword index can search it
+            const shorthand = `[file] ${path.basename(filePath)} (${lineCount} lines)\n${content}`;
+
+            this.db.clearChunks(filePath);
+
+            if (this.config.enableEmbeddings) {
+                await this.initializeEmbedder();
+                const { embedding } = await this.embedder.embed(content.slice(0, 1000));
+                this.db.insertChunk(filePath, shorthand, content, "file", 1, lineCount, embedding);
+            } else {
+                this.db.insertChunk(filePath, shorthand, content, "file", 1, lineCount, new Float32Array(0));
+            }
+
+            const hash = this.db.hashContent(content);
+            this.db.upsertFile(filePath, hash);
+
+            return {
+                filePath,
+                chunks: [{ shorthand, rawCode: content, nodeType: "file", startLine: 1, endLine: lineCount, startIndex: 0, endIndex: content.length }],
+                totalLines: lineCount,
+                language: ext.slice(1),
+            };
+        }
 
         // Merkle diffing: skip unchanged files
         if (!this.db.fileNeedsUpdate(filePath, content)) return null;
@@ -17180,17 +17768,27 @@ export class TokenGuardEngine {
     async compressFileAdvanced(
         filePath: string,
         level: CompressionLevel = "medium",
+        preloadedContent?: string,
     ): Promise<AdvancedCompressionResult> {
         await this.initialize();
 
-        // FIX 7: Check file size/extension
-        const stat = fs.statSync(filePath);
-        const filterResult = shouldProcess(filePath, stat.size);
+        // Validate size ALWAYS — even with preloaded content (prevents bypass)
+        let sizeInBytes: number;
+        if (preloadedContent !== undefined) {
+            sizeInBytes = Buffer.byteLength(preloadedContent, "utf8");
+        } else {
+            try {
+                sizeInBytes = fs.statSync(filePath).size;
+            } catch {
+                throw new Error(`Cannot access file: ${filePath}`);
+            }
+        }
+        const filterResult = shouldProcess(filePath, sizeInBytes);
         if (!filterResult.process) {
             throw new Error(`File skipped: ${filterResult.reason}`);
         }
 
-        const content = readSource(filePath);
+        const content = preloadedContent ?? readSource(filePath);
         const result = await this.advancedCompressor.compress(filePath, content, level);
 
         // Track session savings
@@ -17213,6 +17811,16 @@ export class TokenGuardEngine {
      */
     markFileRead(filePath: string): void {
         this.safelyReadFiles.add(path.resolve(filePath));
+    }
+
+    /** Resolve import signatures via BM25 for Auto-Context injection */
+    resolveImportSignatures(deps: Array<{ symbol: string; pathHint: string }>): Array<{ raw: string; path: string }> {
+        return this.db.resolveImportSignatures(deps);
+    }
+
+    /** Increment the auto-context injection counter */
+    incrementAutoContext(): void {
+        this.sessionSavings.autoContextInjections++;
     }
 
     /**
@@ -17253,6 +17861,7 @@ export class TokenGuardEngine {
             savedUsdSonnet: (totalSaved / 1_000_000) * 3,
             savedUsdOpus: (totalSaved / 1_000_000) * 15,
             byFileType,
+            autoContextInjections: this.sessionSavings.autoContextInjections,
         };
     }
 
@@ -17301,7 +17910,10 @@ export class TokenGuardEngine {
         this.watcher
             .on("add", (fp: string) => this.queueIndexing(fp))
             .on("change", (fp: string) => this.queueIndexing(fp))
-            .on("unlink", (fp: string) => this.db.clearChunks(fp));
+            .on("unlink", (fp: string) => {
+                this.db.clearChunks(fp);
+                this.db.save();
+            });
     }
 
     /** Queue a file for indexing (debounced). */
@@ -18366,6 +18978,57 @@ export class TokenGuardDB {
         return results.slice(0, limit);
     }
 
+    /**
+     * BM25-powered fast resolution for import-anchored auto-context.
+     * Searches "symbol pathHint" together to defeat homonyms.
+     * Enforces a 150ms hard timeout to prevent event loop blocking.
+     */
+    resolveImportSignatures(
+        deps: Array<{ symbol: string; pathHint: string }>,
+        maxTimeMs: number = 150,
+    ): Array<{ raw: string; path: string }> {
+        if (!this._ready || deps.length === 0) return [];
+
+        const start = performance.now();
+        const results: Array<{ raw: string; path: string }> = [];
+        const seenSymbols = new Set<string>();
+
+        const escapeRegex = (s: string) =>
+            s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+        for (const dep of deps) {
+            if (seenSymbols.has(dep.symbol)) continue;
+            seenSymbols.add(dep.symbol);
+            if (performance.now() - start > maxTimeMs) break;
+
+            // BM25 with two terms: symbol + path hint defeats homonyms
+            const cleanHint = dep.pathHint.replace(/['"%_]/g, " ").trim();
+            const queryText = cleanHint
+                ? `${dep.symbol} ${cleanHint}`
+                : dep.symbol;
+
+            const hits = this.searchKeywordOnly(queryText, 3);
+
+            if (hits.length > 0) {
+                // Final validation: symbol must appear textually in the shorthand
+                // Uses safe boundaries (not \b) to handle $store etc.
+                const safeSym = escapeRegex(dep.symbol);
+                const exactRegex = new RegExp(
+                    `(^|[^a-zA-Z0-9_$])${safeSym}(?=[^a-zA-Z0-9_$]|$)`,
+                );
+
+                for (const hit of hits) {
+                    if (exactRegex.test(hit.shorthand)) {
+                        results.push({ raw: hit.shorthand, path: hit.path });
+                        break;
+                    }
+                }
+            }
+        }
+
+        return results;
+    }
+
     searchVector(
         queryEmbedding: Float32Array,
         limit: number = 10
@@ -18525,13 +19188,13 @@ export { fastSimilarity };
 </file>
 
 <file path="README.md">
-# TokenGuard v3.1.1 - 3 Tools. 443 Tests. Zero Cloud. Instant Startup.
+# TokenGuard v3.2.0 - 3 Tools. 458 Tests. Zero Cloud. Instant Startup.
 
 <p align="center">
   <img src="https://img.shields.io/badge/MCP-Plugin-blue?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyem0wIDE4Yy00LjQyIDAtOC0zLjU4LTgtOHMzLjU4LTggOC04IDggMy41OCA4IDgtMy41OCA0LTggOHoiLz48L3N2Zz4=" alt="MCP Plugin">
   <img src="https://img.shields.io/badge/Tools-3-blue?style=for-the-badge" alt="3 Tools">
   <img src="https://img.shields.io/badge/Token%20Savings-~80%25-green?style=for-the-badge" alt="~80% Savings">
-  <img src="https://img.shields.io/badge/Tests-443%20passed-brightgreen?style=for-the-badge" alt="443 Tests">
+  <img src="https://img.shields.io/badge/Tests-458%20passed-brightgreen?style=for-the-badge" alt="458 Tests">
   <img src="https://img.shields.io/badge/Cloud-Zero-red?style=for-the-badge" alt="Zero Cloud">
   <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="MIT License">
   <img src="https://img.shields.io/badge/TypeScript-5.7-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
@@ -18653,6 +19316,7 @@ TokenGuard sits between you and token waste with 3 smart tools:
 | `unpin` | Remove a pinned rule. |
 | `status` | Token burn rate, exhaustion prediction, danger zones (heaviest unread files), and alert levels. |
 | `report` | Full session savings receipt with per-file-type breakdown and USD estimates. |
+| `reset` | Clear circuit breaker state to let Claude retry with a fresh approach. |
 
 ## Supported Languages
 
@@ -18678,6 +19342,27 @@ These run automatically — you never call them directly:
 - **Creative Circuit Breaker**: Monitors all tool calls for destructive patterns (same error 3x, same file 5x). Instead of just blocking, it escalates through 3 creative strategies: Rewrite → Decompose → Hard Stop. Each level includes `compress:false` file reads and concrete step-by-step instructions. Auto-resets with amnesia total on strategy change.
 - **Behavioral Advisor**: When Claude reads a large file raw (without compression), advises using `tg_code action:"compress"` next time. Teaches efficient patterns without blocking.
 
+## Auto-Context Inlining (X-Ray Vision)
+
+When Claude asks for a function definition, it often needs to understand the dependencies
+that function calls. Without Auto-Context, Claude makes N additional tool calls to look up
+each dependency — burning tokens and time.
+
+TokenGuard solves this by automatically resolving imported dependencies and injecting their
+signatures in the same response:
+
+| Without Auto-Context | With Auto-Context |
+|---------------------|-------------------|
+| 1. `tg_navigate definition "validateToken"` | 1. `tg_navigate definition "validateToken"` |
+| 2. `tg_navigate definition "HashUtils"` | *(signatures auto-injected)* |
+| 3. `tg_navigate definition "TokenStore"` | |
+| **3 tool calls, ~1,800 tokens** | **1 tool call, ~700 tokens** |
+
+**Security**: Signatures containing passwords, API keys, or auth tokens are automatically
+excluded. JSDoc comments are stripped to prevent prompt injection.
+
+**Disable**: Pass `auto_context: false` if you want pure output without injected signatures.
+
 ## Installation
 
 ```bash
@@ -18695,7 +19380,7 @@ npm install -g @ruso-0/tokenguard
 
 ```bash
 tokenguard --help       # Show usage and options
-tokenguard --version    # Show version (3.1.1)
+tokenguard --version    # Show version (3.2.0)
 tokenguard init         # Generate optimal CLAUDE.md instructions
 tokenguard --audit      # Run security audit (CLI only)
 ```
@@ -18818,7 +19503,7 @@ tg_guard action:"report"
 
 ## Stress Tested
 
-**443 tests. 0 failures. 17 test suites.** Cross-platform CI on Ubuntu, Windows, and macOS.
+**458 tests. 0 failures. 19 test suites.** Cross-platform CI on Ubuntu, Windows, and macOS.
 
 | Scenario | What We Tested | Result |
 |---|---|---|
@@ -18842,7 +19527,7 @@ tg_guard action:"report"
 Tested against a 57-file production Next.js + Supabase app (SICAEP):
 - **~94% token reduction (estimated)** (tier 1 compression)
 - **10,532 tokens saved** on a single search query
-- **443/443 tests passed** across 3 operating systems
+- **458/458 tests passed** across 3 operating systems
 - Surgically fixed a real `.single()` → `.maybeSingle()` bug via `tg_code action:"edit"`
 - Creative circuit breaker correctly detected and redirected repeated error patterns
 - Path traversal attack (`../../../../etc/passwd`) → **BLOCKED**
@@ -18894,7 +19579,7 @@ MIT
 <file path="package.json">
 {
   "name": "@ruso-0/tokenguard",
-  "version": "3.1.2",
+  "version": "3.2.0",
   "description": "MCP plugin for Claude Code — 3 router tools with invisible middleware for token-optimized code navigation, compression, and safety. Lite mode (instant) or Pro mode (semantic search).",
   "main": "dist/index.js",
   "type": "module",
@@ -18964,7 +19649,7 @@ MIT
 #!/usr/bin/env node
 
 /**
- * index.ts — TokenGuard v3.1.2 MCP Server entry point.
+ * index.ts — TokenGuard v3.2.0 MCP Server entry point.
  *
  * Exposes 3 router tools to Claude Code (replaces 16 individual tools):
  *
@@ -19009,7 +19694,7 @@ import { PreToolUseHook } from "./hooks/preToolUse.js";
 // ─── CLI Flag Parsing ───────────────────────────────────────────────
 
 const args = process.argv.slice(2);
-const VERSION = "3.1.2";
+const VERSION = "3.2.0";
 
 if (args.includes("--version") || args.includes("-v")) {
     console.log(VERSION);
@@ -19150,9 +19835,13 @@ server.tool(
             .boolean()
             .optional()
             .describe("For map: force regeneration, ignoring cache."),
+        auto_context: z
+            .boolean()
+            .optional()
+            .describe("Auto-inject signatures of imported dependencies. Set to false for pure output without context."),
     },
-    async ({ action, query, symbol, path: navPath, limit, include_raw, kind, signatures, refresh }) => {
-        const params: NavigateParams = { action, query, symbol, path: navPath, limit, include_raw, kind, signatures, refresh };
+    async ({ action, query, symbol, path: navPath, limit, include_raw, kind, signatures, refresh, auto_context }) => {
+        const params: NavigateParams = { action, query, symbol, path: navPath, limit, include_raw, kind, signatures, refresh, auto_context };
         return wrapWithCircuitBreaker(
             circuitBreaker,
             "tg_navigate",
@@ -19220,9 +19909,13 @@ server.tool(
             .enum(["replace", "insert_before", "insert_after"])
             .optional()
             .describe("For edit: how to apply new_code relative to the symbol. 'replace' (default) replaces the symbol. 'insert_before'/'insert_after' adds new_code adjacent to the symbol without removing it."),
+        auto_context: z
+            .boolean()
+            .optional()
+            .describe("Auto-inject signatures of imported dependencies. Set to false for pure output without context."),
     },
-    async ({ action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode }) => {
-        const params: CodeParams = { action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode };
+    async ({ action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, auto_context }) => {
+        const params: CodeParams = { action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, auto_context };
         return wrapWithCircuitBreaker(
             circuitBreaker,
             "tg_code",

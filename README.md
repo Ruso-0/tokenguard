@@ -1,10 +1,10 @@
-# TokenGuard v3.2.0 - 3 Tools. 458 Tests. Zero Cloud. Instant Startup.
+# TokenGuard v3.3.0 - 3 Tools. 464 Tests. Zero Cloud. Instant Startup.
 
 <p align="center">
   <img src="https://img.shields.io/badge/MCP-Plugin-blue?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyem0wIDE4Yy00LjQyIDAtOC0zLjU4LTgtOHMzLjU4LTggOC04IDggMy41OCA4IDgtMy41OCA0LTggOHoiLz48L3N2Zz4=" alt="MCP Plugin">
   <img src="https://img.shields.io/badge/Tools-3-blue?style=for-the-badge" alt="3 Tools">
   <img src="https://img.shields.io/badge/Token%20Savings-~80%25-green?style=for-the-badge" alt="~80% Savings">
-  <img src="https://img.shields.io/badge/Tests-458%20passed-brightgreen?style=for-the-badge" alt="458 Tests">
+  <img src="https://img.shields.io/badge/Tests-464%20passed-brightgreen?style=for-the-badge" alt="464 Tests">
   <img src="https://img.shields.io/badge/Cloud-Zero-red?style=for-the-badge" alt="Zero Cloud">
   <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="MIT License">
   <img src="https://img.shields.io/badge/TypeScript-5.7-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
@@ -127,6 +127,8 @@ TokenGuard sits between you and token waste with 3 smart tools:
 | `status` | Token burn rate, exhaustion prediction, danger zones (heaviest unread files), and alert levels. |
 | `report` | Full session savings receipt with per-file-type breakdown and USD estimates. |
 | `reset` | Clear circuit breaker state to let Claude retry with a fresh approach. |
+| `set_plan` | Anchor a master plan file for heartbeat re-injection (~15 tool calls). Bankruptcy Shield rejects plans >4000 tokens. |
+| `memorize` | Write progress notes to persistent scratchpad. Re-injected during heartbeat to survive context compaction. |
 
 ## Supported Languages
 
@@ -173,6 +175,35 @@ excluded. JSDoc comments are stripped to prevent prompt injection.
 
 **Disable**: Pass `auto_context: false` if you want pure output without injected signatures.
 
+## Context Heartbeat (Anti-Amnesia Protocol)
+
+Claude Code compacts context after extended sessions, destroying plans, schemas, and
+architectural decisions. Context Heartbeat solves this by silently re-injecting your
+critical constraints every ~15 tool calls.
+
+**Setup:**
+```bash
+# Anchor your plan at the start of a session
+tg_guard action:"set_plan" text:"PLAN.md"
+
+# Leave notes as you progress
+tg_guard action:"memorize" text:"Finished auth module. Starting on payments. Using Stripe SDK."
+```
+
+**How it works:**
+- Counts tool calls deterministically (no async lag)
+- Only injects during safe operations (read, search, definition) — never during edits
+- Places memory ABOVE the tool response (Attention Sandwich pattern)
+- Detects server restarts and resets the counter automatically
+- Rejects plans >4,000 tokens to prevent accelerating compaction
+
+**What gets re-injected:**
+1. Your master plan (schemas, constraints, architecture)
+2. Your scratchpad notes (progress, decisions)
+3. Pinned rules
+4. Recent successful edits (spatial awareness)
+5. Circuit Breaker state (if active)
+
 ## Installation
 
 ```bash
@@ -190,7 +221,7 @@ npm install -g @ruso-0/tokenguard
 
 ```bash
 tokenguard --help       # Show usage and options
-tokenguard --version    # Show version (3.2.0)
+tokenguard --version    # Show version (3.3.0)
 tokenguard init         # Generate optimal CLAUDE.md instructions
 tokenguard --audit      # Run security audit (CLI only)
 ```
@@ -313,7 +344,7 @@ tg_guard action:"report"
 
 ## Stress Tested
 
-**458 tests. 0 failures. 19 test suites.** Cross-platform CI on Ubuntu, Windows, and macOS.
+**464 tests. 0 failures. 20 test suites.** Cross-platform CI on Ubuntu, Windows, and macOS.
 
 | Scenario | What We Tested | Result |
 |---|---|---|
@@ -337,7 +368,7 @@ tg_guard action:"report"
 Tested against a 57-file production Next.js + Supabase app (SICAEP):
 - **~94% token reduction (estimated)** (tier 1 compression)
 - **10,532 tokens saved** on a single search query
-- **458/458 tests passed** across 3 operating systems
+- **464/464 tests passed** across 3 operating systems
 - Surgically fixed a real `.single()` → `.maybeSingle()` bug via `tg_code action:"edit"`
 - Creative circuit breaker correctly detected and redirected repeated error patterns
 - Path traversal attack (`../../../../etc/passwd`) → **BLOCKED**
@@ -382,5 +413,5 @@ MIT
 
 <p align="center">
   <b>Stop burning tokens. Start guarding them.</b><br>
-  <sub>Built with frustration, shipped with hope. Now with creative circuit breakers.</sub>
+  <sub>Built with frustration, shipped with hope. Now with anti-amnesia protocol.</sub>
 </p>

@@ -2,6 +2,28 @@
 
 All notable changes to TokenGuard will be documented in this file.
 
+## [3.3.0] - 2026-03-13
+
+### Added
+- **Context Heartbeat (Anti-Amnesia Protocol)**: Silently re-injects critical context
+  every ~15 tool calls to survive Claude Code's context compaction. Uses 4-layer
+  Neural State Consolidation:
+  - Layer 1 (Cortex): Master Plan file anchored via `set_plan`
+  - Layer 2 (Working Memory): Claude's scratchpad notes via `memorize` + pinned rules
+  - Layer 3 (Hippocampus): Recent successful edits for spatial awareness
+  - Layer 4 (Executive Attention): Active Circuit Breaker state if in Break & Build
+- **`tg_guard action:"set_plan"`**: Anchor a master plan file (PLAN.md, schemas).
+  Includes Bankruptcy Shield rejecting plans >4000 tokens to prevent context bloat.
+- **`tg_guard action:"memorize"`**: Claude writes progress notes to persistent scratchpad.
+  Notes survive context compaction and are re-injected during heartbeat.
+- **Attention Sandwich**: Heartbeat injects memory ABOVE the tool response, keeping the
+  immediate result at the bottom to respect the LLM's U-shaped attention curve.
+- **Psychological Filter**: Heartbeat only fires during context-gathering actions
+  (read, search, map, status, definition, references, outline). Never during
+  edit, undo, or filter_output to avoid distracting Claude during critical operations.
+- **Restart Detection**: Heartbeat detects MCP server restarts (currentCalls < lastInjectCalls)
+  and resets the injection counter to prevent permanent heartbeat death.
+
 ## [3.2.0] - 2026-03-13
 
 ### Added

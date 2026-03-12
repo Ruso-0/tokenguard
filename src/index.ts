@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * index.ts — TokenGuard v3.2.0 MCP Server entry point.
+ * index.ts — TokenGuard v3.3.0 MCP Server entry point.
  *
  * Exposes 3 router tools to Claude Code (replaces 16 individual tools):
  *
@@ -46,7 +46,7 @@ import { PreToolUseHook } from "./hooks/preToolUse.js";
 // ─── CLI Flag Parsing ───────────────────────────────────────────────
 
 const args = process.argv.slice(2);
-const VERSION = "3.2.0";
+const VERSION = "3.3.0";
 
 if (args.includes("--version") || args.includes("-v")) {
     console.log(VERSION);
@@ -107,7 +107,8 @@ This workspace has the TokenGuard MCP plugin installed. It extends your capabili
 5. **Edit surgically.** Prefer \`tg_code action:"edit"\` for modifying existing functions/classes. It validates the AST before writing to disk — if your code has a syntax error, the file stays untouched and you get the exact line/column to fix.
 6. **Create new files normally.** Use native Write for brand new files that don't exist yet.
 7. **Pin rules that matter.** Use \`tg_guard action:"pin"\` to persist instructions across messages (e.g., "always use fetch, not axios").
-8. **If the circuit breaker triggers, follow its instructions.** It detected a doom loop and is protecting your session from burning tokens on repeated failures.
+8. **Anchor your plan.** If you're working on a complex task with strict schemas or architectural constraints, use \`tg_guard action:"set_plan" text:"PLAN.md"\` at the start. TokenGuard will silently re-inject your plan every ~15 tool calls to survive context compaction. Use \`tg_guard action:"memorize" text:"your progress notes"\` to leave notes for yourself.
+9. **If the circuit breaker triggers, follow its instructions.** It detected a doom loop and is protecting your session from burning tokens on repeated failures.
 
 TokenGuard handles the context heavy-lifting so you can focus on writing correct code on the first try.
 `;
@@ -288,18 +289,20 @@ server.tool(
     "and get session reports.",
     {
         action: z
-            .enum(["pin", "unpin", "status", "report", "reset"])
+            .enum(["pin", "unpin", "status", "report", "reset", "set_plan", "memorize"])
             .describe(
                 "pin: add a persistent rule (injected into every map response). " +
                 "unpin: remove a pinned rule. " +
                 "status: token burn rate and alerts. " +
                 "report: full session savings receipt. " +
-                "reset: clear circuit breaker state to resume editing.",
+                "reset: clear circuit breaker state to resume editing. " +
+                "set_plan: anchor a master plan file to prevent Claude from forgetting it during context compaction. " +
+                "memorize: write your current progress/thoughts to TokenGuard's active memory.",
             ),
         text: z
             .string()
             .optional()
-            .describe("For pin: the rule text to pin (max 200 chars)."),
+            .describe("For pin: the rule text (max 200 chars). For set_plan: the file path to your plan. For memorize: your thoughts/progress to remember."),
         index: z
             .number()
             .optional()

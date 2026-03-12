@@ -587,6 +587,18 @@ export class TokenGuardEngine {
         return this.config.watchPaths[0] || process.cwd();
     }
 
+    /** Persistent key-value store for session state (uses existing metadata table in SQLite) */
+    getMetadata(key: string): string | null {
+        if (!this.db.ready) return null;
+        return this.db.getMetadata(key);
+    }
+
+    setMetadata(key: string, value: string): void {
+        if (!this.db.ready) return;
+        this.db.setMetadata(key, value);
+        this.db.save();
+    }
+
     // ─── Repo Map ──────────────────────────────────────────────────
 
     /** Generate or return cached static repo map for prompt cache optimization. */
