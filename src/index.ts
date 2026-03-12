@@ -103,10 +103,11 @@ This workspace has the TokenGuard MCP plugin installed. It extends your capabili
 1. **Run tests & commands freely.** Use Bash for npm test, builds, git — TokenGuard doesn't interfere with your terminal.
 2. **Navigate with AST precision.** Prefer \`tg_navigate\` over grep/glob. It returns exact structural matches (functions, classes, references) without flooding your context with noise.
 3. **Read files efficiently.** ALWAYS prefer \`tg_code action:"read"\` over native Read. Native Read dumps the entire file into your context — a 2,000-line file burns ~5,000 tokens in one call. \`tg_code read\` auto-compresses to ~1,200 tokens while keeping all structural context. This is the single biggest token saver available to you.
-4. **Edit surgically.** Prefer \`tg_code action:"edit"\` for modifying existing functions/classes. It validates the AST before writing to disk — if your code has a syntax error, the file stays untouched and you get the exact line/column to fix.
-5. **Create new files normally.** Use native Write for brand new files that don't exist yet.
-6. **Pin rules that matter.** Use \`tg_guard action:"pin"\` to persist instructions across messages (e.g., "always use fetch, not axios").
-7. **If the circuit breaker triggers, follow its instructions.** It detected a doom loop and is protecting your session from burning tokens on repeated failures.
+4. **Debugging? Read uncompressed.** If you need to understand a function's internal logic (not just its signature), use \`tg_code action:"read" compress:false\`. Compression hides function bodies to save tokens — great for navigation, but not for debugging.
+5. **Edit surgically.** Prefer \`tg_code action:"edit"\` for modifying existing functions/classes. It validates the AST before writing to disk — if your code has a syntax error, the file stays untouched and you get the exact line/column to fix.
+6. **Create new files normally.** Use native Write for brand new files that don't exist yet.
+7. **Pin rules that matter.** Use \`tg_guard action:"pin"\` to persist instructions across messages (e.g., "always use fetch, not axios").
+8. **If the circuit breaker triggers, follow its instructions.** It detected a doom loop and is protecting your session from burning tokens on repeated failures.
 
 TokenGuard handles the context heavy-lifting so you can focus on writing correct code on the first try.
 `;

@@ -77,6 +77,8 @@ You're 90 minutes into a Claude Pro session. You've been exploring a codebase, r
 
 **Why?** Because every `grep` reads entire files. Every `Read` dumps thousands of tokens. Every broken code write causes a fix-retry loop that burns your remaining context.
 
+**Best for:** Medium-to-large codebases (50+ files) where reading every file would exhaust Claude's context window. For small projects (<20 files), native Claude Code tools may be sufficient.
+
 ## The Solution
 
 TokenGuard sits between you and token waste with 3 smart tools:
@@ -91,6 +93,8 @@ TokenGuard sits between you and token waste with 3 smart tools:
 | Write broken code → see error → retry loop | Automatic AST validation blocks bad writes before disk | **Prevents loop** |
 | Claude gets stuck in write-test-fail loops | Creative circuit breaker teaches new strategies | **Saves session** |
 | Claude forgets "always use fetch, not axios" | `tg_guard action:"pin"` keeps rules in every response | **Never forgotten** |
+
+> **Note on compression:** Medium compression keeps function signatures + key body lines (return, throw, await, assignments). If you're debugging a specific function's internals, use `compress:false` or `level:"light"` to see the full code. The Creative Circuit Breaker automatically instructs `compress:false` when it redirects you to rewrite a function.
 
 ## The 3 Tools
 
@@ -122,6 +126,22 @@ TokenGuard sits between you and token waste with 3 smart tools:
 | `unpin` | Remove a pinned rule. |
 | `status` | Token burn rate, exhaustion prediction, danger zones (heaviest unread files), and alert levels. |
 | `report` | Full session savings receipt with per-file-type breakdown and USD estimates. |
+
+## Supported Languages
+
+TokenGuard's features have different levels of support depending on the language:
+
+| Feature | TS/JS | Python | Go | Other (Rust, Java, C++, etc.) |
+|---------|-------|--------|----|-------------------------------|
+| BM25 keyword search | ✅ | ✅ | ✅ | ✅ |
+| Compression (Stage 1-2: comments, whitespace, token filtering) | ✅ | ✅ | ✅ | ✅ |
+| Compression (Stage 3: AST body stripping) | ✅ | ✅ | ✅ | ❌ |
+| AST validation before write | ✅ | ✅ | ✅ | ❌ |
+| Semantic edit (replace/insert) | ✅ | ✅ | ✅ | ❌ |
+| Go-to-definition / references | ✅ | ✅ | ✅ | ❌ |
+| Semantic search (Pro mode) | ✅ | ✅ | ✅ | ✅ |
+
+For unsupported languages, TokenGuard still works as a keyword search engine and text-level compressor. AST features (validation, structural compression, surgical edits) require a Tree-sitter grammar — contributions for additional languages are welcome.
 
 ## Invisible Middleware
 
@@ -179,6 +199,13 @@ claude mcp add tokenguard -- npx @ruso-0/tokenguard --enable-embeddings
 ```
 
 For Pro mode, add `"--enable-embeddings"` to the args array.
+
+### Cleanup
+
+TokenGuard creates `.tokenguard.db` and `.tokenguard/backups/` in your project root. These are automatically excluded from git via standard `.gitignore` patterns. To remove them:
+```bash
+rm -rf .tokenguard.db .tokenguard/ CLAUDE.md
+```
 
 ### Benchmark
 
