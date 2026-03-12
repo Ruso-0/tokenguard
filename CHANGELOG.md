@@ -2,6 +2,34 @@
 
 All notable changes to TokenGuard will be documented in this file.
 
+## [3.1.1] - 2026-03-12
+
+### Fixed
+- **Circuit breaker `redirectsIssued`**: No longer counts Level 3 hard stops as redirects.
+- **Circuit breaker `softReset` amnesia total**: Purges all history entries for the tripped file, giving Claude 3 clean attempts with the new strategy instead of 1.
+- **Breaker payloads instruct `compress:false`**: Level 1 and Level 2 redirects now tell Claude to read uncompressed code so it can understand the logic before rewriting.
+- **Smart rebase for Python/Go**: Auto-indentation now strips Claude's indent and rebases to the target context, fixing IndentationError in Python and tab corruption in Go.
+- **CRLF support**: Line start detection skips `\r` on Windows files.
+- **Cross-platform byte indices**: Verifies tree-sitter byte offsets against actual content, falls back to indexOf if they differ across platforms.
+
+### Added
+- **Behavioral Advisor (PreToolUseHook)**: Connected to `handleRead` — when Claude reads a file raw (compress:false), it gets a suggestion showing how many tokens it wasted and the exact command to compress next time.
+- **Danger Zones in status**: `tg_guard action:"status"` now shows the 5 heaviest unread files with estimated token counts. Files already read (raw or compressed) are filtered out dynamically.
+- **CLI `--help` and `--version`**: Standard CLI hygiene. Version sourced from single `VERSION` constant.
+- **Telemetry via social sharing**: Session report footer invites users to share their receipt on GitHub Discussions.
+- **E2E breaker test**: Full integration test simulating 3 failures → Level 1 redirect → grace period → recovery with insert_after.
+- **5 topological edit tests**: insert_after, insert_before, auto-indent nested, syntax rejection, last-symbol edge case.
+
+### Removed
+- `evaluateGrepOperation` and `countFiles` from PreToolUseHook (unreachable via MCP).
+- `src/schemas.ts` (dead v2 code, zero imports).
+- All "BOMBA" comments replaced with professional descriptions.
+
+### Changed
+- CLAUDE.md point 3 now includes quantitative advice (5,000 tokens vs 1,200 tokens).
+- `RouterDependencies.hook` is optional for backward compatibility.
+- `engine.markFileRead()` called in both compress and raw read branches.
+
 ## [3.1.0] - 2026-03-11
 
 ### Added

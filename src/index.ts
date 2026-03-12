@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * index.ts — TokenGuard v3.1.0 MCP Server entry point.
+ * index.ts — TokenGuard v3.1.1 MCP Server entry point.
  *
  * Exposes 3 router tools to Claude Code (replaces 16 individual tools):
  *

@@ -57,7 +57,6 @@ src/
 ├── compressor.ts            # Classic tier-based compression
 ├── compressor-advanced.ts   # LLMLingua-2-inspired compression
 ├── monitor.ts               # Token consumption monitoring
-├── schemas.ts               # Zod input validation schemas
 ├── hooks/
 │   └── preToolUse.ts        # Pre-tool-use interception hook
 └── utils/

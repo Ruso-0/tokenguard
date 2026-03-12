@@ -128,6 +128,10 @@ function extractName(chunk: ParsedChunk): string {
     // TS/JS patterns
     let m: RegExpExecArray | null;
 
+    // TS/JS: Arrow functions (export const foo = async () => ...)
+    m = /(?:export\s+)?(?:default\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:(?:<[^>]*>\s*)?\([^)]*\)|[a-zA-Z0-9_]+)\s*=>/.exec(raw);
+    if (m) return m[1];
+
     // export [default] [async] function NAME
     m = /(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+(\w+)/.exec(raw);
     if (m) return m[1];

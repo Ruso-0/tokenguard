@@ -1,3 +1,5 @@
+> **Note:** This audit document reflects the v3.0.1 codebase. For current architecture and features, see [CHANGELOG.md](./CHANGELOG.md) and [README.md](./README.md).
+
 # TokenGuard v3.0.1 — Audit Package
 
 > Full source of all critical files for security audit and review.

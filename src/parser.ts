@@ -27,6 +27,10 @@ export interface ParsedChunk {
     startLine: number;
     /** 1-indexed end line in the source file. */
     endLine: number;
+    /** Absolute byte offset of the node start in the source file. */
+    startIndex: number;
+    /** Absolute byte offset of the node end in the source file. */
+    endIndex: number;
 }
 
 export interface ParseResult {
@@ -68,6 +72,8 @@ const LANGUAGE_CONFIGS: Record<string, LanguageConfig> = {
       (type_alias_declaration name: (type_identifier) @type_name) @type_alias
       (export_statement declaration: (function_declaration name: (identifier) @exp_func_name)) @export_func
       (export_statement declaration: (class_declaration name: (type_identifier) @exp_class_name)) @export_class
+      (lexical_declaration (variable_declarator name: (identifier) @var_name value: [(arrow_function) (function_expression)])) @arrow_func
+      (export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @exp_var_name value: [(arrow_function) (function_expression)]))) @export_arrow_func
     `,
     },
     ".tsx": {
@@ -79,6 +85,8 @@ const LANGUAGE_CONFIGS: Record<string, LanguageConfig> = {
       (interface_declaration name: (type_identifier) @iface_name) @interface
       (type_alias_declaration name: (type_identifier) @type_name) @type_alias
       (export_statement declaration: (function_declaration name: (identifier) @exp_func_name)) @export_func
+      (lexical_declaration (variable_declarator name: (identifier) @var_name value: [(arrow_function) (function_expression)])) @arrow_func
+      (export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @exp_var_name value: [(arrow_function) (function_expression)]))) @export_arrow_func
     `,
     },
     ".js": {
@@ -88,6 +96,8 @@ const LANGUAGE_CONFIGS: Record<string, LanguageConfig> = {
       (function_declaration name: (identifier) @func_name) @func
       (method_definition name: (property_identifier) @method_name) @method
       (export_statement declaration: (function_declaration name: (identifier) @exp_func_name)) @export_func
+      (lexical_declaration (variable_declarator name: (identifier) @var_name value: [(arrow_function) (function_expression)])) @arrow_func
+      (export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @exp_var_name value: [(arrow_function) (function_expression)]))) @export_arrow_func
     `,
     },
     ".jsx": {
@@ -97,6 +107,8 @@ const LANGUAGE_CONFIGS: Record<string, LanguageConfig> = {
       (function_declaration name: (identifier) @func_name) @func
       (method_definition name: (property_identifier) @method_name) @method
       (export_statement declaration: (function_declaration name: (identifier) @exp_func_name)) @export_func
+      (lexical_declaration (variable_declarator name: (identifier) @var_name value: [(arrow_function) (function_expression)])) @arrow_func
+      (export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @exp_var_name value: [(arrow_function) (function_expression)]))) @export_arrow_func
     `,
     },
     ".py": {
@@ -265,7 +277,7 @@ export class ASTParser {
                     endLine
                 );
 
-                result.push({ shorthand, rawCode, nodeType, startLine, endLine });
+                result.push({ shorthand, rawCode, nodeType, startLine, endLine, startIndex: node.startIndex, endIndex: node.endIndex });
             }
 
             return result;
@@ -350,6 +362,8 @@ export class ASTParser {
             type_decl: "type",
             export_func: "func",
             export_class: "class",
+            arrow_func: "func",
+            export_arrow_func: "func",
         };
 
         return typeMap[captureName] ?? captureName;

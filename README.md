@@ -1,9 +1,9 @@
-# TokenGuard v3.1 - 3 Tools. 443 Tests. Zero Cloud. Instant Startup.
+# TokenGuard v3.1.1 - 3 Tools. 443 Tests. Zero Cloud. Instant Startup.
 
 <p align="center">
   <img src="https://img.shields.io/badge/MCP-Plugin-blue?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyem0wIDE4Yy00LjQyIDAtOC0zLjU4LTgtOHMzLjU4LTggOC04IDggMy41OCA4IDgtMy41OCA0LTggOHoiLz48L3N2Zz4=" alt="MCP Plugin">
   <img src="https://img.shields.io/badge/Tools-3-blue?style=for-the-badge" alt="3 Tools">
-  <img src="https://img.shields.io/badge/Token%20Savings-91%25-green?style=for-the-badge" alt="91% Savings">
+  <img src="https://img.shields.io/badge/Token%20Savings-~80%25-green?style=for-the-badge" alt="~80% Savings">
   <img src="https://img.shields.io/badge/Tests-443%20passed-brightgreen?style=for-the-badge" alt="443 Tests">
   <img src="https://img.shields.io/badge/Cloud-Zero-red?style=for-the-badge" alt="Zero Cloud">
   <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="MIT License">
@@ -83,11 +83,11 @@ TokenGuard sits between you and token waste with 3 smart tools:
 
 | What You Do Now | What TokenGuard Does | Savings |
 |---|---|---|
-| `grep "auth" ./src` reads 50 files | `tg_navigate action:"search" query:"authentication"` returns 5 relevant chunks | **97%** |
-| `Read src/engine.ts` dumps 5,502 tokens | `tg_code action:"compress" path:"src/engine.ts"` sends 1,753 tokens | **68%** |
+| `grep "auth" ./src` reads 50 files | `tg_navigate action:"search" query:"authentication"` returns 5 relevant chunks | **~97% (estimated)** |
+| `Read src/engine.ts` dumps 5,502 tokens | `tg_code action:"compress" path:"src/engine.ts"` sends 1,753 tokens | **~68% (estimated)** |
 | Read file + skim for function | `tg_navigate action:"definition" symbol:"AuthService"` jumps straight there | **300x faster** |
-| Copy-paste 500 lines of npm errors | `tg_code action:"filter_output"` extracts the 3 actual errors | **89%** |
-| Rewrite entire file to change one function | `tg_code action:"edit"` patches only the AST node | **98% output saved** |
+| Copy-paste 500 lines of npm errors | `tg_code action:"filter_output"` extracts the 3 actual errors | **~89% (estimated)** |
+| Rewrite entire file to change one function | `tg_code action:"edit"` patches only the AST node | **~98% output saved (estimated)** |
 | Write broken code → see error → retry loop | Automatic AST validation blocks bad writes before disk | **Prevents loop** |
 | Claude gets stuck in write-test-fail loops | Creative circuit breaker teaches new strategies | **Saves session** |
 | Claude forgets "always use fetch, not axios" | `tg_guard action:"pin"` keeps rules in every response | **Never forgotten** |
@@ -179,6 +179,13 @@ claude mcp add tokenguard -- npx @ruso-0/tokenguard --enable-embeddings
 ```
 
 For Pro mode, add `"--enable-embeddings"` to the args array.
+
+### Benchmark
+
+We're running reproducible benchmarks on real-world refactors (Express.js, Axios).
+Results with full methodology and API billing logs will be published here.
+
+**Star the repo to get notified when benchmarks drop.**
 
 ## Quick Start
 
@@ -279,7 +286,7 @@ tg_guard action:"report"
 
 ### Real-World Validation
 Tested against a 57-file production Next.js + Supabase app (SICAEP):
-- **94.1% token reduction** (tier 1 compression)
+- **~94% token reduction (estimated)** (tier 1 compression)
 - **10,532 tokens saved** on a single search query
 - **443/443 tests passed** across 3 operating systems
 - Surgically fixed a real `.single()` → `.maybeSingle()` bug via `tg_code action:"edit"`
