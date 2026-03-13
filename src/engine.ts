@@ -5,7 +5,8 @@
  * 1. File watching via chokidar (real-time re-indexing)
  * 2. AST parsing via Tree-sitter WASM (semantic chunking)
  * 3. Local embeddings via Xenova/transformers (512-dim vectors)
- * 4. Hybrid RRF search via SQLite + sqlite-vec + FTS5
+ * 4. Hybrid RRF search: pure-JS VectorIndex (brute-force dot product)
+ *    + KeywordIndex (BM25 with Porter stemmer) — no native extensions
  * 5. Merkle-style file diffing (skip unchanged files)
  *
  * All processing is local. Zero cloud dependencies.
@@ -14,6 +15,7 @@
 import fs from "fs";
 import path from "path";
 import chokidar, { type FSWatcher } from "chokidar";
+import picomatch from "picomatch";
 
 import { TokenGuardDB, type HybridSearchResult } from "./database.js";
 import { Embedder, getEmbedder } from "./embedder.js";
@@ -23,7 +25,7 @@ import { AdvancedCompressor, type CompressionLevel, type AdvancedCompressionResu
 import { safePath } from "./utils/path-jail.js";
 import { shouldProcess } from "./utils/file-filter.js";
 import { readSource } from "./utils/read-source.js";
-import { getOrGenerateRepoMap, type RepoMap } from "./repo-map.js";
+import { getOrGenerateRepoMap, type RepoMap, type DependencyGraph } from "./repo-map.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -258,7 +260,7 @@ export class TokenGuardEngine {
 
             return {
                 filePath,
-                chunks: [{ shorthand, rawCode: content, nodeType: "file", startLine: 1, endLine: lineCount, startIndex: 0, endIndex: content.length }],
+                chunks: [{ shorthand, rawCode: content, nodeType: "file", startLine: 1, endLine: lineCount, startIndex: 0, endIndex: content.length, symbolName: "" }],
                 totalLines: lineCount,
                 language: ext.slice(1),
             };
@@ -283,6 +285,9 @@ export class TokenGuardEngine {
             startLine: number;
             endLine: number;
             embedding: Float32Array;
+            startIndex: number;
+            endIndex: number;
+            symbolName: string;
         }> = [];
 
         for (const chunk of result.chunks) {
@@ -301,6 +306,9 @@ export class TokenGuardEngine {
                 startLine: chunk.startLine,
                 endLine: chunk.endLine,
                 embedding,
+                startIndex: chunk.startIndex,
+                endIndex: chunk.endIndex,
+                symbolName: chunk.symbolName,
             });
         }
 
@@ -367,6 +375,7 @@ export class TokenGuardEngine {
     /** Recursively walk a directory and return all supported files. */
     private walkDirectory(dirPath: string): string[] {
         const files: string[] = [];
+        const isIgnored = picomatch(this.config.ignorePaths);
 
         const walk = (dir: string) => {
             let entries: fs.Dirent[];
@@ -378,21 +387,18 @@ export class TokenGuardEngine {
 
             for (const entry of entries) {
                 const fullPath = path.join(dir, entry.name);
+                const relativePath = path.relative(dirPath, fullPath).replace(/\\/g, "/");
 
-                // Skip ignored directories
                 if (entry.isDirectory()) {
-                    const shouldIgnore = this.config.ignorePaths.some((pattern) => {
-                        const simpleName = pattern.replace(/\*\*/g, "").replace(/\//g, "");
-                        return entry.name === simpleName;
-                    });
-
-                    if (!shouldIgnore) {
+                    // Check directory name and relative path against glob patterns
+                    if (!isIgnored(entry.name) && !isIgnored(relativePath) && !isIgnored(relativePath + "/")) {
                         walk(fullPath);
                     }
                     continue;
                 }
 
-                // Check extension
+                // Check file against ignore patterns, then check extension
+                if (isIgnored(relativePath) || isIgnored(entry.name)) continue;
                 const ext = path.extname(entry.name).toLowerCase();
                 if (this.config.extensions.includes(ext)) {
                     files.push(fullPath);
@@ -607,6 +613,44 @@ export class TokenGuardEngine {
         await this.initialize();
         const root = this.config.watchPaths[0] || process.cwd();
         return getOrGenerateRepoMap(root, this.parser, forceRefresh);
+    }
+
+    private cachedGraph: DependencyGraph | null = null;
+
+    /** Get the dependency graph (computed from repo map, cached). */
+    async getDependencyGraph(): Promise<DependencyGraph> {
+        if (this.cachedGraph) return this.cachedGraph;
+
+        const { map } = await this.getRepoMap();
+        if (map.graph) {
+            this.cachedGraph = map.graph;
+            return map.graph;
+        }
+
+        // Fallback: empty graph if map has no graph data
+        const emptyGraph: DependencyGraph = {
+            importedBy: new Map(),
+            inDegree: new Map(),
+            tiers: new Map(),
+        };
+        return emptyGraph;
+    }
+
+    /**
+     * Find ALL files whose code contains the given symbol name.
+     * Exhaustive scan — no limit, no ranking. For refactoring, not discovery.
+     */
+    async searchFilesBySymbol(symbolName: string): Promise<string[]> {
+        await this.initialize();
+        return this.db.searchRawCode(symbolName);
+    }
+
+    /** Find all files that import the given file path (relative). */
+    async findDependents(filePath: string): Promise<string[]> {
+        const graph = await this.getDependencyGraph();
+        const normalized = filePath.replace(/\\/g, "/");
+        const deps = graph.importedBy.get(normalized);
+        return deps ? [...deps] : [];
     }
 
     // ─── File Watching ────────────────────────────────────────────

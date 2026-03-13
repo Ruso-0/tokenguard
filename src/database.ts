@@ -34,6 +34,9 @@ export interface ChunkRecord {
     node_type: string;
     start_line: number;
     end_line: number;
+    start_index: number;
+    end_index: number;
+    symbol_name: string;
 }
 
 export interface HybridSearchResult {
@@ -44,6 +47,9 @@ export interface HybridSearchResult {
     node_type: string;
     start_line: number;
     end_line: number;
+    start_index: number;
+    end_index: number;
+    symbol_name: string;
     rrf_score: number;
 }
 
@@ -602,13 +608,16 @@ export class TokenGuardDB {
 
       -- AST chunks extracted from source files
       CREATE TABLE IF NOT EXISTS chunks (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        path       TEXT NOT NULL,
-        shorthand  TEXT NOT NULL,
-        raw_code   TEXT NOT NULL,
-        node_type  TEXT NOT NULL DEFAULT 'unknown',
-        start_line INTEGER NOT NULL DEFAULT 0,
-        end_line   INTEGER NOT NULL DEFAULT 0
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        path        TEXT NOT NULL,
+        shorthand   TEXT NOT NULL,
+        raw_code    TEXT NOT NULL,
+        node_type   TEXT NOT NULL DEFAULT 'unknown',
+        start_line  INTEGER NOT NULL DEFAULT 0,
+        end_line    INTEGER NOT NULL DEFAULT 0,
+        start_index INTEGER NOT NULL DEFAULT 0,
+        end_index   INTEGER NOT NULL DEFAULT 0,
+        symbol_name TEXT NOT NULL DEFAULT ''
       );
 
       -- Token usage tracking
@@ -631,6 +640,16 @@ export class TokenGuardDB {
         value TEXT NOT NULL
       );
     `);
+
+        // Migration: add columns for existing DBs that lack them
+        const migrationColumns = [
+            "ALTER TABLE chunks ADD COLUMN start_index INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE chunks ADD COLUMN end_index INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE chunks ADD COLUMN symbol_name TEXT NOT NULL DEFAULT ''",
+        ];
+        for (const sql of migrationColumns) {
+            try { this.db.run(sql); } catch { /* column already exists */ }
+        }
     }
 
     /** Rebuild the in-memory keyword index from all existing chunks. */
@@ -767,12 +786,15 @@ export class TokenGuardDB {
         nodeType: string,
         startLine: number,
         endLine: number,
-        embedding: Float32Array
+        embedding: Float32Array,
+        startIndex: number = 0,
+        endIndex: number = 0,
+        symbolName: string = "",
     ): number {
         this.db.run(
-            `INSERT INTO chunks (path, shorthand, raw_code, node_type, start_line, end_line)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-            [filePath, shorthand, rawCode, nodeType, startLine, endLine]
+            `INSERT INTO chunks (path, shorthand, raw_code, node_type, start_line, end_line, start_index, end_index, symbol_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [filePath, shorthand, rawCode, nodeType, startLine, endLine, startIndex, endIndex, symbolName]
         );
 
         const rowid = (this.db.exec("SELECT last_insert_rowid() AS id")[0]
@@ -792,6 +814,9 @@ export class TokenGuardDB {
             startLine: number;
             endLine: number;
             embedding: Float32Array;
+            startIndex?: number;
+            endIndex?: number;
+            symbolName?: string;
         }>
     ): void {
         this.db.run("BEGIN TRANSACTION");
@@ -804,7 +829,10 @@ export class TokenGuardDB {
                     chunk.nodeType,
                     chunk.startLine,
                     chunk.endLine,
-                    chunk.embedding
+                    chunk.embedding,
+                    chunk.startIndex ?? 0,
+                    chunk.endIndex ?? 0,
+                    chunk.symbolName ?? "",
                 );
             }
             this.db.run("COMMIT");
@@ -858,7 +886,7 @@ export class TokenGuardDB {
         if (ids.length === 0) return result;
         const placeholders = ids.map(() => "?").join(",");
         const stmt = this.db.prepare(
-            `SELECT id, path, shorthand, raw_code, node_type, start_line, end_line
+            `SELECT id, path, shorthand, raw_code, node_type, start_line, end_line, start_index, end_index, symbol_name
              FROM chunks WHERE id IN (${placeholders})`,
         );
         stmt.bind(ids);
@@ -872,6 +900,9 @@ export class TokenGuardDB {
                 node_type: row.node_type as string,
                 start_line: row.start_line as number,
                 end_line: row.end_line as number,
+                start_index: (row.start_index as number) ?? 0,
+                end_index: (row.end_index as number) ?? 0,
+                symbol_name: (row.symbol_name as string) ?? "",
             });
         }
         stmt.free();
@@ -936,6 +967,8 @@ export class TokenGuardDB {
                     id: row.id, path: row.path, shorthand: row.shorthand,
                     raw_code: row.raw_code, node_type: row.node_type,
                     start_line: row.start_line, end_line: row.end_line,
+                    start_index: row.start_index, end_index: row.end_index,
+                    symbol_name: row.symbol_name,
                     rrf_score: rrf,
                 });
             }
@@ -966,6 +999,8 @@ export class TokenGuardDB {
                     id: row.id, path: row.path, shorthand: row.shorthand,
                     raw_code: row.raw_code, node_type: row.node_type,
                     start_line: row.start_line, end_line: row.end_line,
+                    start_index: row.start_index, end_index: row.end_index,
+                    symbol_name: row.symbol_name,
                     rrf_score: boostedScore,
                 });
             }
@@ -1043,6 +1078,8 @@ export class TokenGuardDB {
                     id: row.id, path: row.path, shorthand: row.shorthand,
                     raw_code: row.raw_code, node_type: row.node_type,
                     start_line: row.start_line, end_line: row.end_line,
+                    start_index: row.start_index, end_index: row.end_index,
+                    symbol_name: row.symbol_name,
                     rrf_score: 1 - distance,
                 });
             }
@@ -1172,6 +1209,24 @@ export class TokenGuardDB {
 
     getVectorCount(): number {
         return this.vecIndex.size;
+    }
+
+    /**
+     * Scan ALL chunks whose raw_code contains the given symbol name.
+     * Returns distinct file paths. Used by prepare_refactor for 100% coverage.
+     */
+    searchRawCode(symbolName: string): string[] {
+        if (!this._ready) return [];
+        const stmt = this.db.prepare(
+            `SELECT DISTINCT path FROM chunks WHERE raw_code LIKE ?`
+        );
+        stmt.bind([`%${symbolName}%`]);
+        const paths: string[] = [];
+        while (stmt.step()) {
+            paths.push(stmt.getAsObject().path as string);
+        }
+        stmt.free();
+        return paths;
     }
 
     close(): void {

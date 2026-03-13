@@ -565,6 +565,76 @@ describe("performance", () => {
     });
 });
 
+// ─── symbolName from AST (PASO 0) ──────────────────────────────────
+
+describe("symbolName extraction from AST", () => {
+    it("should extract symbolName for functions, classes, interfaces, and arrow funcs", async () => {
+        const code = [
+            'export async function processTransaction(userId: string, amount: number): Promise<void> { return; }',
+            '',
+            'export class PaymentService {',
+            '    async charge() { return true; }',
+            '}',
+            '',
+            'export interface Config {',
+            '    debug: boolean;',
+            '}',
+            '',
+            'export type UserId = string;',
+            '',
+            'const handler = async (req: Request) => { return req; };',
+        ].join('\n');
+
+        const result = await parser.parse("test.ts", code);
+
+        const names = result.chunks.map(c => c.symbolName);
+        expect(names).toContain("processTransaction");
+        expect(names).toContain("PaymentService");
+        expect(names).toContain("Config");
+        expect(names).toContain("UserId");
+        expect(names).toContain("handler");
+    });
+
+    it("should extract symbolName for Python defs", async () => {
+        const code = [
+            'def process_data(items):',
+            '    return items',
+            '',
+            'class DataProcessor:',
+            '    def run(self):',
+            '        pass',
+        ].join('\n');
+
+        const result = await parser.parse("test.py", code);
+
+        const names = result.chunks.map(c => c.symbolName);
+        expect(names).toContain("process_data");
+        expect(names).toContain("DataProcessor");
+    });
+
+    it("should use symbolName for edit matching instead of regex", async () => {
+        const file = writeTmp("symbol-name-edit.ts", [
+            'export async function processTransaction(',
+            '  userId: string,',
+            '  amount: number',
+            '): Promise<void> {',
+            '  console.log("old");',
+            '}',
+        ].join('\n'));
+
+        const result = await semanticEdit(
+            file, "processTransaction",
+            'export async function processTransaction(\n  userId: string,\n  amount: number\n): Promise<void> {\n  console.log("new");\n}',
+            parser, sandbox,
+        );
+
+        expect(result.success).toBe(true);
+        const content = fs.readFileSync(file, "utf-8");
+        expect(content).toContain('"new"');
+        expect(content).not.toContain('"old"');
+    });
+});
+
 // ─── Memory safety ──────────────────────────────────────────────────
 
 describe("memory safety", () => {

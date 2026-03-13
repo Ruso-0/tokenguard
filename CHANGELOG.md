@@ -2,6 +2,63 @@
 
 All notable changes to TokenGuard will be documented in this file.
 
+## [4.0.2] - 2026-03-13
+
+### Fixed (Logic)
+- **Blind Sniper**: `prepare_refactor` only searched function signatures (BM25 shorthand index), missing symbols used inside function bodies. Now uses exhaustive `raw_code` SQL scan for 100% coverage. Also added `property_identifier` and `shorthand_property_identifier` to the AST node type filter.
+- **Batch Edit Race Condition**: `batch_edit` had no file locks. Concurrent `edit` + `batch_edit` on the same file could corrupt it. Added two-phase locking (acquire all or rollback all, release in finally).
+- **indexOf Wrong Function**: `applySemanticSplice` fallback searched from byte 0, could edit the wrong function when duplicates exist. Now searches in a ±500 byte local window around the AST-reported position first.
+- **extractSignature String Confusion**: `{` inside string literals (e.g., `msg = "{"`) was mistaken for function body start, truncating signatures. Added string-state tracking to skip characters inside quotes.
+- **Silent Plan Amnesia**: Plans exceeding 15,000 characters were silently dropped. Now injects a visible WARNING telling Claude to summarize the plan.
+
+### Fixed (Documentation)
+- Updated `index.ts` docstring from v3.3.0 to v4.0.2.
+- Rewrote `skills/SKILL.md` with v4 tool names and features (batch_edit, prepare_refactor, blast radius, architecture tiers).
+- Updated `getClaudeMdContent()` (CLAUDE.md init) with v4 features.
+- Changed "vs full file rewrite" to "vs native read+edit" in response messages.
+- Changed "Saves 98%" claim to "60-80%" in semantic-edit docstring.
+- Eliminated double file read in handleEdit by returning oldRawCode from semanticEdit.
+- Updated preToolUse.ts docstring to use v4 tool names.
+
+## [4.0.1] - 2026-03-13
+
+### Fixed
+- **Inflated `tokensAvoided` metric**: `semanticEdit()` was computing savings as `fullFile × 2 - newCode`, which double-counted the file read. Corrected to `fullFile + oldSymbol - newCode` (read file + old symbol code that Claude would have sent).
+- **Router docstring version**: Updated from v3.3.0 to v4.0.0 and added `batch_edit` and `prepare_refactor` to the tool action listings.
+- **Batch edit blast radius missing dependents**: `handleBatchEdit()` now queries the dependency graph to list files that import edited modules, matching the behavior of single-file `handleEdit()`.
+
+## [4.0.0] - 2026-03-12
+
+### BREAKING CHANGES
+- **`symbolName` extracted from AST**: Parser now uses tree-sitter `@_name` captures instead of ~10 fragile regexes. `ParsedChunk` interface adds `symbolName: string`. Database schema adds `symbol_name`, `start_index`, `end_index` columns (auto-migrated for existing DBs).
+
+### Added
+- **`tg_code action:"batch_edit"`**: Atomically edit multiple symbols across multiple files. Uses Virtual File System in RAM with reverse splice ordering (descending startIndex) to avoid byte offset corruption. All-or-nothing: if ANY file fails AST validation, NOTHING is written to disk.
+- **Architecture Map**: `tg_navigate action:"map"` now includes dependency graph with import centrality classification. Files are tiered by in-degree percentile: P75+ = "core", P50-P75 = "logic", <P50 = "leaf". Uses O(1) FastLookup index for import resolution (relative paths, `@/` aliases, extensionless, index.ts implicit).
+- **Blast Radius Detection**: When `tg_code action:"edit"` changes a function's signature (parameters, return type), TokenGuard warns which files import that symbol. Suggests `batch_edit` to update dependents. Also applies to `batch_edit`.
+- **`tg_navigate action:"prepare_refactor"`**: AST-based confidence classification for safe renaming. Walks tree-sitter syntax nodes and classifies each occurrence as "high" confidence (safe to rename) or "review" (inside strings, comments, object keys, JSX text). Returns a formatted report with two sections.
+- **`parseRaw<T>()`**: Public method on `ASTParser` for raw tree-sitter tree access via callback pattern with guaranteed WASM memory cleanup.
+- **`DependencyGraph` interface**: `importedBy`, `inDegree`, and `tiers` maps exported from `repo-map.ts`.
+- **`buildFastLookup()`**: O(1) import resolution mapping extensionless, src/-stripped, and index-collapsed variants to actual file paths.
+- **`detectSignatureChange()`**: Pure function comparing old/new signatures to detect parameter and return type changes.
+- **`findChunkBySymbol()`**: Extracted pure function preferring `chunk.symbolName` (AST) with `extractName()` regex fallback.
+- **`applySemanticSplice()`**: Extracted pure splice function for reuse in both single and batch edits.
+
+### Fixed
+- **Bug A — Stale docstring**: `engine.ts` header incorrectly referenced "sqlite-vec + FTS5". Updated to reflect actual implementation (pure-JS VectorIndex + BM25 KeywordIndex).
+- **Bug B — Multi-line console.log stripping**: Regex-based `console.log()` removal failed on multi-line calls. Replaced with `stripCallStatements()` using balanced parenthesis tracking. Same fix applied to Python `print()`.
+- **Bug C — Python `#` in strings**: Comment stripping destroyed `#` inside string literals (e.g., `color = "#FF0000"`). Fixed by reordering (triple-quotes first) and protecting single/double-quoted strings with placeholders before stripping comments.
+- **Bug D — Simplistic glob matching**: `walkDirectory` converted `**/node_modules/**` to `node_modules` via string replace, failing for patterns like `**/*.min.js`. Replaced with `picomatch` for proper glob matching.
+
+### Changed
+- `semantic-edit.ts` refactored: extracted `applySemanticSplice()`, `findChunkBySymbol()`, `detectSignatureChange()` as pure functions.
+- `repo-map.ts` extended: `generateRepoMap()` now builds and caches dependency graph alongside repo map. `repoMapToText()` appends architecture tier summary.
+- Database schema: `chunks` table now stores `start_index`, `end_index`, `symbol_name` with migration for existing DBs.
+- Test count: 464 → 473 tests across 21 test suites.
+
+### Dependencies
+- Added `picomatch` (runtime) and `@types/picomatch` (dev) for proper glob matching.
+
 ## [3.3.0] - 2026-03-13
 
 ### Added

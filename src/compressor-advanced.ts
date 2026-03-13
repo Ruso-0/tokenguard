@@ -58,6 +58,61 @@ function detectLang(filePath: string): Lang {
 // ─── Stage 1: Preprocessing ─────────────────────────────────────────
 
 /**
+ * Strip function call statements (console.log, print, etc.) that may span multiple lines.
+ * Uses balanced paren tracking to handle multi-line calls with nested parens.
+ */
+function stripCallStatements(text: string, pattern: RegExp): string {
+    // Find all match start positions
+    const toRemove: Array<{ start: number; end: number }> = [];
+    let m: RegExpExecArray | null;
+
+    while ((m = pattern.exec(text)) !== null) {
+        const matchStart = m.index;
+        // Find the start of the line
+        let lineStart = matchStart;
+        while (lineStart > 0 && text[lineStart - 1] !== "\n") lineStart--;
+
+        // Start tracking parens from the opening `(` which is at the end of the regex match
+        let depth = 1;
+        let pos = m.index + m[0].length;
+
+        while (pos < text.length && depth > 0) {
+            const ch = text[pos];
+            if (ch === "(") depth++;
+            else if (ch === ")") depth--;
+            // Skip string contents
+            else if (ch === '"' || ch === "'" || ch === "`") {
+                const quote = ch;
+                pos++;
+                while (pos < text.length) {
+                    if (text[pos] === "\\") { pos++; } // skip escaped char
+                    else if (text[pos] === quote) break;
+                    pos++;
+                }
+            }
+            pos++;
+        }
+
+        if (depth === 0) {
+            // Skip optional semicolon and trailing whitespace
+            let end = pos;
+            while (end < text.length && (text[end] === " " || text[end] === "\t")) end++;
+            if (end < text.length && text[end] === ";") end++;
+            while (end < text.length && (text[end] === " " || text[end] === "\t")) end++;
+            if (end < text.length && text[end] === "\n") end++;
+            toRemove.push({ start: lineStart, end });
+        }
+    }
+
+    // Remove in reverse to preserve indices
+    let result = text;
+    for (let i = toRemove.length - 1; i >= 0; i--) {
+        result = result.slice(0, toRemove[i].start) + result.slice(toRemove[i].end);
+    }
+    return result;
+}
+
+/**
  * Strip comments, console statements, debugger, normalize whitespace.
  * Returns cleaned text and number of characters removed.
  */
@@ -72,24 +127,37 @@ function preprocess(content: string, filePath: string): { cleaned: string; remov
 
     // Strip single-line comments
     if (lang === "python") {
-        // Python: # comments (but not #! shebang on line 1)
+        // Python: strip triple-quoted strings/docstrings FIRST (before # comments)
+        text = text.replace(/"""[\s\S]*?"""/g, '""');
+        text = text.replace(/'''[\s\S]*?'''/g, "''");
+
+        // Protect shebang
         text = text.replace(/^(#!.*)$/m, "___SHEBANG___$1");
-        text = text.replace(/(?<=^|[^\\])#[^\n]*/gm, "");
+
+        // Protect remaining string literals from # stripping
+        const pyStrings: string[] = [];
+        text = text.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, (m) => {
+            pyStrings.push(m);
+            return `__TG_STR${pyStrings.length - 1}__`;
+        });
+
+        // Now safe to strip # comments
+        text = text.replace(/#[^\n]*/gm, "");
+
+        // Restore strings and shebang
+        text = text.replace(/__TG_STR(\d+)__/g, (_, i) => pyStrings[parseInt(i)]);
         text = text.replace(/___SHEBANG___/g, "");
-        // Python docstrings (triple quotes)
-        text = text.replace(/"""[\s\S]*?"""/g, "");
-        text = text.replace(/'''[\s\S]*?'''/g, "");
     } else {
         // JS/TS/Go: // comments
         text = text.replace(/\/\/[^\n]*/g, "");
     }
 
-    // Strip console.log/warn/error/debug/info/assert/trace/dir statements (handles nested parens)
-    text = text.replace(/^\s*console\.(log|warn|error|debug|info|assert|trace|dir|table|time|timeEnd|group|groupEnd)\s*\(.*\)\s*;?\s*$/gm, "");
+    // Strip console.log/warn/error/debug/info (handles multi-line with balanced parens)
+    text = stripCallStatements(text, /^\s*console\.(log|warn|error|debug|info|assert|trace|dir|table|time|timeEnd|group|groupEnd)\s*\(/gm);
 
-    // Strip Python print() statements
+    // Strip Python print() statements (multi-line safe)
     if (lang === "python") {
-        text = text.replace(/^\s*print\s*\(.*\)\s*$/gm, "");
+        text = stripCallStatements(text, /^\s*print\s*\(/gm);
     }
 
     // Strip debugger statements

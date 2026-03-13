@@ -1,22 +1,18 @@
 #!/usr/bin/env node
 
 /**
- * index.ts — TokenGuard v3.3.0 MCP Server entry point.
+ * index.ts — TokenGuard v4.0.2 MCP Server entry point.
  *
  * Exposes 3 router tools to Claude Code (replaces 16 individual tools):
  *
- *   1. tg_navigate — AST-powered code navigation and semantic search
- *   2. tg_code     — Read, compress, and surgically edit code files
+ *   1. tg_navigate — AST-powered code navigation, semantic search, and refactor analysis
+ *   2. tg_code     — Read, compress, surgically edit, and batch edit code files
  *   3. tg_guard    — Safety controls, session monitoring, and persistent memory
  *
  * Middleware (runs automatically, not exposed as tools):
- *   - AST Validation: validates code before disk writes (inside tg_code edit)
+ *   - AST Validation: validates code before disk writes (inside tg_code edit/batch_edit)
  *   - Circuit Breaker: detects and stops infinite failure loops
  *   - File Lock: prevents concurrent edit corruption
- *
- * v3.0.1: Flat parameter schemas (explicit fields per action, no generic options bag),
- * file-level mutex on edits, security hardening (symlink resolution, sensitive file
- * blocklist, per-file circuit breaker tracking, pin sanitization).
  *
  * All processing is local. Zero cloud dependencies.
  */
@@ -46,7 +42,7 @@ import { PreToolUseHook } from "./hooks/preToolUse.js";
 // ─── CLI Flag Parsing ───────────────────────────────────────────────
 
 const args = process.argv.slice(2);
-const VERSION = "3.3.0";
+const VERSION = "4.0.2";
 
 if (args.includes("--version") || args.includes("-v")) {
     console.log(VERSION);
@@ -105,10 +101,14 @@ This workspace has the TokenGuard MCP plugin installed. It extends your capabili
 3. **Read files efficiently.** ALWAYS prefer \`tg_code action:"read"\` over native Read. Native Read dumps the entire file into your context — a 2,000-line file burns ~5,000 tokens in one call. \`tg_code read\` auto-compresses to ~1,200 tokens while keeping all structural context. This is the single biggest token saver available to you.
 4. **Debugging? Read uncompressed.** If you need to understand a function's internal logic (not just its signature), use \`tg_code action:"read" compress:false\`. Compression hides function bodies to save tokens — great for navigation, but not for debugging.
 5. **Edit surgically.** Prefer \`tg_code action:"edit"\` for modifying existing functions/classes. It validates the AST before writing to disk — if your code has a syntax error, the file stays untouched and you get the exact line/column to fix.
-6. **Create new files normally.** Use native Write for brand new files that don't exist yet.
-7. **Pin rules that matter.** Use \`tg_guard action:"pin"\` to persist instructions across messages (e.g., "always use fetch, not axios").
-8. **Anchor your plan.** If you're working on a complex task with strict schemas or architectural constraints, use \`tg_guard action:"set_plan" text:"PLAN.md"\` at the start. TokenGuard will silently re-inject your plan every ~15 tool calls to survive context compaction. Use \`tg_guard action:"memorize" text:"your progress notes"\` to leave notes for yourself.
-9. **If the circuit breaker triggers, follow its instructions.** It detected a doom loop and is protecting your session from burning tokens on repeated failures.
+6. **Multi-file refactors? Use batch_edit.** \`tg_code action:"batch_edit" edits:[...]\` edits multiple files atomically. If ANY file has a syntax error, NOTHING is written to disk. All-or-nothing safety.
+7. **Renaming a symbol? Use prepare_refactor first.** \`tg_navigate action:"prepare_refactor" symbol:"OldName"\` analyzes every occurrence and classifies it as "high confidence" (safe to rename) or "review" (might be a string, comment, or object key). Then use batch_edit to apply the renames.
+8. **Watch for blast radius warnings.** When you change a function's signature, TokenGuard automatically warns you which files import it. Fix those files before running tests.
+9. **The repo map shows architecture tiers.** \`tg_navigate action:"map"\` now classifies files as CORE (high import count — modify with caution), BUSINESS LOGIC (medium), or LEAF (safe to experiment).
+10. **Create new files normally.** Use native Write for brand new files that don't exist yet.
+11. **Pin rules that matter.** Use \`tg_guard action:"pin"\` to persist instructions across messages (e.g., "always use fetch, not axios").
+12. **Anchor your plan.** If you're working on a complex task with strict schemas or architectural constraints, use \`tg_guard action:"set_plan" text:"PLAN.md"\` at the start. TokenGuard will silently re-inject your plan every ~15 tool calls to survive context compaction. Use \`tg_guard action:"memorize" text:"your progress notes"\` to leave notes for yourself.
+13. **If the circuit breaker triggers, follow its instructions.** It detected a doom loop and is protecting your session from burning tokens on repeated failures.
 
 TokenGuard handles the context heavy-lifting so you can focus on writing correct code on the first try.
 `;
@@ -148,13 +148,14 @@ server.tool(
     "AST-powered code navigation and semantic search. Use for finding code, understanding project structure, and locating symbols.",
     {
         action: z
-            .enum(["search", "definition", "references", "outline", "map"])
+            .enum(["search", "definition", "references", "outline", "map", "prepare_refactor"])
             .describe(
                 "search: hybrid semantic+keyword search across codebase. " +
                 "definition: go-to-definition by symbol name. " +
                 "references: find all usages of a symbol. " +
                 "outline: list all symbols in a file. " +
-                "map: full repo structure map with pinned rules.",
+                "map: full repo structure map with pinned rules. " +
+                "prepare_refactor: analyze a symbol for safe renaming (classifies each occurrence as high-confidence or needs-review).",
             ),
         query: z
             .string()
@@ -214,11 +215,12 @@ server.tool(
     "Undo reverts the last edit. filter_output strips noisy terminal output.",
     {
         action: z
-            .enum(["read", "compress", "edit", "undo", "filter_output"])
+            .enum(["read", "compress", "edit", "batch_edit", "undo", "filter_output"])
             .describe(
                 "read: read file with optional compression. " +
                 "compress: compress file/directory with full control. " +
                 "edit: surgically edit a function/class by name (auto-validated). " +
+                "batch_edit: atomically edit multiple symbols across multiple files (all-or-nothing). " +
                 "undo: revert last edit. " +
                 "filter_output: filter noisy terminal output (strips ANSI, deduplicates errors). Does NOT execute commands.",
             ),
@@ -262,13 +264,22 @@ server.tool(
             .enum(["replace", "insert_before", "insert_after"])
             .optional()
             .describe("For edit: how to apply new_code relative to the symbol. 'replace' (default) replaces the symbol. 'insert_before'/'insert_after' adds new_code adjacent to the symbol without removing it."),
+        edits: z
+            .array(z.object({
+                path: z.string(),
+                symbol: z.string(),
+                new_code: z.string(),
+                mode: z.enum(["replace", "insert_before", "insert_after"]).optional(),
+            }))
+            .optional()
+            .describe("For batch_edit: array of edits to apply atomically. Each edit specifies path, symbol, new_code, and optional mode."),
         auto_context: z
             .boolean()
             .optional()
             .describe("Auto-inject signatures of imported dependencies. Set to false for pure output without context."),
     },
-    async ({ action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, auto_context }) => {
-        const params: CodeParams = { action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, auto_context };
+    async ({ action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, edits, auto_context }) => {
+        const params: CodeParams = { action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, edits, auto_context };
         return wrapWithCircuitBreaker(
             circuitBreaker,
             "tg_code",

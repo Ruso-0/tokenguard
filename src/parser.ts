@@ -31,6 +31,8 @@ export interface ParsedChunk {
     startIndex: number;
     /** Absolute byte offset of the node end in the source file. */
     endIndex: number;
+    /** Symbol name extracted directly from AST name captures. */
+    symbolName: string;
 }
 
 export interface ParseResult {
@@ -257,6 +259,12 @@ export class ASTParser {
                 );
                 if (!mainCapture) continue;
 
+                // Extract the symbol name directly from the AST name capture
+                const nameCapture = match.captures.find(
+                    (c) => c.name.endsWith("_name")
+                );
+                const symbolName = nameCapture ? nameCapture.node.text : "";
+
                 const node = mainCapture.node;
                 const nodeKey = `${node.startPosition.row}:${node.endPosition.row}`;
 
@@ -277,7 +285,7 @@ export class ASTParser {
                     endLine
                 );
 
-                result.push({ shorthand, rawCode, nodeType, startLine, endLine, startIndex: node.startIndex, endIndex: node.endIndex });
+                result.push({ shorthand, rawCode, nodeType, startLine, endLine, startIndex: node.startIndex, endIndex: node.endIndex, symbolName });
             }
 
             return result;
@@ -289,6 +297,24 @@ export class ASTParser {
             totalLines: content.split("\n").length,
             language: ext.slice(1),
         };
+    }
+
+    /**
+     * Parse a file and provide raw tree-sitter tree access via callback.
+     * Guarantees WASM memory cleanup via try/finally.
+     * Returns null if the file extension is unsupported.
+     */
+    async parseRaw<T>(
+        filePath: string,
+        content: string,
+        callback: (tree: Parser.Tree, language: Parser.Language) => T,
+    ): Promise<T | null> {
+        await this.initialize();
+        const ext = path.extname(filePath).toLowerCase();
+        const language = await this.loadLanguage(ext);
+        if (!language) return null;
+        this.parser.setLanguage(language);
+        return safeParse(this.parser, content, (tree) => callback(tree, language));
     }
 
     // ─── Shorthand Generation ─────────────────────────────────────

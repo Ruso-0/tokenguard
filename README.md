@@ -1,10 +1,10 @@
-# TokenGuard v3.3.0 - 3 Tools. 464 Tests. Zero Cloud. Instant Startup.
+# TokenGuard v4.0.0 - 3 Tools. 473 Tests. Zero Cloud. Instant Startup.
 
 <p align="center">
   <img src="https://img.shields.io/badge/MCP-Plugin-blue?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyem0wIDE4Yy00LjQyIDAtOC0zLjU4LTgtOHMzLjU4LTggOC04IDggMy41OCA4IDgtMy41OCA0LTggOHoiLz48L3N2Zz4=" alt="MCP Plugin">
   <img src="https://img.shields.io/badge/Tools-3-blue?style=for-the-badge" alt="3 Tools">
   <img src="https://img.shields.io/badge/Token%20Savings-~80%25-green?style=for-the-badge" alt="~80% Savings">
-  <img src="https://img.shields.io/badge/Tests-464%20passed-brightgreen?style=for-the-badge" alt="464 Tests">
+  <img src="https://img.shields.io/badge/Tests-473%20passed-brightgreen?style=for-the-badge" alt="473 Tests">
   <img src="https://img.shields.io/badge/Cloud-Zero-red?style=for-the-badge" alt="Zero Cloud">
   <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="MIT License">
   <img src="https://img.shields.io/badge/TypeScript-5.7-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
@@ -14,6 +14,22 @@
 <p align="center">
   <b>3 router tools. Invisible middleware. Lite mode (instant) or Pro mode (semantic). All local.</b>
 </p>
+
+---
+
+### What Changed in v4.0
+
+**Batch Edit, Architecture Map, Blast Radius, and Sniper Refactor.**
+
+| Feature | What It Does |
+|---|---|
+| **`batch_edit`** | Atomically edit multiple symbols across multiple files. All-or-nothing: if any file fails validation, nothing is written. |
+| **Architecture Map** | `tg_navigate map` now shows dependency tiers (core/logic/leaf) based on import centrality. |
+| **Blast Radius** | When you change a function's signature, TokenGuard warns which files import it and suggests `batch_edit`. |
+| **`prepare_refactor`** | AST-based confidence classification for safe renaming. Classifies each occurrence as "high" or "review" (strings, comments, keys). |
+| **AST Symbol Names** | Parser uses tree-sitter `@_name` captures instead of ~10 fragile regexes. |
+
+**Bugfixes:** multi-line `console.log` stripping, Python `#` in strings, proper glob matching via picomatch, stale docstring.
 
 ---
 
@@ -106,7 +122,8 @@ TokenGuard sits between you and token waste with 3 smart tools:
 | `definition` | Go-to-definition by symbol name. 100% precise AST lookup. |
 | `references` | Find all references to a symbol across the project. |
 | `outline` | List all symbols in a file with signatures and line ranges. |
-| `map` | Static repo map with pinned rules. Deterministic and prompt-cache-friendly. |
+| `map` | Static repo map with pinned rules and architecture tiers (core/logic/leaf). Prompt-cache-friendly. |
+| `prepare_refactor` | AST-based confidence classification for safe renaming. Classifies each occurrence as "high" or "review". |
 
 ### `tg_code` — Read, Compress & Edit
 
@@ -115,6 +132,7 @@ TokenGuard sits between you and token waste with 3 smart tools:
 | `read` | Smart file reader with behavioral advisor (suggests compression for large files). |
 | `compress` | Full-control compression. 3 levels (light/medium/aggressive) or 6 tiers. |
 | `edit` | Surgically edit a function/class by name. Supports `replace`, `insert_before`, `insert_after`. **Auto-validated via AST.** |
+| `batch_edit` | Atomically edit multiple symbols across multiple files. All-or-nothing with reverse splice ordering. |
 | `undo` | Revert the last edit. One-shot backup restore. |
 | `filter_output` | Filter noisy terminal output. Strips ANSI, deduplicates, extracts errors. |
 
@@ -221,7 +239,7 @@ npm install -g @ruso-0/tokenguard
 
 ```bash
 tokenguard --help       # Show usage and options
-tokenguard --version    # Show version (3.3.0)
+tokenguard --version    # Show version (4.0.0)
 tokenguard init         # Generate optimal CLAUDE.md instructions
 tokenguard --audit      # Run security audit (CLI only)
 ```
@@ -328,8 +346,9 @@ tg_guard action:"report"
 |  | search           | read             | pin / unpin      |  |
 |  | definition       | compress         | status           |  |
 |  | references       | edit (validated) | report           |  |
-|  | outline          | undo             |                  |  |
-|  | map              | filter_output    |                  |  |
+|  | outline          | batch_edit       | set_plan         |  |
+|  | map              | undo             | memorize         |  |
+|  | prepare_refactor | filter_output    | reset            |  |
 |  +--------+---------+--------+---------+--------+---------+  |
 |           |                  |                  |            |
 |  +--------v------------------v------------------v---------+  |
@@ -344,7 +363,7 @@ tg_guard action:"report"
 
 ## Stress Tested
 
-**464 tests. 0 failures. 20 test suites.** Cross-platform CI on Ubuntu, Windows, and macOS.
+**473 tests. 0 failures. 21 test suites.** Cross-platform CI on Ubuntu, Windows, and macOS.
 
 | Scenario | What We Tested | Result |
 |---|---|---|
@@ -362,13 +381,17 @@ tg_guard action:"report"
 | Surgical edits | Replace, insert_before, insert_after with auto-indent | Pass |
 | Pin memory | Add/remove/persist/limits/deterministic output | Pass |
 | E2E circuit breaker | 3 failures → Level 1 redirect → amnesia → recovery | Pass |
+| Batch edit ACID | Multi-file atomic edits, rollback on syntax error | Pass |
+| Architecture map | Import centrality, percentile tiers, FastLookup | Pass |
+| Blast radius | Signature change detection, dependent file warnings | Pass |
+| Prepare refactor | AST confidence classification (high/review) | Pass |
 | Cross-platform splice | Verified byte indices on Linux, Windows, macOS | Pass |
 
 ### Real-World Validation
 Tested against a 57-file production Next.js + Supabase app (SICAEP):
 - **~94% token reduction (estimated)** (tier 1 compression)
 - **10,532 tokens saved** on a single search query
-- **464/464 tests passed** across 3 operating systems
+- **473/473 tests passed** across 3 operating systems
 - Surgically fixed a real `.single()` → `.maybeSingle()` bug via `tg_code action:"edit"`
 - Creative circuit breaker correctly detected and redirected repeated error patterns
 - Path traversal attack (`../../../../etc/passwd`) → **BLOCKED**

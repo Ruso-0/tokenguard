@@ -1,5 +1,5 @@
 /**
- * router.ts — Central dispatcher for TokenGuard v3.3.0 router tools.
+ * router.ts — Central dispatcher for TokenGuard v4.0.0 router tools.
  *
  * Maps {toolName, action} pairs to existing handler functions.
  * All business logic remains in the original modules — this file
@@ -9,8 +9,8 @@
  * file-level mutex on edits, terminal renamed to filter_output.
  *
  * 3 router tools replace 16 individual tools:
- *   tg_navigate → search, definition, references, outline, map
- *   tg_code     → read, compress, edit, undo, filter_output
+ *   tg_navigate → search, definition, references, outline, map, prepare_refactor
+ *   tg_code     → read, compress, edit, batch_edit, undo, filter_output
  *   tg_guard    → pin, unpin, status, report, reset, set_plan, memorize
  */
 
@@ -32,7 +32,7 @@ import {
 } from "./ast-navigator.js";
 import { AstSandbox } from "./ast-sandbox.js";
 import { CircuitBreaker } from "./circuit-breaker.js";
-import { semanticEdit, type EditMode } from "./semantic-edit.js";
+import { semanticEdit, batchSemanticEdit, detectSignatureChange, type EditMode, type BatchEditOp } from "./semantic-edit.js";
 import { addPin, removePin, listPins, getPinnedText } from "./pin-memory.js";
 import { readSource } from "./utils/read-source.js";
 import { restoreBackup } from "./undo.js";
@@ -101,6 +101,13 @@ function applyAntiAmnesiaHeartbeat(
                         memoryPayload +=
                             `=== MASTER PLAN (${path.basename(planPath)}) ===\n` +
                             `${planContent}\n\n`;
+                    } else {
+                        memoryPayload +=
+                            `=== MASTER PLAN ===\n` +
+                            `[WARNING: Your plan file "${path.basename(planPath)}" exceeds 15,000 characters (${planContent.length.toLocaleString()} chars). ` +
+                            `TokenGuard skipped injection to protect your context window. ` +
+                            `Summarize it or split it into smaller files, then re-anchor with: ` +
+                            `tg_guard action:"set_plan" text:"<shorter_plan_file>"]\n\n`;
                     }
                 }
 
@@ -238,6 +245,7 @@ export interface CodeParams {
     max_lines?: number;
     mode?: string;
     auto_context?: boolean;
+    edits?: Array<{ path: string; symbol: string; new_code: string; mode?: string }>;
 }
 
 /** Flat params for tg_guard (replaces options bag). */
@@ -262,11 +270,12 @@ export async function handleNavigate(
         case "references": response = await handleReferences(params, deps); break;
         case "outline": response = await handleOutline(params, deps); break;
         case "map": response = await handleMap(params, deps); break;
+        case "prepare_refactor": response = await handlePrepareRefactor(params, deps); break;
         default:
             return {
                 content: [{
                     type: "text" as const,
-                    text: `Unknown tg_navigate action: "${action}". Valid actions: search, definition, references, outline, map.`,
+                    text: `Unknown tg_navigate action: "${action}". Valid actions: search, definition, references, outline, map, prepare_refactor.`,
                 }],
                 isError: true,
             };
@@ -286,6 +295,7 @@ export async function handleCode(
         case "read": response = await handleRead(params, deps); break;
         case "compress": response = await handleCompress(params, deps); break;
         case "edit": response = await handleEdit(params, deps); break;
+        case "batch_edit": response = await handleBatchEdit(params, deps); break;
         case "undo": response = await handleUndo(params, deps); break;
         case "filter_output": response = await handleFilterOutput(params, deps); break;
         default: {
@@ -295,7 +305,7 @@ export async function handleCode(
             return {
                 content: [{
                     type: "text" as const,
-                    text: `Unknown tg_code action: "${action}"${hint}. Valid actions: read, compress, edit, undo, filter_output.`,
+                    text: `Unknown tg_code action: "${action}"${hint}. Valid actions: read, compress, edit, batch_edit, undo, filter_output.`,
                 }],
                 isError: true,
             };
@@ -689,6 +699,149 @@ async function handleMap(
     };
 }
 
+// ─── Sniper Refactor ─────────────────────────────────────────────────
+
+import type Parser from "web-tree-sitter";
+
+/** Node types that are dangerous for automated refactoring (strings, comments, keys). */
+const DANGEROUS_REFACTOR_NODES = new Set([
+    "string", "string_fragment", "string_content",
+    "template_string", "template_substitution",
+    "interpreted_string_literal", "raw_string_literal",
+    "concatenated_string",
+    "comment", "line_comment", "block_comment",
+    "jsx_text",
+    "property_identifier", "shorthand_property_identifier",
+]);
+
+/** Parent types that represent key-value pairs (left child = key). */
+const KV_PARENTS = new Set(["pair", "dictionary", "keyed_element", "property_assignment"]);
+
+/**
+ * Classify an AST node for refactoring confidence.
+ * "high" = structural usage (safe to rename), "review" = might be string/comment/key.
+ */
+function classifyRefactorConfidence(
+    node: Parser.SyntaxNode,
+): "high" | "review" {
+    const nodeType = node.type;
+    const parentType = node.parent?.type || "";
+
+    if (DANGEROUS_REFACTOR_NODES.has(nodeType) || DANGEROUS_REFACTOR_NODES.has(parentType)) {
+        return "review";
+    }
+
+    // Left side of key-value pair
+    if (KV_PARENTS.has(parentType) && node.parent?.child(0) === node) {
+        return "review";
+    }
+
+    return "high";
+}
+
+async function handlePrepareRefactor(
+    params: NavigateParams,
+    deps: RouterDependencies,
+): Promise<McpToolResponse> {
+    const { engine } = deps;
+    await engine.initialize();
+
+    const symbolName = params.symbol;
+    if (!symbolName) {
+        return {
+            content: [{ type: "text" as const, text: 'Error: "symbol" is required for prepare_refactor.' }],
+            isError: true,
+        };
+    }
+
+    const parser = engine.getParser();
+
+    // Exhaustive search: scan raw_code for 100% coverage (not just signatures)
+    const candidatePaths = await engine.searchFilesBySymbol(symbolName);
+    const candidateFiles = new Set(candidatePaths);
+
+    const highConfidence: Array<{ file: string; line: number; context: string }> = [];
+    const reviewManually: Array<{ file: string; line: number; context: string; reason: string }> = [];
+
+    for (const filePath of candidateFiles) {
+        let fullPath: string;
+        try {
+            fullPath = safePath(process.cwd(), filePath);
+        } catch { continue; }
+
+        let content: string;
+        try {
+            content = readSource(fullPath);
+        } catch { continue; }
+
+        const contentLines = content.split("\n");
+        const fp = filePath; // capture for closure
+
+        await parser.parseRaw(fullPath, content, (tree: Parser.Tree) => {
+            // Walk tree for all identifier nodes matching the symbol
+            function visit(node: Parser.SyntaxNode) {
+                if (
+                    (node.type === "identifier" || node.type === "type_identifier" ||
+                     node.type === "property_identifier" || node.type === "shorthand_property_identifier") &&
+                    node.text === symbolName
+                ) {
+                    const line = node.startPosition.row + 1;
+                    const lineContent = contentLines[node.startPosition.row]?.trim() || "";
+                    const confidence = classifyRefactorConfidence(node);
+
+                    if (confidence === "high") {
+                        highConfidence.push({ file: fp, line, context: lineContent });
+                    } else {
+                        reviewManually.push({
+                            file: fp, line, context: lineContent,
+                            reason: `parent: ${node.parent?.type || "unknown"}`,
+                        });
+                    }
+                }
+                for (let i = 0; i < node.childCount; i++) {
+                    visit(node.child(i)!);
+                }
+            }
+            visit(tree.rootNode);
+        });
+    }
+
+    // Format response
+    const lines: string[] = [
+        `## Prepare Refactor: \`${symbolName}\``,
+        "",
+    ];
+
+    if (highConfidence.length > 0) {
+        lines.push(`### HIGH CONFIDENCE (${highConfidence.length} — structural usage)`);
+        for (const m of highConfidence) {
+            lines.push(`  ${m.file}:L${m.line} — \`${m.context}\``);
+        }
+        lines.push("");
+    }
+
+    if (reviewManually.length > 0) {
+        lines.push(`### REVIEW MANUALLY (${reviewManually.length} — may be string/key/comment)`);
+        for (const m of reviewManually) {
+            lines.push(`  ${m.file}:L${m.line} — \`${m.context}\` (${m.reason})`);
+        }
+        lines.push("");
+    }
+
+    if (highConfidence.length === 0 && reviewManually.length === 0) {
+        lines.push(`No occurrences of \`${symbolName}\` found in the project.`);
+    } else {
+        lines.push(
+            `Use \`tg_code action:"batch_edit"\` to rename the high-confidence matches. ` +
+            `Review manually before including any marked for review.`
+        );
+    }
+
+    return {
+        content: [{ type: "text" as const, text: lines.join("\n") }],
+    };
+}
+
 // ─── Code Handlers ──────────────────────────────────────────────────
 
 async function handleRead(
@@ -994,6 +1147,7 @@ async function handleEdit(
         const mode = (typeof params.mode === "string" && ["replace", "insert_before", "insert_after"].includes(params.mode))
             ? params.mode as EditMode
             : "replace";
+
         const result = await semanticEdit(
             resolvedPath,
             symbol,
@@ -1025,6 +1179,26 @@ async function handleEdit(
             result.tokensAvoided,
         );
 
+        // Blast radius detection using oldRawCode from semanticEdit result
+        let blastRadiusWarning = "";
+        if (result.oldRawCode && mode === "replace") {
+            try {
+                const sigChanged = detectSignatureChange(result.oldRawCode, new_code);
+                if (sigChanged) {
+                    const relPath = path.relative(process.cwd(), resolvedPath).replace(/\\/g, "/");
+                    const dependents = await engine.findDependents(relPath);
+                    if (dependents.length > 0) {
+                        const depList = dependents.map(d => `  - ${d}`).join("\n");
+                        blastRadiusWarning =
+                            `\n\n**[BLAST RADIUS]** Signature of \`${symbol}\` changed.\n` +
+                            `This file is imported by:\n${depList}\n\n` +
+                            `If you altered parameters or return types, use \`tg_code action:"batch_edit"\` ` +
+                            `to update those files before running tests.`;
+                    }
+                }
+            } catch { /* non-fatal */ }
+        }
+
         return {
             content: [{
                 type: "text" as const,
@@ -1034,11 +1208,163 @@ async function handleEdit(
                     `**File:** ${file}\n` +
                     `**Lines:** ${result.oldLines} → ${result.newLines}\n` +
                     `**Syntax:** validated ✓\n\n` +
-                    `[TokenGuard saved ~${result.tokensAvoided.toLocaleString()} tokens vs full file rewrite]`,
+                    `[TokenGuard saved ~${result.tokensAvoided.toLocaleString()} tokens vs native read+edit]` +
+                    blastRadiusWarning,
             }],
         };
     } finally {
         releaseFileLock(resolvedPath);
+    }
+}
+
+async function handleBatchEdit(
+    params: CodeParams,
+    deps: RouterDependencies,
+): Promise<McpToolResponse> {
+    const { engine, sandbox } = deps;
+    await engine.initialize();
+
+    const edits = params.edits;
+    if (!edits || edits.length === 0) {
+        return {
+            content: [{
+                type: "text" as const,
+                text: `Error: "edits" array is required for batch_edit.\n\n[TokenGuard saved ~0 tokens]`,
+            }],
+            isError: true,
+        };
+    }
+
+    // Validate all edits have required fields
+    for (let i = 0; i < edits.length; i++) {
+        const e = edits[i];
+        if (!e.path || !e.symbol || !e.new_code) {
+            return {
+                content: [{
+                    type: "text" as const,
+                    text: `Error: edit[${i}] missing required fields (path, symbol, new_code).\n\n[TokenGuard saved ~0 tokens]`,
+                }],
+                isError: true,
+            };
+        }
+    }
+
+    // Two-Phase Locking: acquire all file locks or abort
+    const uniquePaths: string[] = [];
+    for (const e of edits) {
+        try {
+            const resolved = safePath(process.cwd(), e.path);
+            if (!uniquePaths.includes(resolved)) uniquePaths.push(resolved);
+        } catch (err) {
+            return {
+                content: [{ type: "text" as const, text: `Security error in edit path "${e.path}": ${(err as Error).message}` }],
+                isError: true,
+            };
+        }
+    }
+
+    const acquiredLocks: string[] = [];
+    for (const p of uniquePaths) {
+        const lock = acquireFileLock(p, "tg_code:batch_edit");
+        if (!lock.acquired) {
+            // Rollback: release all locks acquired so far
+            for (const rp of acquiredLocks) releaseFileLock(rp);
+            return {
+                content: [{ type: "text" as const, text:
+                    `## Batch Edit: BLOCKED\n\n` +
+                    `File \`${path.relative(process.cwd(), p)}\` is locked by another edit (${lock.heldBy}, ${lock.heldForMs}ms).\n` +
+                    `Wait for it to finish, then resend the full batch.\n\n[TokenGuard saved ~0 tokens]`
+                }],
+                isError: true,
+            };
+        }
+        acquiredLocks.push(p);
+    }
+
+    try {
+        const parser = engine.getParser();
+        const batchOps: BatchEditOp[] = edits.map(e => ({
+            path: e.path,
+            symbol: e.symbol,
+            new_code: e.new_code,
+            mode: (e.mode && ["replace", "insert_before", "insert_after"].includes(e.mode))
+                ? e.mode as EditMode
+                : "replace",
+        }));
+
+        const result = await batchSemanticEdit(batchOps, parser, sandbox, process.cwd());
+
+        if (!result.success) {
+            return {
+                content: [{
+                    type: "text" as const,
+                    text:
+                        `## Batch Edit: TRANSACTION ABORTED\n\n` +
+                        `**Edits requested:** ${result.editCount}\n` +
+                        `**Files involved:** ${result.fileCount}\n\n` +
+                        `${result.error}\n\n` +
+                        `No files were modified.\n\n` +
+                        `[TokenGuard saved ~0 tokens]`,
+                }],
+                isError: true,
+            };
+        }
+
+        const fileList = result.files.map(f => `  - ${f}`).join("\n");
+
+        // Blast radius detection for batch edits
+        let blastRadiusWarning = "";
+        if (result.oldRawCodes) {
+            try {
+                const changedSymbols: string[] = [];
+                for (const edit of batchOps) {
+                    if (edit.mode && edit.mode !== "replace") continue;
+                    const key = `${edit.path}::${edit.symbol}`;
+                    const oldRaw = result.oldRawCodes.get(key);
+                    if (oldRaw && detectSignatureChange(oldRaw, edit.new_code)) {
+                        changedSymbols.push(edit.symbol);
+                    }
+                }
+                if (changedSymbols.length > 0) {
+                    // Collect dependents for all edited files
+                    const allDependents = new Set<string>();
+                    for (const filePath of result.files) {
+                        try {
+                            const deps = await engine.findDependents(filePath);
+                            for (const d of deps) allDependents.add(d);
+                        } catch { /* non-fatal */ }
+                    }
+                    // Remove files that were already part of this batch edit
+                    for (const f of result.files) allDependents.delete(f);
+
+                    const depList = allDependents.size > 0
+                        ? `\nFiles that import these modules:\n${[...allDependents].map(d => `  - ${d}`).join("\n")}\n`
+                        : "";
+
+                    blastRadiusWarning =
+                        `\n\n**[BLAST RADIUS]** Signature changed for: ${changedSymbols.map(s => `\`${s}\``).join(", ")}.` +
+                        depList +
+                        `\nIf you altered parameters or return types, use \`tg_code action:"batch_edit"\` to update those files before running tests.`;
+                }
+            } catch { /* non-fatal */ }
+        }
+
+        return {
+            content: [{
+                type: "text" as const,
+                text:
+                    `## Batch Edit: SUCCESS\n\n` +
+                    `**Edits applied:** ${result.editCount}\n` +
+                    `**Files modified:** ${result.fileCount}\n` +
+                    `${fileList}\n\n` +
+                    `All files passed syntax validation.\n` +
+                    `Run \`npm run typecheck\` or your tests to verify types.\n\n` +
+                    `[TokenGuard batch edit complete]` +
+                    blastRadiusWarning,
+            }],
+        };
+    } finally {
+        for (const p of acquiredLocks) releaseFileLock(p);
     }
 }
 

@@ -5,7 +5,7 @@
  * reading or rewriting the entire file. Finds the exact AST node,
  * splices only those bytes, and validates syntax before saving.
  *
- * Saves 98% of tokens vs full file rewrite.
+ * Typically saves 60-80% of tokens vs native read+edit workflow.
  *
  * v3.2.0: Byte-index splicing (no more indexOf), auto-indentation,
  * insert_before/insert_after modes, arrow function support,
@@ -19,6 +19,7 @@ import { AstSandbox } from "./ast-sandbox.js";
 import { Embedder } from "./embedder.js";
 import { readSource } from "./utils/read-source.js";
 import { saveBackup } from "./undo.js";
+import { extractSignature, cleanSignature } from "./repo-map.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -33,6 +34,7 @@ export interface EditResult {
     tokensAvoided: number;
     syntaxValid: boolean;
     error?: string;
+    oldRawCode?: string;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
@@ -101,6 +103,286 @@ function detectLanguage(filePath: string): string | null {
     return map[ext] ?? null;
 }
 
+// ─── Pure Functions (shared by single edit + batch edit) ────────────
+
+export interface SpliceTarget {
+    startIndex: number;
+    endIndex: number;
+    rawCode: string;
+    symbolName: string;
+    startLine: number;
+}
+
+/**
+ * Find a chunk by symbol name. Prefers AST symbolName, falls back to regex extraction.
+ */
+export function findChunkBySymbol(
+    chunks: ParsedChunk[],
+    symbolName: string,
+): ParsedChunk | null {
+    // Exact match on AST symbolName first
+    const astMatch = chunks.find(c => c.symbolName && c.symbolName === symbolName);
+    if (astMatch) return astMatch;
+
+    // Fallback: regex extraction
+    const regexMatch = chunks.find(c => extractName(c) === symbolName);
+    if (regexMatch) return regexMatch;
+
+    // Case-insensitive fallback
+    const lower = symbolName.toLowerCase();
+    const fuzzy = chunks.find(c => {
+        const name = c.symbolName || extractName(c);
+        return name.toLowerCase() === lower;
+    });
+    return fuzzy ?? null;
+}
+
+/**
+ * Apply a semantic splice on a string in RAM. Pure function: string in → string out.
+ * Verifies byte indices, rebases indentation, and splices by mode.
+ */
+export function applySemanticSplice(
+    content: string,
+    target: SpliceTarget,
+    newCode: string,
+    mode: EditMode = "replace",
+): string {
+    const { startIndex, rawCode } = target;
+
+    // Verify tree-sitter byte position against actual content
+    let startIdx = startIndex;
+    if (content.substring(startIdx, startIdx + rawCode.length) !== rawCode) {
+        // Search in a local window of ±500 bytes around the AST-reported position
+        const windowStart = Math.max(0, startIdx - 500);
+        const windowEnd = Math.min(content.length, startIdx + rawCode.length + 500);
+        const searchWindow = content.substring(windowStart, windowEnd);
+        const localOffset = searchWindow.indexOf(rawCode);
+
+        if (localOffset >= 0) {
+            startIdx = windowStart + localOffset;
+        } else {
+            // Last resort: global search (better than crashing)
+            startIdx = content.indexOf(rawCode);
+        }
+
+        if (startIdx < 0) {
+            throw new Error(
+                `Cannot locate symbol "${target.symbolName}" in file content. AST offset mismatch.`,
+            );
+        }
+    }
+    const endIdx = startIdx + rawCode.length;
+
+    // Extract exact original indentation
+    let lineStart = startIdx;
+    while (lineStart > 0 && content[lineStart - 1] !== "\n") lineStart--;
+    if (content[lineStart] === "\r") lineStart++;
+    const indentMatch = content.slice(lineStart, startIdx).match(/^[ \t]*/);
+    const baseIndent = indentMatch ? indentMatch[0] : "";
+
+    // Calculate minimum indentation in the new code
+    const newLines = newCode.split("\n");
+    const nonBlank = newLines.filter(l => l.trim().length > 0);
+    let minClaudeIndent = Infinity;
+    for (const line of nonBlank) {
+        const match = line.match(/^[ \t]*/);
+        if (match && match[0].length < minClaudeIndent) minClaudeIndent = match[0].length;
+    }
+    if (minClaudeIndent === Infinity) minClaudeIndent = 0;
+
+    // Relative rebase: strip Claude's indent, apply baseIndent
+    const formattedNewCode = newLines.map((line, i) => {
+        if (line.trim() === "") return "";
+        const strippedLine = line.slice(minClaudeIndent);
+        if (mode === "replace" && i === 0) return strippedLine;
+        return baseIndent + strippedLine;
+    }).join("\n");
+
+    // Splice by mode
+    if (mode === "insert_before") {
+        return content.slice(0, lineStart) + formattedNewCode + "\n\n" + content.slice(lineStart);
+    } else if (mode === "insert_after") {
+        let endOfLine = endIdx;
+        while (endOfLine < content.length && content[endOfLine] !== "\n") endOfLine++;
+        return content.slice(0, endOfLine) + "\n\n" + formattedNewCode + content.slice(endOfLine);
+    } else {
+        return content.slice(0, startIdx) + formattedNewCode + content.slice(endIdx);
+    }
+}
+
+/**
+ * Detect if a code edit changes the function/class signature.
+ * Compares cleaned signatures (keyword-stripped) of old and new code.
+ */
+export function detectSignatureChange(oldRawCode: string, newCode: string): boolean {
+    const oldSig = cleanSignature(extractSignature(oldRawCode));
+    const newSig = cleanSignature(extractSignature(newCode));
+    return oldSig !== newSig;
+}
+
+// ─── Batch Edit ACID ────────────────────────────────────────────────
+
+export interface BatchEditOp {
+    path: string;
+    symbol: string;
+    new_code: string;
+    mode?: EditMode;
+}
+
+export interface BatchEditResult {
+    success: boolean;
+    editCount: number;
+    fileCount: number;
+    files: string[];
+    error?: string;
+    /** Per-edit old raw code (for blast radius detection) */
+    oldRawCodes?: Map<string, string>;
+}
+
+/**
+ * Apply multiple edits atomically across multiple files.
+ * All-or-nothing: if ANY validation fails, ZERO files are written.
+ */
+export async function batchSemanticEdit(
+    edits: BatchEditOp[],
+    parser: ASTParser,
+    sandbox: AstSandbox,
+    projectRoot: string,
+): Promise<BatchEditResult> {
+    const { safePath } = await import("./utils/path-jail.js");
+
+    if (!edits || edits.length === 0) {
+        return { success: false, editCount: 0, fileCount: 0, files: [], error: "No edits provided." };
+    }
+
+    // 1. Group edits by file, resolving paths
+    const editsByFile = new Map<string, BatchEditOp[]>();
+    for (const edit of edits) {
+        const resolved = safePath(projectRoot, edit.path);
+        const arr = editsByFile.get(resolved) || [];
+        arr.push(edit);
+        editsByFile.set(resolved, arr);
+    }
+
+    // 2. Build VFS in RAM
+    const vfs = new Map<string, string>();
+    for (const filePath of editsByFile.keys()) {
+        try {
+            vfs.set(filePath, readSource(filePath));
+        } catch (err) {
+            return {
+                success: false, editCount: edits.length, fileCount: editsByFile.size, files: [],
+                error: `Cannot read file "${filePath}": ${(err as Error).message}`,
+            };
+        }
+    }
+
+    // Track old raw codes for blast radius detection
+    const oldRawCodes = new Map<string, string>();
+
+    // 3. For each file: parse ONCE, map edits, reverse splice
+    for (const [filePath, fileEdits] of editsByFile.entries()) {
+        let virtualCode = vfs.get(filePath)!;
+        const parseResult = await parser.parse(filePath, virtualCode);
+
+        // Map each edit to its AST chunk
+        const mappedEdits: Array<{ edit: BatchEditOp; chunk: ParsedChunk }> = [];
+        for (const edit of fileEdits) {
+            const chunk = findChunkBySymbol(parseResult.chunks, edit.symbol);
+            if (!chunk) {
+                const available = parseResult.chunks
+                    .map(c => c.symbolName || extractName(c))
+                    .filter(Boolean)
+                    .join(", ");
+                return {
+                    success: false, editCount: edits.length, fileCount: editsByFile.size, files: [],
+                    error: `Symbol "${edit.symbol}" not found in ${edit.path}. Available: ${available}`,
+                };
+            }
+            mappedEdits.push({ edit, chunk });
+        }
+
+        // Detect overlapping ranges
+        for (let i = 0; i < mappedEdits.length; i++) {
+            for (let j = i + 1; j < mappedEdits.length; j++) {
+                const a = mappedEdits[i].chunk;
+                const b = mappedEdits[j].chunk;
+                if (a.startIndex < b.endIndex && b.startIndex < a.endIndex) {
+                    return {
+                        success: false, editCount: edits.length, fileCount: editsByFile.size, files: [],
+                        error: `Overlapping edits: "${mappedEdits[i].edit.symbol}" and "${mappedEdits[j].edit.symbol}" ` +
+                            `overlap in ${path.relative(projectRoot, filePath)}. Separate them into two calls.`,
+                    };
+                }
+            }
+        }
+
+        // Reverse splice: sort by startIndex DESCENDING (bottom-up)
+        mappedEdits.sort((a, b) => b.chunk.startIndex - a.chunk.startIndex);
+
+        for (const { edit, chunk } of mappedEdits) {
+            oldRawCodes.set(`${edit.path}::${edit.symbol}`, chunk.rawCode);
+            try {
+                virtualCode = applySemanticSplice(
+                    virtualCode,
+                    {
+                        startIndex: chunk.startIndex,
+                        endIndex: chunk.endIndex,
+                        rawCode: chunk.rawCode,
+                        symbolName: chunk.symbolName || extractName(chunk),
+                        startLine: chunk.startLine,
+                    },
+                    edit.new_code,
+                    edit.mode || "replace",
+                );
+            } catch (err) {
+                return {
+                    success: false, editCount: edits.length, fileCount: editsByFile.size, files: [],
+                    error: `Error splicing "${edit.symbol}" in ${edit.path}: ${(err as Error).message}. No files modified.`,
+                };
+            }
+        }
+
+        vfs.set(filePath, virtualCode);
+    }
+
+    // 4. Validate ALL virtual files
+    await sandbox.initialize();
+    for (const [filePath, virtualContent] of vfs.entries()) {
+        const language = detectLanguage(filePath);
+        if (!language) continue;
+
+        const validation = await sandbox.validateCode(virtualContent, language);
+        if (!validation.valid) {
+            const errDetail = validation.errors.slice(0, 3).map(e =>
+                `  L${e.line}:${e.column} — ${e.context.split("\n")[0].trim()}`
+            ).join("\n");
+
+            return {
+                success: false, editCount: edits.length, fileCount: editsByFile.size, files: [],
+                error: `TRANSACTION ABORTED — syntax error in ${path.relative(projectRoot, filePath)}:\n${errDetail}\n\n` +
+                    `No files were modified.\n${validation.suggestion}\nFix the code and resend the full batch.`,
+            };
+        }
+    }
+
+    // 5. COMMIT: all passed validation → write to disk
+    const writtenFiles: string[] = [];
+    for (const [filePath, virtualContent] of vfs.entries()) {
+        try { saveBackup(projectRoot, filePath); } catch { /* non-fatal */ }
+        fs.writeFileSync(filePath, virtualContent, "utf-8");
+        writtenFiles.push(path.relative(projectRoot, filePath));
+    }
+
+    return {
+        success: true,
+        editCount: edits.length,
+        fileCount: editsByFile.size,
+        files: writtenFiles,
+        oldRawCodes,
+    };
+}
+
 // ─── Core ───────────────────────────────────────────────────────────
 
 /**
@@ -154,12 +436,12 @@ export async function semanticEdit(
         };
     }
 
-    // Find matching chunks by name
+    // Find matching chunks by name (prefer AST symbolName, fallback to regex)
     const matches: Array<{ chunk: ParsedChunk; name: string }> = [];
     const allNames: string[] = [];
 
     for (const chunk of parseResult.chunks) {
-        const name = extractName(chunk);
+        const name = chunk.symbolName || extractName(chunk);
         if (name) allNames.push(`${name} (L${chunk.startLine}-L${chunk.endLine})`);
         if (name === symbolName) {
             matches.push({ chunk, name });
@@ -170,7 +452,7 @@ export async function semanticEdit(
     if (matches.length === 0) {
         const lowerSymbol = symbolName.toLowerCase();
         const fuzzy = parseResult.chunks
-            .map((c) => ({ chunk: c, name: extractName(c) }))
+            .map((c) => ({ chunk: c, name: c.symbolName || extractName(c) }))
             .filter((c) => c.name.toLowerCase() === lowerSymbol);
 
         if (fuzzy.length > 0) {
@@ -206,7 +488,7 @@ export async function semanticEdit(
         }
 
         if (bestChunk && bestScore >= 5) {
-            const guessedName = extractName(bestChunk);
+            const guessedName = bestChunk.symbolName || extractName(bestChunk);
             return {
                 success: false,
                 filePath,
@@ -256,70 +538,34 @@ export async function semanticEdit(
 
     const { chunk } = matches[0];
     const rawCode = chunk.rawCode;
+    const oldLines = mode === "replace" ? chunk.rawCode.split("\n").length : 0;
 
-    // Verify tree-sitter byte position against actual content.
-    // WASM parsers may report different byte offsets across platforms;
-    // fallback to indexOf for cross-platform reliability.
-    let startIdx = chunk.startIndex;
-    if (content.substring(startIdx, startIdx + rawCode.length) !== rawCode) {
-        startIdx = content.indexOf(rawCode);
-        if (startIdx < 0) {
-            return {
-                success: false,
-                filePath,
-                symbolName,
-                oldLines: rawCode.split("\n").length,
-                newLines: newCode.split("\n").length,
-                tokensAvoided: 0,
-                syntaxValid: false,
-                error: "Internal error: could not locate symbol text in file.",
-            };
-        }
-    }
-    const endIdx = startIdx + rawCode.length;
-
-    // 1. Extract the EXACT original indentation (respects tabs and spaces)
-    let lineStart = startIdx;
-    while (lineStart > 0 && content[lineStart - 1] !== "\n") lineStart--;
-    // Skip \r for CRLF line endings (Windows files)
-    if (content[lineStart] === "\r") lineStart++;
-    const indentMatch = content.slice(lineStart, startIdx).match(/^[ \t]*/);
-    const baseIndent = indentMatch ? indentMatch[0] : "";
-
-    // 2. Calculate the minimum indentation Claude included in the new code
-    const newLines = newCode.split("\n");
-    const nonBlank = newLines.filter(l => l.trim().length > 0);
-    let minClaudeIndent = Infinity;
-    for (const line of nonBlank) {
-        const match = line.match(/^[ \t]*/);
-        if (match && match[0].length < minClaudeIndent) minClaudeIndent = match[0].length;
-    }
-    if (minClaudeIndent === Infinity) minClaudeIndent = 0;
-
-    // 3. Relative rebase: strip Claude's indent, apply baseIndent
-    const formattedNewCode = newLines.map((line, i) => {
-        if (line.trim() === "") return "";
-        const strippedLine = line.slice(minClaudeIndent);
-
-        if (mode === "replace" && i === 0) return strippedLine;
-        return baseIndent + strippedLine;
-    }).join("\n");
-
-    // 4. Splice using exact byte indices
+    // Apply splice via shared pure function
     let newContent: string;
-    let oldLines = chunk.rawCode.split("\n").length;
-
-    if (mode === "insert_before") {
-        newContent = content.slice(0, lineStart) + formattedNewCode + "\n\n" + content.slice(lineStart);
-        oldLines = 0;
-    } else if (mode === "insert_after") {
-        let endOfLine = endIdx;
-        while (endOfLine < content.length && content[endOfLine] !== "\n") endOfLine++;
-        newContent = content.slice(0, endOfLine) + "\n\n" + formattedNewCode + content.slice(endOfLine);
-        oldLines = 0;
-    } else {
-        // replace (default)
-        newContent = content.slice(0, startIdx) + formattedNewCode + content.slice(endIdx);
+    try {
+        newContent = applySemanticSplice(
+            content,
+            {
+                startIndex: chunk.startIndex,
+                endIndex: chunk.endIndex,
+                rawCode: chunk.rawCode,
+                symbolName: chunk.symbolName || extractName(chunk),
+                startLine: chunk.startLine,
+            },
+            newCode,
+            mode,
+        );
+    } catch (err) {
+        return {
+            success: false,
+            filePath,
+            symbolName,
+            oldLines: rawCode.split("\n").length,
+            newLines: newCode.split("\n").length,
+            tokensAvoided: 0,
+            syntaxValid: false,
+            error: (err as Error).message,
+        };
     }
 
     // Validate syntax of the edited file
@@ -372,12 +618,12 @@ export async function semanticEdit(
     // Write to disk
     fs.writeFileSync(filePath, newContent, "utf-8");
 
-    // Calculate tokens avoided:
-    // Without semantic edit: read full file + write full file = 2× file tokens
-    // With semantic edit: only newCode tokens
+    // Tokens avoided: without TokenGuard Claude reads full file + sends old symbol code.
+    // With TokenGuard: only sends newCode. Savings = (fullFile + oldSymbol) - newCode.
     const fullFileTokens = Embedder.estimateTokens(content);
+    const symbolTokens = Embedder.estimateTokens(rawCode);
     const newCodeTokens = Embedder.estimateTokens(newCode);
-    const tokensAvoided = Math.max(0, fullFileTokens * 2 - newCodeTokens);
+    const tokensAvoided = Math.max(0, fullFileTokens + symbolTokens - newCodeTokens);
 
     return {
         success: true,
@@ -387,5 +633,6 @@ export async function semanticEdit(
         newLines: newCode.split("\n").length,
         tokensAvoided,
         syntaxValid: true,
+        oldRawCode: rawCode,
     };
 }

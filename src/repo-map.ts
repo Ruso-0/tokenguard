@@ -29,12 +29,30 @@ export interface RepoMap {
     totalFiles: number;
     totalLines: number;
     entries: RepoMapEntry[];
+    graph?: DependencyGraph;
 }
 
 export interface CachedRepoMap {
     digest: string;
     map: RepoMap;
     text: string;
+    graph?: DependencyGraphData;
+}
+
+export interface DependencyGraph {
+    /** Files that import this file (reverse edges). */
+    importedBy: Map<string, Set<string>>;
+    /** Number of files importing each file. */
+    inDegree: Map<string, number>;
+    /** Tier classification by in-degree percentile. */
+    tiers: Map<string, "core" | "logic" | "leaf">;
+}
+
+/** JSON-serializable form of DependencyGraph for caching. */
+interface DependencyGraphData {
+    importedBy: Record<string, string[]>;
+    inDegree: Record<string, number>;
+    tiers: Record<string, "core" | "logic" | "leaf">;
 }
 
 // ─── Constants ──────────────────────────────────────────────────────
@@ -55,15 +73,33 @@ const stableCompare = (a: string, b: string): number =>
 // ─── Extraction Helpers ─────────────────────────────────────────────
 
 /** Extract signature from raw AST code (everything before opening `{` or `:` for Python). */
-function extractSignature(rawCode: string): string {
+export function extractSignature(rawCode: string): string {
     const lines = rawCode.split("\n");
     if (lines.length <= 1) return rawCode.trim();
 
     let parenDepth = 0;
     let angleDepth = 0;
+    let inString: string | null = null;
 
     for (let i = 0; i < rawCode.length; i++) {
         const ch = rawCode[i];
+
+        // Track string state — skip everything inside strings
+        if (inString) {
+            if (ch === "\\" && i + 1 < rawCode.length) {
+                i++; // Skip escaped character
+            } else if (ch === inString) {
+                inString = null;
+            }
+            continue;
+        }
+
+        // Detect string start
+        if (ch === '"' || ch === "'" || ch === '`') {
+            inString = ch;
+            continue;
+        }
+
         if (ch === "(") parenDepth++;
         else if (ch === ")") parenDepth--;
         else if (ch === "<") angleDepth++;
@@ -83,7 +119,7 @@ function extractSignature(rawCode: string): string {
 }
 
 /** Strip keyword prefixes from a signature, leaving just name + params + return type. */
-function cleanSignature(rawSig: string): string {
+export function cleanSignature(rawSig: string): string {
     let sig = rawSig.trim();
     let prev = "";
     while (prev !== sig) {
@@ -220,6 +256,150 @@ function walkFiles(dirPath: string): string[] {
     return files.sort(stableCompare);
 }
 
+// ─── Dependency Graph ───────────────────────────────────────────────
+
+/**
+ * Build a fast-lookup index for resolving imports to file paths in O(1).
+ * Maps extensionless, with-extension, src/-stripped, and index-collapsed variants.
+ */
+export function buildFastLookup(allFiles: string[]): Map<string, string> {
+    const lookup = new Map<string, string>();
+
+    for (const file of allFiles) {
+        const normalized = file.replace(/\\/g, "/");
+        const noExt = normalized.replace(/\.[^/.]+$/, "");
+
+        lookup.set(noExt, normalized);
+        lookup.set(normalized, normalized);
+
+        // Handle baseUrl "src/" without reading tsconfig
+        if (noExt.startsWith("src/")) {
+            lookup.set(noExt.slice(4), normalized);
+        }
+
+        // Handle index.ts/index.js implicit imports
+        if (noExt.endsWith("/index")) {
+            const dir = noExt.slice(0, -6);
+            lookup.set(dir, normalized);
+            if (dir.startsWith("src/")) {
+                lookup.set(dir.slice(4), normalized);
+            }
+        }
+    }
+
+    return lookup;
+}
+
+/**
+ * Resolve an import string to an actual project file path.
+ * Returns null for external dependencies (lodash, react, etc).
+ */
+export function resolveImportFast(
+    importStr: string,
+    currentFile: string,
+    lookup: Map<string, string>,
+): string | null {
+    // External dependencies → null
+    if (!importStr.startsWith(".") && !importStr.startsWith("/") && !importStr.startsWith("@/")) {
+        return lookup.get(importStr) || null;
+    }
+
+    // Resolve @/ alias → src/
+    let target = importStr.replace(/^@\//, "src/");
+
+    // Resolve relative paths
+    if (target.startsWith(".")) {
+        target = path.posix.join(
+            path.posix.dirname(currentFile.replace(/\\/g, "/")),
+            target,
+        );
+    }
+
+    // Strip extension (import may be "./db.js" but file is "db.ts")
+    target = target.replace(/\.(ts|tsx|js|jsx)$/, "");
+
+    return lookup.get(target) || null;
+}
+
+/**
+ * Build a dependency graph from repo map entries.
+ * Computes in-degree (how many files import each file) and classifies by percentile.
+ */
+export function buildDependencyGraph(
+    entries: RepoMapEntry[],
+    allFiles: string[],
+): DependencyGraph {
+    const lookup = buildFastLookup(allFiles);
+    const importedBy = new Map<string, Set<string>>();
+    const inDegree = new Map<string, number>();
+
+    // Initialize all files with 0
+    for (const file of allFiles) {
+        inDegree.set(file, 0);
+        importedBy.set(file, new Set());
+    }
+
+    // Build reverse graph
+    for (const entry of entries) {
+        for (const imp of entry.imports) {
+            const resolved = resolveImportFast(imp, entry.filePath, lookup);
+            if (resolved && resolved !== entry.filePath) {
+                inDegree.set(resolved, (inDegree.get(resolved) || 0) + 1);
+                const deps = importedBy.get(resolved) || new Set();
+                deps.add(entry.filePath);
+                importedBy.set(resolved, deps);
+            }
+        }
+    }
+
+    // Classify by percentiles
+    const sorted = [...inDegree.entries()]
+        .filter(([, count]) => count > 0)
+        .sort((a, b) => b[1] - a[1]);
+
+    const p75 = sorted[Math.floor(sorted.length * 0.25)]?.[1] ?? 1;
+    const p50 = sorted[Math.floor(sorted.length * 0.50)]?.[1] ?? 0;
+
+    const tiers = new Map<string, "core" | "logic" | "leaf">();
+    for (const [file, count] of inDegree.entries()) {
+        if (count >= p75) tiers.set(file, "core");
+        else if (count >= p50 && count > 0) tiers.set(file, "logic");
+        else tiers.set(file, "leaf");
+    }
+
+    return { importedBy, inDegree, tiers };
+}
+
+/** Serialize DependencyGraph to JSON-safe format. */
+function serializeGraph(graph: DependencyGraph): DependencyGraphData {
+    const importedBy: Record<string, string[]> = {};
+    for (const [k, v] of graph.importedBy) {
+        if (v.size > 0) importedBy[k] = [...v];
+    }
+    const inDegree: Record<string, number> = {};
+    for (const [k, v] of graph.inDegree) {
+        if (v > 0) inDegree[k] = v;
+    }
+    const tiers: Record<string, "core" | "logic" | "leaf"> = {};
+    for (const [k, v] of graph.tiers) {
+        tiers[k] = v;
+    }
+    return { importedBy, inDegree, tiers };
+}
+
+/** Deserialize DependencyGraphData back to DependencyGraph. */
+function deserializeGraph(data: DependencyGraphData): DependencyGraph {
+    const importedBy = new Map<string, Set<string>>();
+    for (const [k, v] of Object.entries(data.importedBy)) {
+        importedBy.set(k, new Set(v));
+    }
+    const inDegree = new Map<string, number>(Object.entries(data.inDegree));
+    const tiers = new Map<string, "core" | "logic" | "leaf">(
+        Object.entries(data.tiers) as [string, "core" | "logic" | "leaf"][],
+    );
+    return { importedBy, inDegree, tiers };
+}
+
 // ─── Repo Map Generation ────────────────────────────────────────────
 
 export async function generateRepoMap(
@@ -273,12 +453,16 @@ export async function generateRepoMap(
     // Sort by file path for deterministic output (locale-independent)
     entries.sort((a, b) => stableCompare(a.filePath, b.filePath));
 
+    const allRelPaths = entries.map(e => e.filePath);
+    const graph = buildDependencyGraph(entries, allRelPaths);
+
     return {
         version: "1.0.0",
         generatedAt: new Date().toISOString(),
         totalFiles: entries.length,
         totalLines,
         entries,
+        graph,
     };
 }
 
@@ -307,6 +491,43 @@ export function repoMapToText(map: RepoMap): string {
         }
 
         lines.push("");
+    }
+
+    // Architecture tier summary (if graph available)
+    if (map.graph) {
+        const graph = map.graph;
+        const coreFiles: string[] = [];
+        const logicFiles: string[] = [];
+        let leafCount = 0;
+
+        for (const entry of map.entries) {
+            const tier = graph.tiers.get(entry.filePath);
+            const degree = graph.inDegree.get(entry.filePath) ?? 0;
+            if (tier === "core") {
+                coreFiles.push(`  ${entry.filePath} (imported by ${degree} files)`);
+            } else if (tier === "logic") {
+                logicFiles.push(`  ${entry.filePath} (imported by ${degree} files)`);
+            } else {
+                leafCount++;
+            }
+        }
+
+        if (coreFiles.length > 0) {
+            lines.push("=== CORE DOMAIN (Top 25% — modify with caution) ===");
+            for (const f of coreFiles) lines.push(f);
+            lines.push("");
+        }
+
+        if (logicFiles.length > 0) {
+            lines.push("=== BUSINESS LOGIC (Middle tier) ===");
+            for (const f of logicFiles) lines.push(f);
+            lines.push("");
+        }
+
+        if (leafCount > 0) {
+            lines.push(`=== LEAF NODES (${leafCount} files — safe to experiment) ===`);
+            lines.push("");
+        }
     }
 
     return lines.join("\n");
@@ -348,6 +569,10 @@ export async function getOrGenerateRepoMap(
                 fs.readFileSync(cachePath, "utf-8")
             );
             if (cached.digest === currentDigest) {
+                // Restore graph from cached serialized form
+                if (cached.graph) {
+                    cached.map.graph = deserializeGraph(cached.graph);
+                }
                 return { map: cached.map, text: cached.text, fromCache: true };
             }
         } catch {
@@ -355,15 +580,18 @@ export async function getOrGenerateRepoMap(
         }
     }
 
-    // Generate fresh map
+    // Generate fresh map (includes graph)
     const map = await generateRepoMap(projectRoot, parser);
     const text = repoMapToText(map);
 
-    // Save to cache
+    // Save to cache (serialize graph for JSON storage)
     if (!fs.existsSync(cacheDir)) {
         fs.mkdirSync(cacheDir, { recursive: true });
     }
-    const cacheData: CachedRepoMap = { digest: currentDigest, map, text };
+    const graphData = map.graph ? serializeGraph(map.graph) : undefined;
+    // Strip non-serializable graph from the map for JSON storage
+    const mapForCache = { ...map, graph: undefined };
+    const cacheData: CachedRepoMap = { digest: currentDigest, map: mapForCache, text, graph: graphData };
     fs.writeFileSync(cachePath, JSON.stringify(cacheData));
 
     return { map, text, fromCache: false };

@@ -7,8 +7,8 @@
  *
  * Intercepted patterns:
  * - Read Tool reading files > threshold
- * - Grep/glob operations that could use tg_search
- * - Full file reads that should use tg_compress
+ * - Grep/glob operations that could use tg_navigate action:"search"
+ * - Full file reads that should use tg_code action:"compress"
  */
 
 import fs from "fs";
