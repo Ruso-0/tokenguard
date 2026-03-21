@@ -1,6 +1,6 @@
 {
   "name": "@ruso-0/nreki",
-  "version": "6.0.1",
+  "version": "6.0.2",
   "description": "MCP server that validates AI agent edits in RAM before they reach disk. Cross-file semantic checks via TypeScript Compiler API. Auto-fixes structural errors. Zero cloud dependencies.",
   "main": "dist/index.js",
   "type": "module",
