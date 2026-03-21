@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { NrekiKernel } from "./kernel/nreki-kernel.js";
+import crypto from "crypto";
 
 export interface TypeDebtRecord {
     symbol: string;
@@ -66,7 +67,7 @@ export class ChronosMemory {
         const dir = path.dirname(this.dbPath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-        const tmp = `${this.dbPath}.tmp`;
+        const tmp = `${this.dbPath}.${crypto.randomBytes(4).toString("hex")}.tmp`;
         fs.writeFileSync(tmp, JSON.stringify(this.state, null, 2), "utf-8");
         fs.renameSync(tmp, this.dbPath);
     }
@@ -167,8 +168,9 @@ export class ChronosMemory {
         if (!regressions || regressions.length === 0) return;
         const f = this.getFile(filePath);
 
-        // Submodular penalty prevents score explosion on cascading errors.
-        const penalty = this.W_ERROR * 2 * Math.log2(1 + regressions.length);
+        // Supermodular penalty: cost grows faster than linear.
+        // 1 reg = 3.45 pts | 3 reg = 12.5 pts | 5 reg = 22.5 pts | 10 reg = 47.5 pts
+        const penalty = this.W_ERROR * Math.pow(regressions.length, 1.2);
         f.cfiScore += penalty;
 
         // Debt ledger: store the original strict type so future agents

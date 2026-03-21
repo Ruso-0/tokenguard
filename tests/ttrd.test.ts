@@ -227,7 +227,7 @@ export const PI = 3.14;
 
 describe("TTRD: ChronosMemory debt tracking", () => {
 
-    it("submodular penalty: 20 regressions ~26 points, not 120", () => {
+    it("supermodular penalty: 20 regressions ~109 points", () => {
         dir = createTempProject({ "dummy.ts": `export const x = 1;\n` });
 
         const chronos = new ChronosMemory(dir);
@@ -245,11 +245,9 @@ describe("TTRD: ChronosMemory debt tracking", () => {
         ));
         const file = Object.values(state.files)[0] as any;
 
-        // W_ERROR(3.0) * 2 * log2(1 + 20) = 6 * log2(21) ≈ 6 * 4.39 ≈ 26.3
-        expect(file.cfiScore).toBeGreaterThan(25);
-        expect(file.cfiScore).toBeLessThan(28);
-        // Linear would be 20 * 6.0 = 120 - verify it's nowhere near that
-        expect(file.cfiScore).toBeLessThan(30);
+        // W_ERROR(3.0) * Math.pow(20, 1.2) ≈ 3.0 * 36.41 ≈ 109.2
+        expect(file.cfiScore).toBeGreaterThan(105);
+        expect(file.cfiScore).toBeLessThan(115);
     });
 
     it("debt ledger persists across ChronosMemory instances", () => {
