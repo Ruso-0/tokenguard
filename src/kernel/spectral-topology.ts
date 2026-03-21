@@ -96,52 +96,47 @@ export class SpectralTopologist {
         return { nodes, edges };
     }
 
-    public static buildAdjacencyMatrix(
+    public static buildSparseGraph(
         nodes: Set<string>,
         edges: TopologicalEdge[]
-    ): { matrix: number[][]; nodeIndex: Map<string, number>; volume: number } {
+    ): { sparseEdges: SparseEdge[]; nodeIndex: Map<string, number>; N: number } {
 
         const sortedNodes = Array.from(nodes).sort();
         const nodeIndex = new Map<string, number>();
         sortedNodes.forEach((n, i) => nodeIndex.set(n, i));
 
         const N = sortedNodes.length;
-        const matrix: number[][] = Array.from({ length: N }, () => new Array(N).fill(0));
+        const sparseEdges: SparseEdge[] = [];
 
         for (const edge of edges) {
-            const i = nodeIndex.get(edge.sourceId);
-            const j = nodeIndex.get(edge.targetId);
-            if (i !== undefined && j !== undefined && i !== j) {
-                matrix[i][j] = Math.max(matrix[i][j], edge.weight);
+            const u = nodeIndex.get(edge.sourceId);
+            const v = nodeIndex.get(edge.targetId);
+            if (u !== undefined && v !== undefined && u !== v) {
+                sparseEdges.push({ u, v, weight: edge.weight });
             }
         }
 
-        // Volume from SYMMETRIZED matrix (aligned with Fiedler's topological space)
-        // A_sym = max(A, A^T) — same symmetrization used inside getFiedlerValue
-        let volume = 0;
-        for (let i = 0; i < N; i++) {
-            for (let j = 0; j < N; j++) {
-                volume += Math.max(matrix[i][j] || 0, matrix[j][i] || 0);
-            }
-        }
-
-        return { matrix, nodeIndex, volume };
+        return { sparseEdges, nodeIndex, N };
     }
 
     public static computeDelta(
         pre: SpectralResult,
-        post: SpectralResult,
-        epsilonChronos: number = 0.15
+        post: SpectralResult
     ): SpectralDelta {
 
-        const normalizedPre = pre.nodeCount > 0 ? pre.fiedlerValue / pre.nodeCount : 0;
-        const normalizedPost = post.nodeCount > 0 ? post.fiedlerValue / post.nodeCount : 0;
-        const normalizedFiedlerDrop = normalizedPre - normalizedPost;
+        const connPre = pre.nodeCount > 0 ? pre.fiedlerValue / pre.nodeCount : 0;
+        const connPost = post.nodeCount > 0 ? post.fiedlerValue / post.nodeCount : 0;
+        const normalizedFiedlerDrop = connPre - connPost;
+        const dropRatio = connPre > 0 ? normalizedFiedlerDrop / connPre : 0;
         const volumeDrop = pre.volume - post.volume;
+
+        const baseEpsilon = 0.15;
+        const scaleFactor = Math.sqrt(50 / Math.max(50, pre.nodeCount));
+        const epsilonDynamic = baseEpsilon * scaleFactor;
 
         let verdict: SpectralDelta["verdict"];
 
-        if (volumeDrop > 0 && normalizedFiedlerDrop > normalizedPre * epsilonChronos) {
+        if (volumeDrop > 0 && dropRatio > epsilonDynamic) {
             verdict = "REJECTED_ENTROPY";
         } else if (volumeDrop <= 0 && normalizedFiedlerDrop > 0) {
             verdict = "APPROVED_DECOUPLING";
@@ -160,25 +155,66 @@ export class SpectralTopologist {
         };
     }
 
+    public static getMarkovBlanket(
+        targetFile: string,
+        edges: TopologicalEdge[]
+    ): Set<string> {
+        const blanket = new Set<string>();
+        blanket.add(targetFile);
+
+        for (const edge of edges) {
+            const sourceFile = edge.sourceId.split("::")[0];
+            const targetFileFromEdge = edge.targetId.split("::")[0];
+
+            if (sourceFile === targetFile && !targetFileFromEdge.startsWith("EXTERNAL::")) {
+                blanket.add(targetFileFromEdge);
+            }
+            if (targetFileFromEdge === targetFile && !sourceFile.startsWith("EXTERNAL::")) {
+                blanket.add(sourceFile);
+            }
+        }
+
+        return blanket;
+    }
+
     public static analyze(
         program: ts.Program,
-        targetFiles: Set<string>
+        targetFiles: Set<string>,
+        targetFile?: string
     ): SpectralResult {
 
         const { nodes, edges } = this.extractConstraintGraph(program, targetFiles);
 
-        if (nodes.size <= 1) {
-            return { fiedlerValue: 0, volume: 0, nodeCount: nodes.size, edgeCount: edges.length };
+        let analysisNodes = nodes;
+        let analysisEdges = edges;
+
+        if (targetFile) {
+            const blanket = this.getMarkovBlanket(targetFile, edges);
+            analysisNodes = new Set<string>();
+            analysisEdges = [];
+            for (const edge of edges) {
+                const sourceFile = edge.sourceId.split("::")[0];
+                const targetFileFromEdge = edge.targetId.split("::")[0];
+                if (blanket.has(sourceFile) && (blanket.has(targetFileFromEdge) || targetFileFromEdge.startsWith("EXTERNAL"))) {
+                    analysisNodes.add(edge.sourceId);
+                    analysisNodes.add(edge.targetId);
+                    analysisEdges.push(edge);
+                }
+            }
         }
 
-        const { matrix, volume } = this.buildAdjacencyMatrix(nodes, edges);
-        const fiedlerValue = SpectralMath.getFiedlerValue(matrix);
+        if (analysisNodes.size <= 1) {
+            return { fiedlerValue: 0, volume: 0, nodeCount: analysisNodes.size, edgeCount: analysisEdges.length };
+        }
+
+        const { sparseEdges, N } = this.buildSparseGraph(analysisNodes, analysisEdges);
+        const { fiedler, volume } = SpectralMath.analyzeTopology(N, sparseEdges);
 
         return {
-            fiedlerValue,
+            fiedlerValue: fiedler,
             volume,
-            nodeCount: nodes.size,
-            edgeCount: edges.length,
+            nodeCount: analysisNodes.size,
+            edgeCount: analysisEdges.length,
         };
     }
 }
