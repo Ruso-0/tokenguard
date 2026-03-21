@@ -4,21 +4,14 @@ import * as fs from "fs";
 import { SpectralTopologist, SpectralMath } from "../src/kernel/spectral-topology.js";
 
 const externalPath = process.argv[2];
-if (!externalPath) {
-    console.error("Usage: tsx tests/benchmark-spectral-external.ts /path/to/project");
-    process.exit(1);
-}
+if (!externalPath) { console.error("Usage: tsx tests/benchmark-spectral-external.ts /path/to/project"); process.exit(1); }
 
 const projectRoot = path.resolve(externalPath);
 const tsConfigPath = path.join(projectRoot, "tsconfig.json");
+if (!fs.existsSync(tsConfigPath)) { console.error(`No tsconfig.json at ${projectRoot}`); process.exit(1); }
 
-if (!fs.existsSync(tsConfigPath)) {
-    console.error(`No tsconfig.json found at ${projectRoot}`);
-    process.exit(1);
-}
-
-console.log(`=== NREKI SPECTRAL BENCHMARK (EXTERNAL) ===\n`);
-console.log(`Project: ${projectRoot}`);
+console.log(`=== NREKI SPECTRAL BENCHMARK EXTERNAL (SPARSE) ===\n`);
+console.log(`Project: ${path.basename(projectRoot)}`);
 
 const configFile = ts.readConfigFile(tsConfigPath, ts.sys.readFile);
 const parsedConfig = ts.parseJsonConfigFileContent(configFile.config, ts.sys, projectRoot);
@@ -36,59 +29,17 @@ console.log(`Source files: ${targetFiles.size}`);
 
 const startExtract = performance.now();
 const memBefore = process.memoryUsage().heapUsed;
-
 const { nodes, edges } = SpectralTopologist.extractConstraintGraph(program, targetFiles);
-
-const extractMs = (performance.now() - startExtract).toFixed(1);
+const extractMs = performance.now() - startExtract;
 const memAfter = process.memoryUsage().heapUsed;
-const memDeltaKB = ((memAfter - memBefore) / 1024).toFixed(0);
 
-console.log(`\n--- Graph Extraction ---`);
-console.log(`Nodes: ${nodes.size}`);
-console.log(`Edges: ${edges.length}`);
-console.log(`Time: ${extractMs}ms`);
-console.log(`RAM delta: ${memDeltaKB}KB`);
-
+const { sparseEdges, N } = SpectralTopologist.buildSparseGraph(nodes, edges);
 const startFiedler = performance.now();
-const { matrix, volume } = SpectralTopologist.buildAdjacencyMatrix(nodes, edges);
-const fiedlerValue = SpectralMath.getFiedlerValue(matrix);
-const fiedlerMs = (performance.now() - startFiedler).toFixed(1);
+const { fiedler, volume } = SpectralMath.analyzeTopology(N, sparseEdges);
+const fiedlerMs = performance.now() - startFiedler;
 
-console.log(`\n--- Spectral Analysis ---`);
-console.log(`Matrix size: ${matrix.length}x${matrix.length}`);
-console.log(`Volume (symmetrized): ${volume}`);
-console.log(`Fiedler Value (λ₂): ${fiedlerValue.toFixed(6)}`);
-console.log(`Time: ${fiedlerMs}ms`);
-
-const startTotal = performance.now();
-const result = SpectralTopologist.analyze(program, targetFiles);
-const totalMs = (performance.now() - startTotal).toFixed(1);
-
-console.log(`\n--- Full analyze() ---`);
-console.log(`Total time: ${totalMs}ms`);
-console.log(`Result: fiedler=${result.fiedlerValue.toFixed(6)}, volume=${result.volume}, nodes=${result.nodeCount}, edges=${result.edgeCount}`);
-
-const nodeDegree = new Map<string, number>();
-for (const edge of edges) {
-    nodeDegree.set(edge.sourceId, (nodeDegree.get(edge.sourceId) || 0) + 1);
-    nodeDegree.set(edge.targetId, (nodeDegree.get(edge.targetId) || 0) + 1);
-}
-const topNodes = Array.from(nodeDegree.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10);
-
-console.log(`\n--- Top 10 Connected Nodes ---`);
-for (const [node, degree] of topNodes) {
-    const short = node.split("/").slice(-2).join("/");
-    console.log(`  ${degree} connections: ${short}`);
-}
-
-console.log(`\n=== SUMMARY ===`);
-console.log(`Project: ${path.basename(projectRoot)}`);
-console.log(`Files: ${targetFiles.size}`);
-console.log(`Graph: ${nodes.size} nodes, ${edges.length} edges`);
-console.log(`Matrix: ${matrix.length}x${matrix.length}`);
-console.log(`Extract: ${extractMs}ms | Fiedler: ${fiedlerMs}ms | Total: ${totalMs}ms`);
-console.log(`RAM: ${memDeltaKB}KB`);
-console.log(`Fiedler (λ₂): ${fiedlerValue.toFixed(6)}`);
-console.log(`Volume: ${volume}`);
+console.log(`\n--- Results ---`);
+console.log(`Nodes: ${nodes.size} | Edges: ${edges.length} | Sparse edges: ${sparseEdges.length}`);
+console.log(`Fiedler (λ₂): ${fiedler.toFixed(6)} | Volume: ${volume}`);
+console.log(`Extract: ${extractMs.toFixed(1)}ms | Fiedler (sparse): ${fiedlerMs.toFixed(1)}ms`);
+console.log(`RAM delta: ${((memAfter - memBefore) / 1024).toFixed(0)}KB`);
