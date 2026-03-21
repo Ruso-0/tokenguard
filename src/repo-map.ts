@@ -79,8 +79,9 @@ export function extractSignature(rawCode: string): string {
 
     let parenDepth = 0;
     let angleDepth = 0;
+    let braceDepthInTemplate = 0;
     let inString: string | null = null;
-    let templateExprDepth = 0; // Track ${...} nesting in template literals
+    let inTemplateExpr = false;
 
     for (let i = 0; i < rawCode.length; i++) {
         const ch = rawCode[i];
@@ -91,7 +92,8 @@ export function extractSignature(rawCode: string): string {
                 i++; // Skip escaped character
             } else if (inString === '`' && ch === '$' && i + 1 < rawCode.length && rawCode[i + 1] === '{') {
                 // Enter template expression ${...}
-                templateExprDepth++;
+                inTemplateExpr = true;
+                braceDepthInTemplate = 1;
                 inString = null;
                 i++; // skip the {
             } else if (ch === inString) {
@@ -100,10 +102,21 @@ export function extractSignature(rawCode: string): string {
             continue;
         }
 
-        // Track closing of template expressions
-        if (templateExprDepth > 0 && ch === '}') {
-            templateExprDepth--;
-            inString = '`'; // Re-enter template literal
+        // Track closing of template expressions with proper brace nesting
+        if (inTemplateExpr) {
+            if (ch === '{') {
+                braceDepthInTemplate++;
+            } else if (ch === '}') {
+                braceDepthInTemplate--;
+                if (braceDepthInTemplate === 0) {
+                    inTemplateExpr = false;
+                    inString = '`'; // Re-enter template literal
+                }
+            }
+            // Track strings inside template expressions too
+            if (ch === '"' || ch === "'" || ch === '`') {
+                inString = ch;
+            }
             continue;
         }
 

@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx vitest run)"
+      "Bash(npx vitest run)",
+      "Bash(wc -l /d/NREKI/src/*.ts /d/NREKI/src/middleware/*.ts /d/NREKI/src/utils/*.ts /d/NREKI/src/hooks/*.ts)",
+      "Bash(npx tsc:*)"
     ]
   }
 }

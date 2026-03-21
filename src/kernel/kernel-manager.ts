@@ -129,10 +129,21 @@ export class KernelManager {
 
         const id = this.nextId++;
         return new Promise<T>((resolve, reject) => {
-            const timer = setTimeout(() => {
+            const timer = setTimeout(async () => {
                 this.pending.delete(id);
+                if (this.worker) {
+                    console.error(`[NREKI] Worker timeout after ${this.executionTimeoutMs}ms. Terminating.`);
+                    await this.worker.terminate();
+                    this.worker = null;
+                    this.booted = false;
+                }
+                for (const [, p] of this.pending) {
+                    clearTimeout(p.timer);
+                    p.reject(new Error("[NREKI] Worker terminated due to timeout"));
+                }
+                this.pending.clear();
                 reject(new Error(
-                    `[NREKI] Worker execution timeout after ${this.executionTimeoutMs}ms`
+                    `[NREKI] Worker execution timeout after ${this.executionTimeoutMs}ms. Worker terminated.`
                 ));
             }, this.executionTimeoutMs);
 

@@ -675,13 +675,15 @@ export class NrekiDB {
     /** Read a metadata value by key, or null if not set. */
     getMetadata(key: string): string | null {
         const stmt = this.db.prepare("SELECT value FROM metadata WHERE key = ?");
-        stmt.bind([key]);
-        let result: string | null = null;
-        if (stmt.step()) {
-            result = (stmt.getAsObject() as { value: string }).value;
+        try {
+            stmt.bind([key]);
+            if (stmt.step()) {
+                return (stmt.getAsObject() as { value: string }).value;
+            }
+            return null;
+        } finally {
+            stmt.free();
         }
-        stmt.free();
-        return result;
     }
 
     /** Write a metadata key-value pair (upsert). */
@@ -745,15 +747,16 @@ export class NrekiDB {
     fileNeedsUpdate(filePath: string, content: string): boolean {
         const newHash = crypto.createHash("sha256").update(content).digest("hex");
         const stmt = this.db.prepare("SELECT hash FROM files WHERE path = ?");
-        stmt.bind([filePath]);
-
-        if (stmt.step()) {
-            const row = stmt.getAsObject() as { hash: string };
+        try {
+            stmt.bind([filePath]);
+            if (stmt.step()) {
+                const row = stmt.getAsObject() as { hash: string };
+                return row.hash !== newHash;
+            }
+            return true;
+        } finally {
             stmt.free();
-            return row.hash !== newHash;
         }
-        stmt.free();
-        return true;
     }
 
     hashContent(content: string): string {
@@ -769,14 +772,16 @@ export class NrekiDB {
 
     clearChunks(filePath: string): void {
         const stmt = this.db.prepare("SELECT id FROM chunks WHERE path = ?");
-        stmt.bind([filePath]);
-
         const ids: number[] = [];
-        while (stmt.step()) {
-            const row = stmt.getAsObject() as { id: number };
-            ids.push(row.id);
+        try {
+            stmt.bind([filePath]);
+            while (stmt.step()) {
+                const row = stmt.getAsObject() as { id: number };
+                ids.push(row.id);
+            }
+        } finally {
+            stmt.free();
         }
-        stmt.free();
 
         if (ids.length > 0) {
             this.vecIndex.deleteBulk(ids);
@@ -879,12 +884,15 @@ export class NrekiDB {
         const stmt = this.db.prepare(
             `SELECT id, path FROM chunks WHERE id IN (${placeholders})`,
         );
-        stmt.bind(ids);
-        while (stmt.step()) {
-            const row = stmt.getAsObject() as { id: number; path: string };
-            result.set(row.id, row.path);
+        try {
+            stmt.bind(ids);
+            while (stmt.step()) {
+                const row = stmt.getAsObject() as { id: number; path: string };
+                result.set(row.id, row.path);
+            }
+        } finally {
+            stmt.free();
         }
-        stmt.free();
         return result;
     }
 
@@ -900,23 +908,26 @@ export class NrekiDB {
             `SELECT id, path, shorthand, raw_code, node_type, start_line, end_line, start_index, end_index, symbol_name
              FROM chunks WHERE id IN (${placeholders})`,
         );
-        stmt.bind(ids);
-        while (stmt.step()) {
-            const row = stmt.getAsObject() as Record<string, number | string>;
-            result.set(row.id as number, {
-                id: row.id as number,
-                path: row.path as string,
-                shorthand: row.shorthand as string,
-                raw_code: row.raw_code as string,
-                node_type: row.node_type as string,
-                start_line: row.start_line as number,
-                end_line: row.end_line as number,
-                start_index: (row.start_index as number) ?? 0,
-                end_index: (row.end_index as number) ?? 0,
-                symbol_name: (row.symbol_name as string) ?? "",
-            });
+        try {
+            stmt.bind(ids);
+            while (stmt.step()) {
+                const row = stmt.getAsObject() as Record<string, number | string>;
+                result.set(row.id as number, {
+                    id: row.id as number,
+                    path: row.path as string,
+                    shorthand: row.shorthand as string,
+                    raw_code: row.raw_code as string,
+                    node_type: row.node_type as string,
+                    start_line: row.start_line as number,
+                    end_line: row.end_line as number,
+                    start_index: (row.start_index as number) ?? 0,
+                    end_index: (row.end_index as number) ?? 0,
+                    symbol_name: (row.symbol_name as string) ?? "",
+                });
+            }
+        } finally {
+            stmt.free();
         }
-        stmt.free();
         return result;
     }
 
@@ -1132,20 +1143,23 @@ export class NrekiDB {
       FROM usage_log ${whereClause}`
         );
 
-        if (params.length > 0) stmt.bind(params);
+        try {
+            if (params.length > 0) stmt.bind(params);
 
-        let result = { total_input: 0, total_output: 0, total_saved: 0, tool_calls: 0 };
-        if (stmt.step()) {
-            const row = stmt.getAsObject() as Record<string, number>;
-            result = {
-                total_input: row.total_input ?? 0,
-                total_output: row.total_output ?? 0,
-                total_saved: row.total_saved ?? 0,
-                tool_calls: row.tool_calls ?? 0,
-            };
+            let result = { total_input: 0, total_output: 0, total_saved: 0, tool_calls: 0 };
+            if (stmt.step()) {
+                const row = stmt.getAsObject() as Record<string, number>;
+                result = {
+                    total_input: row.total_input ?? 0,
+                    total_output: row.total_output ?? 0,
+                    total_saved: row.total_saved ?? 0,
+                    tool_calls: row.tool_calls ?? 0,
+                };
+            }
+            return result;
+        } finally {
+            stmt.free();
         }
-        stmt.free();
-        return result;
     }
 
     /**
@@ -1161,18 +1175,21 @@ export class NrekiDB {
             ORDER BY total_chars DESC
             LIMIT ?
         `);
-        stmt.bind([limit]);
+        try {
+            stmt.bind([limit]);
 
-        const results: Array<{ path: string; estimated_tokens: number }> = [];
-        while (stmt.step()) {
-            const row = stmt.getAsObject() as { path: string; total_chars: number };
-            results.push({
-                path: row.path,
-                estimated_tokens: Math.ceil(row.total_chars / 3.5),
-            });
+            const results: Array<{ path: string; estimated_tokens: number }> = [];
+            while (stmt.step()) {
+                const row = stmt.getAsObject() as { path: string; total_chars: number };
+                results.push({
+                    path: row.path,
+                    estimated_tokens: Math.ceil(row.total_chars / 3.5),
+                });
+            }
+            return results;
+        } finally {
+            stmt.free();
         }
-        stmt.free();
-        return results;
     }
 
     // ─── Statistics ──────────────────────────────────────────────
@@ -1233,13 +1250,16 @@ export class NrekiDB {
         const stmt = this.db.prepare(
             `SELECT DISTINCT path FROM chunks WHERE raw_code LIKE ? ESCAPE '\\'`
         );
-        stmt.bind([`%${escaped}%`]);
-        const paths: string[] = [];
-        while (stmt.step()) {
-            paths.push(stmt.getAsObject().path as string);
+        try {
+            stmt.bind([`%${escaped}%`]);
+            const paths: string[] = [];
+            while (stmt.step()) {
+                paths.push(stmt.getAsObject().path as string);
+            }
+            return paths;
+        } finally {
+            stmt.free();
         }
-        stmt.free();
-        return paths;
     }
 
     close(): void {

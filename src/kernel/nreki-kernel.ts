@@ -10,59 +10,43 @@ import { escapeRegExp } from "../utils/imports.js";
 export class AsyncMutex {
     private queue: (() => void)[] = [];
     private locked = false;
-    async lock(timeoutMs: number = 30_000): Promise<() => void> {
+
+    async lock(queueTimeoutMs: number = 60_000): Promise<() => void> {
         return new Promise((resolve, reject) => {
+            let settled = false;
+            let timer: NodeJS.Timeout;
             const release = () => {
                 if (this.queue.length > 0) this.queue.shift()!();
                 else this.locked = false;
             };
+            const doResolve = () => {
+                if (!settled) {
+                    settled = true;
+                    clearTimeout(timer);
+                    resolve(release);
+                }
+            };
             if (!this.locked) {
                 this.locked = true;
-                resolve(release);
+                doResolve();
             } else {
-                let settled = false;
-                const timer = setTimeout(() => {
+                timer = setTimeout(() => {
                     if (!settled) {
                         settled = true;
                         const idx = this.queue.indexOf(doResolve);
-                        if (idx >= 0) this.queue.splice(idx, 1);
-                        reject(new Error(`[NREKI] AsyncMutex timeout after ${timeoutMs}ms - possible deadlock`));
+                        if (idx !== -1) this.queue.splice(idx, 1);
+                        reject(new Error(`[NREKI] Mutex queue timeout after ${queueTimeoutMs}ms - deadlock prevented`));
                     }
-                }, timeoutMs);
-                const doResolve = () => {
-                    if (!settled) {
-                        settled = true;
-                        clearTimeout(timer);
-                        resolve(release);
-                    }
-                };
+                }, queueTimeoutMs);
                 this.queue.push(doResolve);
             }
         });
     }
 
-    /**
-     * Acquire lock, execute fn, release lock. Always releases even on throw/timeout.
-     * Execution timeout fires from the event loop - if the holder livelocks,
-     * Promise.race resolves with the timeout and the finally block releases the lock.
-     */
-    async withLock<T>(fn: () => Promise<T> | T, executionTimeoutMs: number = 30_000): Promise<T> {
+    async withLock<T>(fn: () => Promise<T> | T): Promise<T> {
         const unlock = await this.lock();
-        let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-            const result = await Promise.race([
-                Promise.resolve().then(fn),
-                new Promise<never>((_, reject) => {
-                    timer = setTimeout(() => reject(
-                        new Error(`[NREKI] Execution timeout after ${executionTimeoutMs}ms. Forcing lock release.`)
-                    ), executionTimeoutMs);
-                }),
-            ]);
-            clearTimeout(timer);
-            return result;
-        } catch (err) {
-            clearTimeout(timer);
-            throw err;
+            return await Promise.resolve().then(fn);
         } finally {
             unlock();
         }
@@ -1112,6 +1096,13 @@ export class NrekiKernel {
         if (!this.booted) throw new Error("[NREKI] Kernel not booted");
         if (!edits || edits.length === 0) return { safe: true, exitCode: 0, latencyMs: "0.00" };
 
+        // Corruption guard: if a previous timeout left the VFS in a partial state, rebuild
+        if (this.isStateCorrupted) {
+            this.isStateCorrupted = false;
+            this.builderProgram = undefined;
+            console.error("[NREKI] Rebuilding after timeout-corrupted state.");
+        }
+
         return this.mutex.withLock(async () => {
         const t0 = performance.now();
 
@@ -1317,11 +1308,6 @@ export class NrekiKernel {
                 this.logicalTime = savedLogicalTime;
                 // A-02: Restore vfsDirectories
                 this.vfsDirectories = savedDirectories;
-                // BUG 5: Clear mutatedFiles for rolled-back edits
-                for (const posixPath of rollbackState.keys()) {
-                    this.mutatedFiles.delete(posixPath);
-                }
-
                 // P17 + P2 WARM-PATH: Advance clock instead of destroying program.
                 this.logicalTime += 1000;
                 for (const [posixPath] of rollbackState.entries()) {
@@ -1394,10 +1380,6 @@ export class NrekiKernel {
                 // A-02: Restore vfsDirectories
                 this.vfsDirectories = savedDirectories;
                 this.logicalTime = savedLogicalTime;
-                // BUG 5: Clear mutatedFiles for rolled-back edits
-                for (const posixPath of rollbackState.keys()) {
-                    this.mutatedFiles.delete(posixPath);
-                }
                 // Restore hologram veil on failure
                 if (this.mode === "hologram" && temporarilyUnveiled.size > 0) {
                     for (const file of temporarilyUnveiled) {
@@ -1412,7 +1394,7 @@ export class NrekiKernel {
                 this.currentEditTargets.clear();
                 throw phaseError;
             }
-        }, 60_000); // 60s: auto-healing can be slow
+        });
     }
 
     /**
@@ -1517,7 +1499,7 @@ export class NrekiKernel {
             }
             throw new Error(`[NREKI] Physical ACID commit failed. Repository restored. Reason: ${error}`);
         }
-        }, 30_000);
+        });
     }
 
     /** Emergency rollback - purge all staged changes (P3). */
@@ -1556,7 +1538,7 @@ export class NrekiKernel {
             // Release stale AST versions from DocumentRegistry
             this.releaseMutatedDocuments();
             console.error("[NREKI] Hard rollback executed. VFS purged.");
-        }, 10_000);
+        });
     }
 
     // ─── Utilities ─────────────────────────────────────────────────

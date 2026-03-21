@@ -181,21 +181,22 @@ export function applySemanticSplice(
     const indentMatch = content.slice(lineStart, startIdx).match(/^[ \t]*/);
     const baseIndent = indentMatch ? indentMatch[0] : "";
 
-    // Calculate minimum indentation in the new code
+    // Calculate minimum indentation in the new code (SKIP first line)
     const newLines = newCode.split("\n");
-    const nonBlank = newLines.filter(l => l.trim().length > 0);
+    const nonBlankInterior = newLines.filter((l, i) => i > 0 && l.trim().length > 0);
     let minClaudeIndent = Infinity;
-    for (const line of nonBlank) {
+    for (const line of nonBlankInterior) {
         const match = line.match(/^[ \t]*/);
         if (match && match[0].length < minClaudeIndent) minClaudeIndent = match[0].length;
     }
     if (minClaudeIndent === Infinity) minClaudeIndent = 0;
 
     // Relative rebase: strip Claude's indent, apply baseIndent
+    // First line is excluded from minClaudeIndent calc, so don't strip it
     const formattedNewCode = newLines.map((line, i) => {
         if (line.trim() === "") return "";
+        if (mode === "replace" && i === 0) return line.trimStart();
         const strippedLine = line.slice(minClaudeIndent);
-        if (mode === "replace" && i === 0) return strippedLine;
         return baseIndent + strippedLine;
     }).join("\n");
 
@@ -369,13 +370,36 @@ export async function batchSemanticEdit(
         }
     }
 
-    // 5. COMMIT: all passed validation → write to disk (if not dry run)
+    // 5. COMMIT: all passed validation → atomic write to disk (if not dry run)
     const writtenFiles: string[] = [];
     if (!dryRun) {
-        for (const [filePath, virtualContent] of vfs.entries()) {
-            try { saveBackup(projectRoot, filePath); } catch { /* non-fatal */ }
-            fs.writeFileSync(filePath, virtualContent, "utf-8");
-            writtenFiles.push(path.relative(projectRoot, filePath));
+        const tmpPaths: string[] = [];
+        const originalPaths: string[] = [];
+
+        try {
+            // Phase 5a: Write all to .tmp files first
+            for (const [filePath, virtualContent] of vfs.entries()) {
+                const tmpPath = filePath + `.nreki-tmp-${Date.now()}`;
+                fs.writeFileSync(tmpPath, virtualContent, "utf-8");
+                tmpPaths.push(tmpPath);
+                originalPaths.push(filePath);
+            }
+
+            // Phase 5b: All .tmp writes succeeded — save backups then atomic rename
+            for (let i = 0; i < originalPaths.length; i++) {
+                try { saveBackup(projectRoot, originalPaths[i]); } catch { /* non-fatal */ }
+                fs.renameSync(tmpPaths[i], originalPaths[i]);
+                writtenFiles.push(path.relative(projectRoot, originalPaths[i]));
+            }
+        } catch (commitErr) {
+            // Phase 5c: ROLLBACK — clean up any .tmp files that were created
+            for (const tmpPath of tmpPaths) {
+                try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+            }
+            throw new Error(
+                `[NREKI] ACID commit failed: ${(commitErr as Error).message}. ` +
+                `No files were modified. ${tmpPaths.length} temp files cleaned up.`
+            );
         }
     } else {
         for (const filePath of vfs.keys()) {

@@ -24,9 +24,19 @@ export function safeParse<T>(
     callback: (tree: Tree) => T
 ): T {
     const tree = parser.parse(source);
+    let result: T;
     try {
-        return callback(tree);
-    } finally {
+        result = callback(tree);
+    } catch (err) {
         tree.delete();
+        throw err;
     }
+
+    // If callback returned a Promise, defer tree.delete() until it settles
+    if (result instanceof Promise) {
+        return result.finally(() => tree.delete()) as unknown as T;
+    }
+
+    tree.delete();
+    return result;
 }

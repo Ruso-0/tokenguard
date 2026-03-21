@@ -31,7 +31,10 @@ const LOCK_TIMEOUT_MS = 30_000;
 
 function normalizeLockKey(filePath: string): string {
     const resolved = path.resolve(filePath).replace(/\\/g, "/");
-    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    // Windows and macOS (APFS default) are case-insensitive
+    return (process.platform === "win32" || process.platform === "darwin")
+        ? resolved.toLowerCase()
+        : resolved;
 }
 
 // ─── Public API ──────────────────────────────────────────────────────
