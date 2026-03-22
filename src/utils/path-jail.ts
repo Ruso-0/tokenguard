@@ -30,8 +30,6 @@ const SENSITIVE_PATTERNS: RegExp[] = [
     /[/\\]\.htpasswd$/i,               // Apache password file
     /[/\\]\.git-credentials$/i,         // Git credential file
     /[/\\]\.kube[/\\]config$/i,         // Kubernetes config
-    /[/\\]wp-config\.php$/i,            // WordPress secrets
-    /[/\\]settings\.py$/i,              // Django secrets
 ];
 
 /**
@@ -58,7 +56,9 @@ export function isSensitivePath(filePath: string): boolean {
  */
 export function safePath(workspaceRoot: string, inputPath: string): string {
     // Normalize backslashes to forward slashes so traversal detection works on Linux/macOS
-    const normalized = inputPath.replace(/\\/g, "/");
+    // NFC normalization: macOS uses NFD (decomposed), Linux uses NFC.
+    // Without this, an attacker can bypass .env blocklist with NFD-encoded paths.
+    const normalized = inputPath.normalize("NFC").replace(/\\/g, "/");
     const resolved = path.resolve(workspaceRoot, normalized);
     const resolvedRoot = path.resolve(workspaceRoot);
 

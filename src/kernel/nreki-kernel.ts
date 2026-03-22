@@ -123,7 +123,12 @@ export class NrekiKernel {
     private originalFileExists!: (fileName: string) => boolean;
     private builderProgram?: ts.EmitAndSemanticDiagnosticsBuilderProgram;
     private booted = false;
-    public healingStats = { applied: 0, failed: 0 };
+    private _healingStats = { applied: 0, failed: 0 };
+
+    /** Read-only view of healing statistics. */
+    public get healingStats(): Readonly<{ applied: number; failed: number }> {
+        return { applied: this._healingStats.applied, failed: this._healingStats.failed };
+    }
     private languageService!: ts.LanguageService;
     private documentRegistry!: ts.DocumentRegistry;
     private mutatedFiles = new Set<string>();
@@ -1087,12 +1092,12 @@ export class NrekiKernel {
                 this.updateProgram();
             }
 
-            this.healingStats.failed++;
+            this._healingStats.failed++;
             // BUG 3 FIXED: Return initialErrors, do NOT recalculate (semantic iterator was consumed)
             return { healed: false, appliedFixes: [], newlyTouchedFiles: new Set(), finalErrors: initialErrors };
         }
 
-        this.healingStats.applied++;
+        this._healingStats.applied++;
         // On success: merge newly touched files into the parent's edited set
         for (const file of localEditedFiles) parentEditedFiles.add(file);
 
