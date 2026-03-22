@@ -197,7 +197,16 @@ export function applySemanticSplice(
     const formattedNewCode = newLines.map((line, i) => {
         if (line.trim() === "") return "";
         if (mode === "replace" && i === 0) return line.trimStart();
-        const strippedLine = line.slice(minClaudeIndent);
+
+        // SAFE SLICE: never cut into actual text content.
+        // If a line has fewer leading spaces than minClaudeIndent
+        // (e.g. inside template strings, multiline comments),
+        // only strip its actual whitespace prefix.
+        const actualIndentMatch = line.match(/^[ \t]*/);
+        const actualIndentLength = actualIndentMatch ? actualIndentMatch[0].length : 0;
+        const safeSliceLength = Math.min(minClaudeIndent, actualIndentLength);
+
+        const strippedLine = line.slice(safeSliceLength);
         return baseIndent + strippedLine;
     }).join("\n");
 
