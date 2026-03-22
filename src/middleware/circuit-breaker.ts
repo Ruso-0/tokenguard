@@ -14,14 +14,116 @@
 import { CircuitBreaker, containsError } from "../circuit-breaker.js";
 import type { McpToolResponse } from "../router.js";
 
-/** Last activity timestamp for auto-reset. */
-let lastActivityTimestamp = Date.now();
-
-/** Last tool+action combo for diversity detection. */
-let lastToolAction = "";
-
 /** Inactivity timeout for auto-reset (60 seconds). */
 const INACTIVITY_TIMEOUT_MS = 60_000;
+
+// ─── Middleware Class ─────────────────────────────────────────────────
+
+export class CircuitBreakerMiddleware {
+    private lastActivityTimestamp = Date.now();
+    private lastToolAction = "";
+
+    wrap(
+        cb: CircuitBreaker,
+        toolName: string,
+        action: string,
+        handler: () => Promise<McpToolResponse>,
+        filePath?: string,
+        symbolName?: string,
+        chronos?: { recordTrip: (file: string, reason: string) => void },
+    ): Promise<McpToolResponse> {
+        return (async () => {
+            const toolAction = `${toolName}:${action}`;
+            const now = Date.now();
+
+            // Auto-reset: 60s inactivity
+            if (now - this.lastActivityTimestamp > INACTIVITY_TIMEOUT_MS) {
+                const state = cb.getState();
+                if (state.tripped) {
+                    cb.reset();
+                }
+            }
+
+            // Soft reset on different request type: clears tripped state but
+            // preserves per-file failure counters and escalation level.
+            if (toolAction !== this.lastToolAction && this.lastToolAction !== "") {
+                const state = cb.getState();
+                if (state.tripped) {
+                    cb.softReset();
+                }
+            }
+
+            this.lastActivityTimestamp = now;
+            this.lastToolAction = toolAction;
+
+            // If breaker is still tripped after potential resets, return level-specific redirect
+            const preState = cb.getState();
+            if (preState.tripped) {
+                // For levels 1-2, soft-reset to allow the retry after redirect
+                if (preState.escalationLevel < 3) {
+                    cb.softReset();
+                }
+                return generateBreakerResponse(
+                    preState.escalationLevel,
+                    preState.lastTrippedSymbol,
+                    preState.lastTrippedFile,
+                    preState.tripReason ?? "Unknown pattern",
+                );
+            }
+
+            // Execute the actual handler
+            const response = await handler();
+
+            // Record the result for pattern detection
+            const responseText = response.content.map(c => c.text).join("\n");
+            const hasError = response.isError === true || containsError(responseText);
+
+            if (hasError) {
+                const loopCheck = cb.recordToolCall(
+                    toolAction,
+                    responseText,
+                    filePath,
+                    symbolName,
+                    true,
+                );
+
+                if (loopCheck.tripped) {
+                    // Record circuit breaker trip in file fragility tracker
+                    if (chronos && filePath) {
+                        chronos.recordTrip(filePath, loopCheck.reason);
+                    }
+
+                    // For levels 1-2, soft-reset to allow retry after redirect
+                    if (loopCheck.level < 3) {
+                        cb.softReset();
+                    }
+                    return generateBreakerResponse(
+                        loopCheck.level,
+                        symbolName ?? null,
+                        filePath ?? null,
+                        loopCheck.reason,
+                    );
+                }
+            } else {
+                // Record non-error calls too (for same-file tracking)
+                cb.recordToolCall(
+                    toolAction,
+                    "",
+                    filePath,
+                    symbolName,
+                );
+            }
+
+            return response;
+        })();
+    }
+
+    /** Reset middleware state (for testing). */
+    reset(): void {
+        this.lastActivityTimestamp = Date.now();
+        this.lastToolAction = "";
+    }
+}
 
 // ─── Level-Specific Payloads ─────────────────────────────────────────
 
@@ -117,10 +219,13 @@ function generateBreakerResponse(
     };
 }
 
-// ─── Middleware ───────────────────────────────────────────────────────
+// ─── Backward-Compatible Wrappers ────────────────────────────────────
+
+const defaultMiddleware = new CircuitBreakerMiddleware();
 
 /**
  * Wrap a router handler with passive circuit breaker monitoring.
+ * Backward-compatible function wrapper — delegates to CircuitBreakerMiddleware.
  *
  * Before executing the handler, checks:
  *   1. If the breaker was tripped but 60s have elapsed → auto-reset
@@ -138,96 +243,12 @@ export function wrapWithCircuitBreaker(
     symbolName?: string,
     chronos?: { recordTrip: (file: string, reason: string) => void },
 ): Promise<McpToolResponse> {
-    return (async () => {
-        const toolAction = `${toolName}:${action}`;
-        const now = Date.now();
-
-        // Auto-reset: 60s inactivity
-        if (now - lastActivityTimestamp > INACTIVITY_TIMEOUT_MS) {
-            const state = cb.getState();
-            if (state.tripped) {
-                cb.reset();
-            }
-        }
-
-        // Soft reset on different request type: clears tripped state but
-        // preserves per-file failure counters and escalation level.
-        if (toolAction !== lastToolAction && lastToolAction !== "") {
-            const state = cb.getState();
-            if (state.tripped) {
-                cb.softReset();
-            }
-        }
-
-        lastActivityTimestamp = now;
-        lastToolAction = toolAction;
-
-        // If breaker is still tripped after potential resets, return level-specific redirect
-        const preState = cb.getState();
-        if (preState.tripped) {
-            // For levels 1-2, soft-reset to allow the retry after redirect
-            if (preState.escalationLevel < 3) {
-                cb.softReset();
-            }
-            return generateBreakerResponse(
-                preState.escalationLevel,
-                preState.lastTrippedSymbol,
-                preState.lastTrippedFile,
-                preState.tripReason ?? "Unknown pattern",
-            );
-        }
-
-        // Execute the actual handler
-        const response = await handler();
-
-        // Record the result for pattern detection
-        const responseText = response.content.map(c => c.text).join("\n");
-        const hasError = response.isError === true || containsError(responseText);
-
-        if (hasError) {
-            const loopCheck = cb.recordToolCall(
-                toolAction,
-                responseText,
-                filePath,
-                symbolName,
-                true,
-            );
-
-            if (loopCheck.tripped) {
-                // Record circuit breaker trip in file fragility tracker
-                if (chronos && filePath) {
-                    chronos.recordTrip(filePath, loopCheck.reason);
-                }
-
-                // For levels 1-2, soft-reset to allow retry after redirect
-                if (loopCheck.level < 3) {
-                    cb.softReset();
-                }
-                return generateBreakerResponse(
-                    loopCheck.level,
-                    symbolName ?? null,
-                    filePath ?? null,
-                    loopCheck.reason,
-                );
-            }
-        } else {
-            // Record non-error calls too (for same-file tracking)
-            cb.recordToolCall(
-                toolAction,
-                "",
-                filePath,
-                symbolName,
-            );
-        }
-
-        return response;
-    })();
+    return defaultMiddleware.wrap(cb, toolName, action, handler, filePath, symbolName, chronos);
 }
 
 /**
  * Reset middleware state (for testing).
  */
 export function resetMiddlewareState(): void {
-    lastActivityTimestamp = Date.now();
-    lastToolAction = "";
+    defaultMiddleware.reset();
 }

@@ -127,6 +127,8 @@ export function containsError(text: string): boolean {
 // ─── Circuit Breaker ────────────────────────────────────────────────
 
 export class CircuitBreaker {
+    private readonly projectRoot: string;
+
     private state: CircuitBreakerState = {
         history: [],
         tripped: false,
@@ -149,6 +151,10 @@ export class CircuitBreaker {
         redirectsSuccessful: 0,
     };
 
+    constructor(projectRoot?: string) {
+        this.projectRoot = projectRoot ?? process.cwd();
+    }
+
     /**
      * Record a tool call and check for loop patterns.
      * Returns a LoopCheckResult indicating whether the breaker tripped.
@@ -166,7 +172,7 @@ export class CircuitBreaker {
         // Normalize path to absolute + forward slashes - prevents split counters
         // when the same file arrives as "src/app.ts" vs "/Users/.../src/app.ts"
         const normalizedPath = filePath
-            ? path.resolve(process.cwd(), filePath).replace(/\\/g, "/")
+            ? path.resolve(this.projectRoot, filePath).replace(/\\/g, "/")
             : null;
 
         const record: ToolCallRecord = {
