@@ -1,7 +1,7 @@
 import * as ts from "typescript";
 import * as path from "path";
 import * as fs from "fs";
-import { SpectralTopologist, SpectralMath, SparseEdge } from "../src/kernel/spectral-topology.js";
+import { SpectralTopologist, SpectralMath, SparseEdge, TopologicalEdge } from "../src/kernel/spectral-topology.js";
 
 const externalPath = process.argv[2] || process.cwd();
 const projectRoot = path.resolve(externalPath);
@@ -52,7 +52,17 @@ for (const file of candidateFiles) {
     }
 
     const start = performance.now();
-    const { nodes, edges } = SpectralTopologist.extractConstraintGraph(program, blanketFiles);
+    const nodes = new Set<string>();
+    const edges: TopologicalEdge[] = [];
+    for (const edge of fullGraph.edges) {
+        const srcFile = edge.sourceId.split("::")[0];
+        const tgtFile = edge.targetId.split("::")[0];
+        if (blanketFiles.has(srcFile) && (blanketFiles.has(tgtFile) || tgtFile.startsWith("EXTERNAL"))) {
+            nodes.add(edge.sourceId);
+            nodes.add(edge.targetId);
+            edges.push(edge);
+        }
+    }
     const { crownNodes, crownEdges } = SpectralTopologist.filterFirstCrown(file, nodes, edges);
     const { sparseEdges, N } = SpectralTopologist.buildSparseGraph(crownNodes, crownEdges);
     const { fiedler, volume } = SpectralMath.analyzeTopology(N, sparseEdges);
@@ -78,8 +88,18 @@ for (const file of candidateFiles) {
         if (blanket.has(f.replace(/\\/g, "/"))) blanketFiles.add(f);
     }
 
-    const preGraph = SpectralTopologist.extractConstraintGraph(program, blanketFiles);
-    const preCrown = SpectralTopologist.filterFirstCrown(file, preGraph.nodes, preGraph.edges);
+    const preNodes = new Set<string>();
+    const preEdges: TopologicalEdge[] = [];
+    for (const edge of fullGraph.edges) {
+        const srcFile = edge.sourceId.split("::")[0];
+        const tgtFile = edge.targetId.split("::")[0];
+        if (blanketFiles.has(srcFile) && (blanketFiles.has(tgtFile) || tgtFile.startsWith("EXTERNAL"))) {
+            preNodes.add(edge.sourceId);
+            preNodes.add(edge.targetId);
+            preEdges.push(edge);
+        }
+    }
+    const preCrown = SpectralTopologist.filterFirstCrown(file, preNodes, preEdges);
     const preSparse = SpectralTopologist.buildSparseGraph(preCrown.crownNodes, preCrown.crownEdges);
     const pre = SpectralMath.analyzeTopology(preSparse.N, preSparse.sparseEdges);
     const N_AST_pre = preCrown.crownNodes.size;
