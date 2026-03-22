@@ -45,11 +45,17 @@ console.log(`\n=== EGO-GRAPH LATENCY (Markov Blanket) ===`);
 const latencies: number[] = [];
 
 for (const file of candidateFiles) {
+    const blanket = SpectralTopologist.getMarkovBlanket(file, fullGraph.edges);
+    const blanketFiles = new Set<string>();
+    for (const f of allFiles) {
+        if (blanket.has(f.replace(/\\/g, "/"))) blanketFiles.add(f);
+    }
+
     const start = performance.now();
-    const result = SpectralTopologist.analyze(program, allFiles, file);
+    const result = SpectralTopologist.analyze(program, blanketFiles);
     const ms = performance.now() - start;
     latencies.push(ms);
-    console.log(`  ${path.basename(file)}: ${result.nodeCount} nodes, ${result.edgeCount} edges, ${ms.toFixed(1)}ms, λ₂=${result.fiedlerValue.toFixed(4)}`);
+    console.log(`  ${path.basename(file)}: blanket=${blanketFiles.size} files, ${result.nodeCount} nodes, ${result.edgeCount} edges, ${ms.toFixed(1)}ms, λ₂=${result.fiedlerValue.toFixed(4)}`);
 }
 
 const avgLatency = latencies.reduce((a, b) => a + b, 0) / latencies.length;
