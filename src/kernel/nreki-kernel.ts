@@ -134,6 +134,11 @@ export class NrekiKernel {
     public mode: "file" | "project" | "hologram" = "project";
     private isStateCorrupted = false;
 
+    /** Max file size for JIT classification. Files larger than this are
+     *  skipped to prevent synchronous event loop blocking during
+     *  TypeScript's module resolution (readFileSync + Tree-sitter parse). */
+    private static readonly JIT_MAX_FILE_SIZE = 150_000; // 150KB
+
     // ─── Hologram mode ─────────────────────────────────
     private prunedFiles = new Set<string>();
     private shadowContent = new Map<string, string>();  // tsPath -> .d.ts content
@@ -1806,6 +1811,14 @@ export class NrekiKernel {
         if (!this.jitParser || !this.jitTsLanguage || !this.jitClassifyFn) return false;
 
         this.jitClassifiedCache.add(tsPath);
+
+        // SIZE GUARD: Skip large auto-generated files (GraphQL codegen,
+        // Prisma client, protobuf output) that would block the event loop.
+        try {
+            const stat = fs.statSync(path.normalize(tsPath));
+            if (stat.size > NrekiKernel.JIT_MAX_FILE_SIZE) return false;
+        } catch { return false; }
+
         let content: string;
         try { content = fs.readFileSync(path.normalize(tsPath), "utf-8"); }
         catch { return false; }
