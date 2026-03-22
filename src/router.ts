@@ -36,8 +36,6 @@ import { semanticEdit, batchSemanticEdit, detectSignatureChange, type EditMode, 
 import { addPin, removePin, listPins, getPinnedText } from "./pin-memory.js";
 import { readSource } from "./utils/read-source.js";
 import { restoreBackup, saveBackup } from "./undo.js";
-import { validateBeforeWrite } from "./middleware/validator.js";
-import { wrapWithCircuitBreaker } from "./middleware/circuit-breaker.js";
 import { NrekiKernel, type NrekiInterceptResult, type TypeRegression } from "./kernel/nreki-kernel.js";
 import { acquireFileLock, releaseFileLock } from "./middleware/file-lock.js";
 import { PreToolUseHook } from "./hooks/preToolUse.js";
@@ -1922,7 +1920,7 @@ async function handleBatchEdit(
 
 async function handleUndo(
     params: CodeParams,
-    deps: RouterDependencies,
+    _deps: RouterDependencies,
 ): Promise<McpToolResponse> {
     const file = params.path ?? "";
     let resolvedPath: string;
@@ -2045,7 +2043,7 @@ async function handleFilterOutput(
 
 async function handlePin(
     params: GuardParams,
-    deps: RouterDependencies,
+    _deps: RouterDependencies,
 ): Promise<McpToolResponse> {
     const projectRoot = process.cwd();
     const text = typeof params.text === "string" ? params.text : "";
@@ -2086,7 +2084,7 @@ async function handlePin(
 
 async function handleUnpin(
     params: GuardParams,
-    deps: RouterDependencies,
+    _deps: RouterDependencies,
 ): Promise<McpToolResponse> {
     const projectRoot = process.cwd();
     const index = typeof params.index === "number" ? params.index : undefined;

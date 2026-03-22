@@ -264,7 +264,7 @@ export class AstSandbox {
      * Combines error location, context line, and heuristic hints
      * to help Claude understand exactly what went wrong.
      */
-    private generateSuggestion(errors: AstError[], lines: string[]): string {
+    private generateSuggestion(errors: AstError[], _lines: string[]): string {
         const parts: string[] = [];
 
         for (const error of errors) {

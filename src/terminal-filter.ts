@@ -136,7 +136,6 @@ export function deduplicateLines(lines: string[]): string[] {
 
 const NODE_MODULES_RE = /^\s+at\s+.*node_modules[/\\]/;
 const INTERNAL_RE = /^\s+at\s+.*\((?:node:|internal\/)/;
-const USER_STACK_RE = /^\s+at\s+/;
 
 export function filterNodeModules(lines: string[]): string[] {
     const result: string[] = [];
@@ -169,7 +168,6 @@ export function filterNodeModules(lines: string[]): string[] {
 
 // Common error patterns
 const TS_ERROR_RE = /error TS(\d+):\s*(.+)/;
-const ESLINT_ERROR_RE = /(?:error|warning)\s+(\S+)\s+(.+)/;
 const JEST_FAIL_RE = /(?:FAIL|✕|×|✗)\s+(.+)/;
 const VITEST_FAIL_RE = /(?:FAIL|×)\s+(tests?\/.+|src\/.+)/;
 const NODE_ERROR_RE = /^(\w*Error):\s*(.+)/;

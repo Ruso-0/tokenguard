@@ -9,7 +9,6 @@
  * TS4023 errors: marks file as UNPRUNABLE_FOREVER in the cache.
  */
 
-import * as ts from "typescript";
 import type { NrekiKernel } from "../kernel/nreki-kernel.js";
 import type { ShadowCache } from "./shadow-cache.js";
 

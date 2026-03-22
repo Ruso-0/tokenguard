@@ -22,7 +22,6 @@ import { Embedder, getEmbedder } from "./embedder.js";
 import { ASTParser, type ParseResult } from "./parser.js";
 import { Compressor, type CompressionResult } from "./compressor.js";
 import { AdvancedCompressor, type CompressionLevel, type AdvancedCompressionResult } from "./compressor-advanced.js";
-import { safePath } from "./utils/path-jail.js";
 import { shouldProcess } from "./utils/file-filter.js";
 import { readSource } from "./utils/read-source.js";
 import { getOrGenerateRepoMap, type RepoMap, type DependencyGraph } from "./repo-map.js";

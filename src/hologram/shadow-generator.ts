@@ -769,7 +769,7 @@ function emitVariableShadow(
 // ─── Main Classification + Generation ────────────────────────────────
 
 export function classifyAndGenerateShadow(
-    filePath: string,
+    _filePath: string,
     content: string,
     parser: Parser,
     language: Parser.Language,

@@ -579,11 +579,9 @@ async function structuralCompress(
 
 export class AdvancedCompressor {
     private parser: ASTParser;
-    private embedder: Embedder;
 
-    constructor(parser: ASTParser, embedder: Embedder) {
+    constructor(parser: ASTParser, _embedder: Embedder) {
         this.parser = parser;
-        this.embedder = embedder;
     }
 
     /**

@@ -815,29 +815,6 @@ export class NrekiKernel {
         return score;
     }
 
-    /**
-     * String-based toxicity for pre-edit types (compiler state no longer exists).
-     * Uses asymmetric weights matching the TypeFlags scoring.
-     */
-    private getStringBasedToxicity(typeStr: string): number {
-        let score = 0;
-        const anyMatches = typeStr.match(/\bany\b/g);
-        if (anyMatches) score += anyMatches.length * 10;
-        const unknownMatches = typeStr.match(/\bunknown\b/g);
-        if (unknownMatches) score += unknownMatches.length * 2;
-        const funcMatches = typeStr.match(/\bFunction\b/g);
-        if (funcMatches) score += funcMatches.length * 5;
-
-        // Bare empty types: object, {}
-        const stripped = typeStr.replace(/\s/g, "");
-        if (typeStr.trim() === "object" || stripped === "{}") score += 2;
-
-        // Wrapper primitives (String vs string): code smell, lower weight
-        const wrappers = typeStr.match(/\b(String|Number|Boolean|Object|Symbol)\b/g);
-        if (wrappers) score += wrappers.length * 0.5;
-
-        return score;
-    }
 
     /**
      * Compare pre-edit and post-edit resolved types using toxicity scoring.
@@ -1761,7 +1738,7 @@ export class NrekiKernel {
     /** Receive shadow scan results BEFORE boot(). */
     public setShadows(
         prunable: Map<string, string>,
-        unprunable: Set<string>,
+        _unprunable: Set<string>,
         ambientFiles: string[],
     ): void {
         this.prunedFiles = new Set(prunable.keys());
