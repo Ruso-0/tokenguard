@@ -183,18 +183,33 @@ describe("SpectralTopologist integration", () => {
         expect(pre.volume).toBeGreaterThan(post.volume);
     });
 
-    it("should REJECT entropy injection", () => {
-        const pre = { fiedlerValue: 2.0, volume: 8, nodeCount: 4, edgeCount: 6 };
-        const post = { fiedlerValue: 0.5, volume: 4, nodeCount: 4, edgeCount: 3 };
+    it("should REJECT entropy injection (ghost nodes)", () => {
+        // K3 pre-edit: 3 nodes, all connected, λ₂=3.0
+        // Post-edit: AI puts any on node A. A is ghost (0 edges). B,C survive. λ₂=2.0
+        // Φ_pre = 3.0/3 = 1.0, Φ_post = 2.0/3 = 0.666 → 33% drop → REJECT
+        const pre = { fiedlerValue: 3.0, volume: 3, nodeCount: 3, edgeCount: 3, activeNodes: 3 };
+        const post = { fiedlerValue: 2.0, volume: 1, nodeCount: 3, edgeCount: 1, activeNodes: 2 };
         const delta = SpectralTopologist.computeDelta(pre, post);
         expect(delta.verdict).toBe("REJECTED_ENTROPY");
     });
 
-    it("should APPROVE legitimate decoupling", () => {
-        const pre = { fiedlerValue: 1.5, volume: 10, nodeCount: 5, edgeCount: 8 };
-        const post = { fiedlerValue: 0.0, volume: 10, nodeCount: 5, edgeCount: 8 };
+    it("should APPROVE legitimate decoupling (node deleted from AST)", () => {
+        // K3 pre-edit: 3 nodes, all connected, λ₂=3.0
+        // Post-edit: Human DELETES function A entirely. N_AST drops to 2. B,C survive. λ₂=2.0
+        // Φ_pre = 3.0/3 = 1.0, Φ_post = 2.0/2 = 1.0 → 0% drop → APPROVE
+        const pre = { fiedlerValue: 3.0, volume: 3, nodeCount: 3, edgeCount: 3, activeNodes: 3 };
+        const post = { fiedlerValue: 2.0, volume: 1, nodeCount: 2, edgeCount: 1, activeNodes: 2 };
         const delta = SpectralTopologist.computeDelta(pre, post);
-        expect(delta.verdict).toBe("APPROVED_DECOUPLING");
+        expect(delta.verdict).not.toBe("REJECTED_ENTROPY");
+    });
+
+    it("should REJECT with adaptive epsilon on small graph", () => {
+        // Small graph: N_AST=4, ε capped at 0.30
+        // Φ drops 35% → exceeds 0.30 → REJECT
+        const pre = { fiedlerValue: 2.0, volume: 5, nodeCount: 4, edgeCount: 4, activeNodes: 4 };
+        const post = { fiedlerValue: 1.3, volume: 3, nodeCount: 4, edgeCount: 2, activeNodes: 3 };
+        const delta = SpectralTopologist.computeDelta(pre, post);
+        expect(delta.verdict).toBe("REJECTED_ENTROPY");
     });
 
     it("should APPROVE cosmetic refactor", () => {

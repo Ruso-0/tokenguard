@@ -124,15 +124,23 @@ export class SpectralTopologist {
         post: SpectralResult
     ): SpectralDelta {
 
-        const connPre = pre.nodeCount > 0 ? pre.fiedlerValue / pre.nodeCount : 0;
-        const connPost = post.nodeCount > 0 ? post.fiedlerValue / post.nodeCount : 0;
-        const normalizedFiedlerDrop = connPre - connPost;
-        const dropRatio = connPre > 0 ? normalizedFiedlerDrop / connPre : 0;
+        // Φ = λ₂ / N_AST (Topological Entropy Index)
+        // N_AST = nodeCount = physical nodes in code (NOT activeNodes)
+        // Ghost nodes (any-widened, zero-degree) stay in N_AST denominator
+        // Deleted nodes disappear from N_AST — legitimate decoupling
+        const phiPre = pre.nodeCount > 0 ? pre.fiedlerValue / pre.nodeCount : 0;
+        const phiPost = post.nodeCount > 0 ? post.fiedlerValue / post.nodeCount : 0;
+        const normalizedFiedlerDrop = phiPre - phiPost;
+        const dropRatio = phiPre > 0 ? normalizedFiedlerDrop / phiPre : 0;
         const volumeDrop = pre.volume - post.volume;
 
+        // Adaptive epsilon with hard bounds [0.10, 0.30]
+        // N_AST=3 → ε≈0.30 (ghost in K3 = 33% drop, always caught)
+        // N_AST=50 → ε≈0.15 (standard)
+        // N_AST=500 → ε≈0.10 (floor, never less sensitive than 10%)
         const baseEpsilon = 0.15;
-        const scaleFactor = Math.sqrt(50 / Math.max(50, pre.nodeCount));
-        const epsilonDynamic = baseEpsilon * scaleFactor;
+        const scaleFactor = Math.sqrt(50 / Math.max(1, pre.nodeCount));
+        const epsilonDynamic = Math.max(0.10, Math.min(0.30, baseEpsilon * scaleFactor));
 
         let verdict: SpectralDelta["verdict"];
 
