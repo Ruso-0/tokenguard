@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
 import { isSensitivePath } from "../utils/path-jail.js";
+import { readSource } from "../utils/read-source.js";
 import { escapeRegExp } from "../utils/imports.js";
 
 // ─── Async FIFO Mutex (P10) ────────────────────────────────────────
@@ -450,15 +451,11 @@ export class NrekiKernel {
         if (this.mode === "project") {
             this.captureBaseline();
         }
-        // D2: Clean orphaned .nreki-bak-* files from previous crashes
-        try {
-            const entries = fs.readdirSync(this.projectRoot);
-            for (const entry of entries) {
-                if (entry.includes(".nreki-bak-") || (entry.includes(".nreki-") && entry.endsWith(".tmp"))) {
-                    try { fs.unlinkSync(path.join(this.projectRoot, entry)); } catch { /* best effort */ }
-                }
-            }
-        } catch { /* non-fatal */ }
+        // D2: Clean orphaned transaction backups from previous crashes
+        const txDir = path.join(this.projectRoot, ".nreki", "transactions");
+        if (fs.existsSync(txDir)) {
+            try { fs.rmSync(txDir, { recursive: true, force: true }); } catch { /* best effort */ }
+        }
 
         // Capture initial error count at boot (immutable after this point)
         this.bootErrorCount = this.getBaselineErrorCount();
@@ -548,8 +545,10 @@ export class NrekiKernel {
             : "GLOBAL";
         let msg = ts.flattenDiagnosticMessageText(diag.messageText, "\n");
         const nativeRoot = path.resolve(this.projectRoot);
+        const nativePosix = nativeRoot.replace(/\\/g, "/");
         msg = msg.replace(new RegExp(escapeRegExp(this.projectRoot), "ig"), "<ROOT>");
         msg = msg.replace(new RegExp(escapeRegExp(nativeRoot), "ig"), "<ROOT>");
+        msg = msg.replace(new RegExp(escapeRegExp(nativePosix), "ig"), "<ROOT>");
         return crypto.createHash("sha256").update(`${file}|TS${diag.code}|${msg}`).digest("hex");
     }
 
@@ -1433,7 +1432,9 @@ export class NrekiKernel {
             for (const posixPath of this.vfs.keys()) {
                 const osPath = path.normalize(posixPath);
                 if (fs.existsSync(osPath)) {
-                    const bak = `${osPath}.nreki-bak-${crypto.randomBytes(4).toString("hex")}`;
+                    const txDir = path.join(this.projectRoot, ".nreki", "transactions");
+                    if (!fs.existsSync(txDir)) fs.mkdirSync(txDir, { recursive: true });
+                    const bak = path.join(txDir, `${crypto.randomBytes(4).toString("hex")}.bak`);
                     fs.copyFileSync(osPath, bak);
                     physicalUndoLog.push({ target: osPath, backup: bak });
                 } else {
@@ -1815,7 +1816,7 @@ export class NrekiKernel {
         } catch { return false; }
 
         let content: string;
-        try { content = fs.readFileSync(path.normalize(tsPath), "utf-8"); }
+        try { content = readSource(path.normalize(tsPath)); }
         catch { return false; }
 
         const result = this.jitClassifyFn(tsPath, content, this.jitParser, this.jitTsLanguage);
