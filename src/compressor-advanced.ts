@@ -101,6 +101,7 @@ function stripCallStatements(text: string, pattern: RegExp): string {
             while (end < text.length && (text[end] === " " || text[end] === "\t")) end++;
             if (end < text.length && text[end] === "\n") end++;
             toRemove.push({ start: lineStart, end });
+            pattern.lastIndex = end;
         }
     }
 
