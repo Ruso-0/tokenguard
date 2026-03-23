@@ -849,7 +849,6 @@ export class NrekiKernel {
             for (const [symbol, oldData] of preSymbols.entries()) {
                 const newData = postSymbols.get(symbol);
                 if (!newData) continue;
-                if (oldData.typeStr === newData.typeStr) continue;
 
                 if (newData.toxicity > oldData.toxicity || (newData.isUntyped && !oldData.isUntyped)) {
                     regressions.push({
