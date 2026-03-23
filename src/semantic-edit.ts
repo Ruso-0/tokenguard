@@ -163,10 +163,21 @@ export function applySemanticSplice(
         const windowStart = Math.max(0, startIdx - 500);
         const windowEnd = Math.min(content.length, startIdx + rawCode.length + 500);
         const searchWindow = content.substring(windowStart, windowEnd);
-        const localOffset = searchWindow.indexOf(rawCode);
+        let bestOffset = -1;
+        let minDistance = Infinity;
+        let currentOffset = searchWindow.indexOf(rawCode);
+        while (currentOffset >= 0) {
+            const absolutePos = windowStart + currentOffset;
+            const distance = Math.abs(absolutePos - startIndex);
+            if (distance < minDistance) {
+                minDistance = distance;
+                bestOffset = currentOffset;
+            }
+            currentOffset = searchWindow.indexOf(rawCode, currentOffset + 1);
+        }
 
-        if (localOffset >= 0) {
-            startIdx = windowStart + localOffset;
+        if (bestOffset >= 0) {
+            startIdx = windowStart + bestOffset;
         } else {
             // M-05: No global fallback - risk of matching wrong occurrence in large files
             startIdx = -1;
