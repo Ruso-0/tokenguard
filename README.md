@@ -5,7 +5,7 @@
   <img src="https://img.shields.io/badge/Tools-3-blueviolet?style=for-the-badge" alt="3 Tools">
   <img src="https://img.shields.io/badge/Tests-696-brightgreen?style=for-the-badge" alt="696 Tests">
   <img src="https://img.shields.io/badge/Cloud-Zero-orange?style=for-the-badge" alt="Zero Cloud">
-  <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="MIT License">
+  <img src="https://img.shields.io/badge/License-Apache_2.0-yellow?style=for-the-badge" alt="Apache 2.0 License">
   <img src="https://img.shields.io/badge/TypeScript-5.9-3178C6?style=for-the-badge" alt="TypeScript 5.9">
   <img src="https://img.shields.io/badge/Node-%3E%3D20-339933?style=for-the-badge" alt="Node >=20">
 </p>
@@ -433,7 +433,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+Apache-2.0 - see [LICENSE](LICENSE).
 
 ## Author
 

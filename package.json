@@ -40,7 +40,7 @@
     "codefix"
   ],
   "author": "Jherson Eddie Tintaya Holguin (https://github.com/Ruso-0)",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chokidar": "^4.0.3",
