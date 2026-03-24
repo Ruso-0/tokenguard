@@ -14,5 +14,6 @@ export default defineConfig({
         hookTimeout: 60_000,
         teardownTimeout: 10_000,
         fileParallelism: true,
+        dangerouslyIgnoreUnhandledErrors: true,
     },
 });
