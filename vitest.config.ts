@@ -3,12 +3,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
     test: {
         pool: "forks",
-        poolOptions: {
-            forks: {
-                singleFork: false,
-                maxForks: 3,
-            },
-        },
+        maxWorkers: 3,
         maxConcurrency: 3,
         testTimeout: 120_000,
         hookTimeout: 60_000,

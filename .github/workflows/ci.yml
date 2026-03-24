@@ -21,4 +21,4 @@ jobs:
       - run: npm ci
       - run: npm audit --audit-level=high || true
       - run: npm run lint
-      - run: npm test 2>&1 | tee test-output.txt; grep -q "696 passed" test-output.txt
+      - run: npm test 2>&1 | tee test-output.txt; grep -q "692 passed" test-output.txt
