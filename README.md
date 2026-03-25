@@ -16,52 +16,18 @@
 
 ---
 
-## What's New in v6.1: Spectral Gate
+## What's New in v7.0: Software Physics Engine
 
-NREKI v6.1 adds a spectral topology gate that detects when AI agents silently destroy type safety. Using algebraic graph theory (Fiedler value of the graph Laplacian), it measures the structural damage of every proposed edit before it touches disk.
-
-**11/11 real-world projects pass.** 55/55 detection. 0/55 false positives. Max latency 95.8ms.
+NREKI v7.0 turns the spectral topology gate into a full physics engine. Every proposed edit now produces eigenvector coordinates — Fiedler vectors (v2) map bridge fragility, third eigenvectors (v3) map topological stress, and gauge fixing ensures deterministic sign across commits (critical for ML pipelines).
 
 Key additions:
-- **Spectral Gate**: Phi = lambda2 * density detects type widening, ghost nodes, and hub destruction
-- **CSR Sparse Matrix**: L1 cache-friendly power iteration with fused Rayleigh quotient
-- **Hologram Shield 2**: Dependent files now evaluated semantically in hologram mode
-- **TTRD hardened**: TypeFlags-only toxicity scoring, no more string truncation bypass
-- **25+ bug fixes and performance improvements** (see CHANGELOG)
-
----
-
-### What's New in v6.1.1: Security & Stability Audit
-
-32 fixes from a hostile code audit covering 12 source files:
-
-**Critical fixes:**
-- Fixed illegal `.d.ts` syntax in hologram multi-declarator exports
-- Fixed TTRD debt amnesty bypass via undefined contracts
-- Fixed orphan `.tmp` file leak on commit rollback (Windows)
-- Fixed Python indentation destruction in token-level compression
-
-**High-impact fixes:**
-- Duplicate symbol detection in ±500 byte splice window (prevents wrong-function edits)
-- `isTypeScriptFile` now respects `allowJs` config (prevents false errors in strict projects)
-- Full `.mts`/`.cts` shadow support in JIT Holography (8 regex patterns updated)
-- Singleton middleware replaced with WeakMap per-session isolation
-- `syncTechDebt` fixed: tracks incremental deltas instead of phantom accumulation
-- Backup key normalization prevents "no backup found" on undo
-- File lock timeout extended to 5 minutes for large batch edits
-- Circuit breaker tool detection updated for v3.0+ action names
-- `detectMode` now activates "file" mode for 50-200 file projects
-
-**Security hardening:**
-- `Buffer.alloc` replaces `allocUnsafe` in log reader (prevents memory leaks)
-- Deep copy isolates WASM SharedArrayBuffer from SQLite writes
-- macOS APFS case-sensitive volumes no longer share locks incorrectly
-
-**Infrastructure:**
-- Dead code removed: KernelManager + kernel-worker (232 lines)
-- Vitest upgraded, flaky performance thresholds relaxed
-- `rebuildKeywordIndex` uses streaming iterator (prevents OOM on large repos)
-- 696 tests, zero failures
+- **Fiedler Vector (v2)**: Full eigenvector extraction — per-node bridge fragility map
+- **Third eigenvalue (λ₃) + eigenvector (v3)**: Spectral gap ∇(λ₃ - λ₂) enables predictive analysis
+- **Gauge Fixing**: Deterministic phase canonicalization prevents sign ambiguity across commits
+- **Monorepo workspace resolution**: `buildFastLookup` resolves `@org/package` imports via O(1) string math
+- **Adaptive Shotgun Surgery**: Threshold scales with repo size — no more false positives on large codebases
+- **Modern module extensions**: Full `.mts`, `.cts`, `.mjs`, `.cjs` support across all subsystems
+- **32+ audit fixes**: VFS zombie state, WASM race conditions, extractName regex purge, and more (see CHANGELOG)
 
 ---
 
