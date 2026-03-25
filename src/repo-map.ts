@@ -364,22 +364,21 @@ export function computePageRank(
  * Build a fast-lookup index for resolving imports to file paths in O(1).
  * Maps extensionless, with-extension, src/-stripped, and index-collapsed variants.
  */
+/**
+ * Build a fast-lookup index for resolving imports to file paths in O(1).
+ * Maps extensionless, with-extension, src/-stripped, index-collapsed variants,
+ * AND Monorepo Workspaces.
+ */
 export function buildFastLookup(allFiles: string[]): Map<string, string> {
     const lookup = new Map<string, string>();
-
     for (const file of allFiles) {
         const normalized = file.replace(/\\/g, "/");
         const noExt = normalized.replace(/\.[^/.]+$/, "");
-
         lookup.set(noExt, normalized);
         lookup.set(normalized, normalized);
-
-        // Handle baseUrl "src/" without reading tsconfig
         if (noExt.startsWith("src/")) {
             lookup.set(noExt.slice(4), normalized);
         }
-
-        // Handle index.ts/index.js implicit imports
         if (noExt.endsWith("/index")) {
             const dir = noExt.slice(0, -6);
             lookup.set(dir, normalized);
@@ -387,42 +386,52 @@ export function buildFastLookup(allFiles: string[]): Map<string, string> {
                 lookup.set(dir.slice(4), normalized);
             }
         }
+        const match = noExt.match(/^(?:packages|workspaces|libs|apps)\/([^/]+)\/(?:src\/|lib\/)?(.*)$/);
+        if (match) {
+            const pkgName = match[1];
+            const internalPath = match[2];
+            const aliasKey = internalPath ? `${pkgName}/${internalPath}` : pkgName;
+            lookup.set(aliasKey, normalized);
+            if (internalPath.endsWith("/index")) {
+                const dirAlias = internalPath.slice(0, -6);
+                lookup.set(dirAlias ? `${pkgName}/${dirAlias}` : pkgName, normalized);
+            }
+        }
     }
-
     return lookup;
 }
-
 /**
  * Resolve an import string to an actual project file path.
- * Returns null for external dependencies (lodash, react, etc).
+ * Returns null for external dependencies.
  */
 export function resolveImportFast(
     importStr: string,
     currentFile: string,
     lookup: Map<string, string>,
 ): string | null {
-    // External dependencies → null
     if (!importStr.startsWith(".") && !importStr.startsWith("/") && !importStr.startsWith("@/")) {
-        return lookup.get(importStr) || null;
+        let resolved = lookup.get(importStr);
+        if (resolved) return resolved;
+        if (importStr.startsWith("@")) {
+            const parts = importStr.split("/");
+            if (parts.length > 1) {
+                const withoutOrg = parts.slice(1).join("/");
+                resolved = lookup.get(withoutOrg);
+                if (resolved) return resolved;
+            }
+        }
+        return null;
     }
-
-    // Resolve @/ alias → src/
     let target = importStr.replace(/^@\//, "src/");
-
-    // Resolve relative paths
     if (target.startsWith(".")) {
         target = path.posix.join(
             path.posix.dirname(currentFile.replace(/\\/g, "/")),
             target,
         );
     }
-
-    // Strip extension (import may be "./db.js" but file is "db.ts")
     target = target.replace(/\.(ts|tsx|js|jsx)$/, "");
-
     return lookup.get(target) || null;
 }
-
 /**
  * Build a dependency graph from repo map entries.
  * Computes in-degree (how many files import each file) and classifies by percentile.
