@@ -225,7 +225,7 @@ export async function findDefinition(
         const contentLines = content.split("\n");
 
         for (const chunk of result.chunks) {
-            const name = extractName(chunk);
+            const name = chunk.symbolName || extractName(chunk);
             if (!name) continue;
 
             // Kind filtering
@@ -326,7 +326,7 @@ export async function getFileSymbols(
 
     return result.chunks.map((chunk) => ({
         filePath: relPath,
-        name: extractName(chunk),
+        name: chunk.symbolName || extractName(chunk),
         kind: NODE_TYPE_TO_KIND[chunk.nodeType] || chunk.nodeType,
         signature: extractSignature(chunk.rawCode),
         body: chunk.rawCode,
