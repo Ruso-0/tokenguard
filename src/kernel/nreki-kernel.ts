@@ -1414,6 +1414,12 @@ export class NrekiKernel {
                     }
                 }
                 this.currentEditTargets.clear();
+                // FIX: Poison the compiler cache to force cold rebuild.
+                // Without this, the TypeScript BuilderProgram retains state
+                // from the failed transaction, causing phantom errors on
+                // the next interceptAtomicBatch call.
+                this.builderProgram = undefined;
+                this.isStateCorrupted = true;
                 throw phaseError;
             }
         });

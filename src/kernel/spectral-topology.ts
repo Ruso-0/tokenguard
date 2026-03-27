@@ -427,9 +427,19 @@ export class SpectralMath {
 
                 norm = Math.sqrt(norm);
                 if (norm < 1e-9) break;
+                // FIX: Dual convergence criterion.
+                // Check BOTH eigenvalue (mu) AND eigenvector stability.
+                // The eigenvalue converges quadratically faster than the
+                // eigenvector. Checking only mu can exit while the vector
+                // is still rotating, producing noisy v2/v3 components.
+                let maxVecDiff = 0;
+                for (let j = 0; j < N; j++) {
+                    const diff = Math.abs(vec[j] - v_next[j] / norm);
+                    if (diff > maxVecDiff) maxVecDiff = diff;
+                }
                 for (let i = 0; i < N; i++) vec[i] = v_next[i] / norm;
 
-                if (Math.abs(mu - prev_mu) < 1e-7) break;
+                if (Math.abs(mu - prev_mu) < 1e-7 && maxVecDiff < 1e-6) break;
                 prev_mu = mu;
             }
 

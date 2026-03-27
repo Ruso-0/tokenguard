@@ -229,11 +229,13 @@ export class ChronosMemory {
                 return false;
             }
 
-            // A-01: Use kernel's shared isToxicType to prevent divergence
-            const isStillToxic = NrekiKernel.isToxicType(currentType);
-            if (!isStillToxic) {
+            // FIX: Restoration to original type always clears the debt,
+            // even if the original type was itself "toxic" (e.g., unknown).
+            // Without this, unknown→any→unknown creates an eternal prison
+            // where the debt never clears because isToxicType("unknown") = true.
+            if (currentType === debt.strictType || !NrekiKernel.isToxicType(currentType)) {
                 paidSymbols.push(debt.symbol);
-                return false;
+                return false; // Debt cleared: type restored or detoxified
             }
 
             return true; // Still toxic, debt remains

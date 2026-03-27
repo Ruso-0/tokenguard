@@ -478,51 +478,36 @@ async function structuralCompress(
 
     // For aggressive: rebuild from AST chunks (signatures + imports)
     if (level === "aggressive") {
-        const lines = originalContent.split("\n");
-        const parts: string[] = [];
+        // STRATEGY: Splice approach. Start from the ORIGINAL content and
+        // replace function/method BODIES with compact stubs, preserving all
+        // module-level code (app.use(), Router(), dotenv.config(), etc.).
+        // Previous approach rebuilt from chunks, silently deleting everything
+        // between functions.
 
-        parts.push(`// [NREKI] ${filePath} | aggressive | ${parseResult.chunks.length} chunks`);
+        // Sort chunks by startIndex descending (bottom-up) to preserve byte offsets
+        const sortedChunks = [...parseResult.chunks].sort(
+            (a, b) => b.startIndex - a.startIndex
+        );
 
-        // Collect import/export/type lines from the top
-        const firstChunkLine = Math.min(...parseResult.chunks.map(c => c.startLine));
-        for (let i = 0; i < Math.min(firstChunkLine - 1, lines.length); i++) {
-            const trimmed = lines[i].trim();
-            if (
-                trimmed.startsWith("import") ||
-                trimmed.startsWith("export") ||
-                trimmed.startsWith("type ") ||
-                trimmed.startsWith("interface ") ||
-                trimmed.startsWith("from ") ||
-                trimmed.startsWith("package ") ||
-                trimmed.startsWith("require")
-            ) {
-                parts.push(lines[i]);
-            }
-        }
+        let result = originalContent;
 
-        // Add each chunk with compact stubs + bloat guard
-        for (const chunk of parseResult.chunks) {
+        for (const chunk of sortedChunks) {
             const bodyLineCount = chunk.rawCode.split("\n").length;
-
-            // Extract key references (compact, max 5)
             const refs = extractKeyReferences(chunk.rawCode);
             const refsStr = refs.length > 0 ? ` refs:${refs.join(",")}` : "";
-
-            // Compact stub format (vs verbose ~120+ char original)
             const compactStub = `/*[nreki:${bodyLineCount}L${refsStr}]*/`;
 
-            // Conservation law: shorthand + stub must be strictly smaller than raw code
-            const stubTotal = chunk.shorthand.length + 1 + compactStub.length;
-            if (stubTotal < chunk.rawCode.length) {
-                parts.push(chunk.shorthand);
-                parts.push(compactStub);
-            } else {
-                // Stub would bloat - shorthand alone (already has TG line range)
-                parts.push(chunk.shorthand);
+            // Conservation law: replacement must be strictly smaller than original
+            const replacement = `${chunk.shorthand}\n${compactStub}`;
+            if (replacement.length < chunk.rawCode.length) {
+                result = result.substring(0, chunk.startIndex) +
+                         replacement +
+                         result.substring(chunk.endIndex);
             }
+            // If stub would bloat, leave the original code untouched
         }
 
-        return parts.join("\n");
+        return `// [NREKI] ${filePath} | aggressive | ${parseResult.chunks.length} chunks\n${result}`;
     }
 
     // For medium: keep signatures + key body lines

@@ -161,8 +161,13 @@ class VectorIndex {
             if (offset + 4 + vecBytes > buf.length) break;
             const rowid = buf.readUInt32LE(offset);
             offset += 4;
+            // FIX: Zero-copy view instead of deep copy. Float32 alignment
+            // is guaranteed because offset advances in 4-byte increments
+            // (header=4, rowid=4). Eliminates 50K+ heap allocations.
             const vec = new Float32Array(
-                buf.buffer.slice(buf.byteOffset + offset, buf.byteOffset + offset + vecBytes)
+                buf.buffer,
+                buf.byteOffset + offset,
+                dim
             );
             index.vectors.set(rowid, vec);
             offset += vecBytes;

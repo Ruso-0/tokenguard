@@ -161,7 +161,15 @@ export class TokenMonitor {
 
         try {
             const stat = fs.fstatSync(fd);
-            const bytesToRead = stat.size - this.lastReadPosition;
+            let bytesToRead = stat.size - this.lastReadPosition;
+
+            // FIX: Handle log rotation/truncation. If the file shrank,
+            // reset to beginning. Without this, the monitor goes permanently
+            // blind after log rotation: bytesToRead stays negative forever.
+            if (bytesToRead < 0) {
+                this.lastReadPosition = 0;
+                bytesToRead = stat.size;
+            }
 
             if (bytesToRead > 0) {
                 // AUDIT FIX: alloc zeroes memory; subarray trims to actual bytes read

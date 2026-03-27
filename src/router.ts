@@ -448,30 +448,38 @@ async function handleSearch(
     }
 
     const formatted = results.map((r, i) => {
-        const header = `### ${i + 1}. ${path.relative(process.cwd(), r.path)}:L${r.startLine}-L${r.endLine}`;
+        // POSIX normalization for Windows paths
+        const cleanPath = path.relative(process.cwd(), r.path).replace(/\\/g, "/");
+        const header = `### ${i + 1}. ${cleanPath}:L${r.startLine}-L${r.endLine}`;
+
+        // LANGUAGE HINT + COMMENT PREFIX (syntax-safe sensory injection)
+        // Python uses #, Go/TS/JS use //. Prevents Claude from hallucinating
+        // syntax errors when reading injected architectural comments.
+        let ext = path.extname(r.path).slice(1).toLowerCase();
+        let lang = ext;
+        let commentPrefix = "//";
+
+        if (['ts', 'tsx', 'mts', 'cts'].includes(ext)) { lang = 'typescript'; commentPrefix = '//'; }
+        else if (['js', 'jsx', 'mjs', 'cjs'].includes(ext)) { lang = 'javascript'; commentPrefix = '//'; }
+        else if (ext === 'py') { lang = 'python'; commentPrefix = '#'; }
+        else if (ext === 'go') { lang = 'go'; commentPrefix = '//'; }
+        else if (!lang) { lang = 'typescript'; commentPrefix = '//'; }
 
         // SENSORY INJECTION (T-RAG): Topology-aware context for the LLM
         // The LLM "sees" the architectural impact BEFORE daring to edit.
-        // This lives in the router (View layer), NOT in the engine (Data layer).
+        // Uses language-correct comment prefix to avoid phantom syntax errors.
         let sensoryTag = "";
         if (r.topology && r.topology.tier !== "orphan") {
             if (r.topology.isEpicenter && r.topology.inDegree > 0) {
                 const alert = r.topology.tier === "core" ? "☢️ CRITICAL CORE" : "⚠️ LOGIC HUB";
-                const depsStr = r.topology.dependents.length > 0 ? ` (Imports: ${r.topology.dependents.join(", ")}...)` : "";
-                sensoryTag = `// [EPICENTER | BLAST RADIUS: ${r.topology.inDegree} dependents | ${alert}]${depsStr}\n`;
+                const depsStr = r.topology.dependents && r.topology.dependents.length > 0 ? ` (Imports: ${r.topology.dependents.join(", ")}...)` : "";
+                sensoryTag = `${commentPrefix} [EPICENTER | BLAST RADIUS: ${r.topology.inDegree} dependents | ${alert}]${depsStr}\n`;
             } else if (r.topology.isBlastRadius) {
-                sensoryTag = `// [COUPLED CONSUMER | Affected by changes to search target]\n`;
+                sensoryTag = `${commentPrefix} [COUPLED CONSUMER | Affected by changes to search target]\n`;
             } else if (r.topology.inDegree > 0) {
-                sensoryTag = `// [DEPENDENCIES: ${r.topology.inDegree} files rely on this]\n`;
+                sensoryTag = `${commentPrefix} [DEPENDENCIES: ${r.topology.inDegree} files rely on this]\n`;
             }
         }
-
-        // LANGUAGE HINT: Dynamic syntax highlighting for Markdown renderers
-        let lang = path.extname(r.path).slice(1).toLowerCase();
-        if (['ts', 'tsx', 'mts', 'cts'].includes(lang)) lang = 'typescript';
-        else if (['js', 'jsx', 'mjs', 'cjs'].includes(lang)) lang = 'javascript';
-        else if (lang === 'py') lang = 'python';
-        else if (!lang) lang = 'typescript';
 
         const shorthand = `\`\`\`${lang}\n${sensoryTag}${r.shorthand}\n\`\`\``;
 
@@ -483,34 +491,33 @@ async function handleSearch(
     });
 
     // Estimate: grep would read entire files, not just matched functions.
-    // Count each unique file's raw code once (conservative estimate).
     const seenFiles = new Set<string>();
     let grepEstimate = 0;
     for (const r of results) {
         if (!seenFiles.has(r.path)) {
             seenFiles.add(r.path);
-            // Estimate full file as ~5x the matched chunk (conservative)
             grepEstimate += Embedder.estimateTokens(r.rawCode) * 5;
         }
     }
 
     // TOKEN ESTIMATION: Measures the EXACT final payload sent to the LLM.
-    // Previous version only counted r.shorthand, silently ignoring rawSection,
-    // sensoryTags, headers, and score lines. This caused phantom billing where
-    // include_raw=true injected thousands of untracked tokens into the context window.
-    const finalPayload = formatted.join("\n\n");
-    const searchTokens = Embedder.estimateTokens(finalPayload);
+    // Counts headers + shorthand + sensoryTags + rawSections — everything.
+    // Excludes the "[NREKI saved...]" footer to avoid counting our own metadata.
+    const resultText = `## NREKI Search: "${query}"\n` +
+        `Found ${results.length} results across ${new Set(results.map(r => r.path)).size} files.\n\n` +
+        formatted.join("\n\n");
+
+    const searchTokens = Embedder.estimateTokens(resultText);
     const saved = Math.max(0, grepEstimate - searchTokens);
+
+    const finalText = resultText + `\n\n[NREKI saved ~${saved.toLocaleString()} tokens on this query (estimated)]`;
+
     engine.logUsage("nreki_search", searchTokens, searchTokens, saved);
 
     return {
         content: [{
             type: "text" as const,
-            text:
-                `## NREKI Search: "${query}"\n` +
-                `Found ${results.length} results across ${new Set(results.map(r => r.path)).size} files.\n\n` +
-                formatted.join("\n\n") +
-                `\n\n[NREKI saved ~${saved.toLocaleString()} tokens on this query (estimated)]`,
+            text: finalText,
         }],
     };
 }
