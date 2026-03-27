@@ -15,6 +15,8 @@
  * @author Jherson Eddie Tintaya Holguin (Ruso-0)
  */
 
+import * as ts from "typescript";
+import * as path from "path";
 import type {
     LanguageBackend,
     BackendCapabilities,
@@ -30,9 +32,45 @@ export class TypeScriptStradaBackend implements LanguageBackend {
         supportsTTRD: true,
     };
 
+    // ─── Compiler State (owned by backend, referenced by kernel) ───
+    public compilerOptions!: ts.CompilerOptions;
+    public rootNames!: Set<string>;
+    public tsBuildInfoPath!: string;
+
+    // POSIX normalization (duplicated from kernel — 1 line, no shared dependency needed)
+    private toPosix(p: string): string {
+        return path.normalize(p).replace(/\\/g, "/");
+    }
+
+    /**
+     * Read tsconfig.json and initialize compilerOptions + rootNames.
+     * Extracted from NrekiKernel.initConfig().
+     *
+     * Called by kernel.boot() and kernel.rollbackAll().
+     * The kernel copies references after this call.
+     */
+    public initConfig(projectRoot: string): void {
+        const configPath = ts.findConfigFile(projectRoot, ts.sys.fileExists, "tsconfig.json");
+        if (!configPath) throw new Error("[NREKI] Config error: tsconfig.json not found.");
+        const parsed = ts.parseJsonConfigFileContent(
+            ts.readConfigFile(configPath, ts.sys.readFile).config, ts.sys, projectRoot
+        );
+        this.compilerOptions = parsed.options;
+        this.rootNames = new Set(
+            parsed.fileNames.map((f) => this.toPosix(path.resolve(projectRoot, f)))
+        );
+
+        // Incremental cache: set tsBuildInfoFile so TS knows where to read/write
+        const nrekiDir = path.join(projectRoot, ".nreki");
+        this.tsBuildInfoPath = this.toPosix(path.join(nrekiDir, "cache.tsbuildinfo"));
+        this.compilerOptions.tsBuildInfoFile = this.tsBuildInfoPath;
+        this.compilerOptions.incremental = true;
+    }
+
     async boot(_workspacePath: string, _mode: "file" | "project" | "hologram"): Promise<void> {
-        // STUB: Real boot logic lives in NrekiKernel.boot() for now.
-        // Phase 2+ will extract CompilerHost creation here.
+        // STUB: Boot is still orchestrated by NrekiKernel.boot().
+        // initConfig() is called explicitly by the kernel, not from here.
+        // Phase 2+ will move the full boot sequence here.
     }
 
     async applyVirtualEdits(_edits: Array<{ filePath: string; content: string | null }>): Promise<void> {

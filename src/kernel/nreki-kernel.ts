@@ -154,6 +154,10 @@ export class NrekiKernel {
     // in NrekiKernel methods. In Phase 2+, logic will be extracted
     // from the kernel into the backend, one method at a time.
     private backend: LanguageBackend = new TypeScriptStradaBackend();
+    /** Typed accessor for the TypeScript backend during Strangler Fig migration. */
+    private get tsBackend(): TypeScriptStradaBackend {
+        return this.backend as TypeScriptStradaBackend;
+    }
 
     // Performance Modes
     public mode: "file" | "project" | "hologram" = "project";
@@ -195,23 +199,14 @@ export class NrekiKernel {
         return false;
     }
 
-    // DRY: Config loading used by boot() and rollbackAll()
+    // DRY: Config loading delegated to backend (Strangler Fig Phase 2A).
+    // Kernel copies references after the call. All 32 usages of this.rootNames
+    // and 13 usages of this.compilerOptions continue working unchanged.
     private initConfig(): void {
-        const configPath = ts.findConfigFile(this.projectRoot, ts.sys.fileExists, "tsconfig.json");
-        if (!configPath) throw new Error("[NREKI] Config error: tsconfig.json not found.");
-        const parsed = ts.parseJsonConfigFileContent(
-            ts.readConfigFile(configPath, ts.sys.readFile).config, ts.sys, this.projectRoot
-        );
-        this.compilerOptions = parsed.options;
-        this.rootNames = new Set(
-            parsed.fileNames.map((f) => this.toPosix(path.resolve(this.projectRoot, f)))
-        );
-
-        // Incremental cache: set tsBuildInfoFile so TS knows where to read/write
-        const nrekiDir = path.join(this.projectRoot, ".nreki");
-        this.tsBuildInfoPath = this.toPosix(path.join(nrekiDir, "cache.tsbuildinfo"));
-        this.compilerOptions.tsBuildInfoFile = this.tsBuildInfoPath;
-        this.compilerOptions.incremental = true;
+        this.tsBackend.initConfig(this.projectRoot);
+        this.compilerOptions = this.tsBackend.compilerOptions;
+        this.rootNames = this.tsBackend.rootNames;
+        this.tsBuildInfoPath = this.tsBackend.tsBuildInfoPath;
     }
 
     /** Validate cache against current TS version. Returns true if cache is usable. */
