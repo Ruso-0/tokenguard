@@ -1,202 +1,349 @@
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as readline from 'readline';
 import { ASTParser } from '../src/parser.js';
 import { generateRepoMap, computePageRank } from '../src/repo-map.js';
 import { SpectralMath, SparseEdge } from '../src/kernel/spectral-topology.js';
 
 /**
- * Chronos Miner v2 — Indestructible Temporal Dataset Extractor
- *
- * Uses Tree-sitter (Layer 1) instead of TypeScript Compiler (Layer 2).
- * Zero node_modules. Zero tsconfig. Mines ANY TypeScript/JavaScript repo.
- *
- * Features per node: [PageRank, ChurnVelocity, v2_signed, |v2|, v3_signed, |v3|]
- * Ground Truth: Lookahead Window T+5 with causal overlap + architectural dispersion
- *
- * Usage: npx tsx scripts/chronos-miner.ts <repo-url>
- * Output: <repo-name>_stgt_dataset.jsonl
- *
- * @author Jherson Eddie Tintaya Holguin (Ruso-0)
+ * NREKI Chronos Miner v6 — The Immortal Tectonic Oracle
+ * 
+ * Crash-Only Architecture. Zero WASM memory leaks. 15s Kill Switch.
+ * Features: Robust Log-MAD Z-Score, Spatial Shannon Entropy, 
+ * Strict Decay-Then-Add Churn Memory, and Log1p Spectral Gaps.
+ * 
+ * @author Jherson Eddie Tintaya Holguin (Ruso-0) Estudio al borde
  */
 
-export async function mineIndestructibleHistory(repoUrl: string, worktreeName: string = 'nreki-miner-wt') {
+const BATCH_LIMIT = 300;
+const LOOKAHEAD_WINDOW = 5;
+
+class ImmortalityDrive {
+    private stateFile: string;
+    public recentLogSizes: number[] = [];
+    public fileChurn: Map<string, number> = new Map();
+    public slidingWindow: any[] = [];
+    
+    private readonly MAD_WINDOW = 500;
+
+    constructor(repoName: string) {
+        this.stateFile = path.resolve(process.cwd(), `${repoName}_immortality_drive.json`);
+    }
+
+    public load() {
+        if (fs.existsSync(this.stateFile)) {
+            try {
+                const data = JSON.parse(fs.readFileSync(this.stateFile, 'utf-8'));
+                this.recentLogSizes = data.recentLogSizes || [];
+                this.fileChurn = new Map(Object.entries(data.fileChurn || {}));
+                
+                // BUG MEDIO 3 FIX: Deserialize Sets safely from Arrays
+                this.slidingWindow = (data.slidingWindow || []).map((snap: any) => ({
+                    ...snap,
+                    _filesTouched: new Set(snap._filesTouched)
+                }));
+            } catch {
+                console.error("[IMMORTALITY] State corrupted. Starting fresh.");
+            }
+        }
+    }
+
+    public save() {
+        // BUG MEDIO 3 FIX: Serialize Sets to Arrays
+        const safeWindow = this.slidingWindow.map(snap => ({
+            ...snap,
+            _filesTouched: Array.from(snap._filesTouched)
+        }));
+
+        const data = {
+            recentLogSizes: this.recentLogSizes,
+            fileChurn: Object.fromEntries(this.fileChurn),
+            slidingWindow: safeWindow
+        };
+        
+        // Atomic write prevents corruption if OS kills process during write
+        const tmp = `${this.stateFile}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, this.stateFile);
+    }
+
+    public cleanup() {
+        // BUG MENOR FIX: Cleanup with safe fs.unlinkSync (No bracket notation)
+        if (fs.existsSync(this.stateFile)) fs.unlinkSync(this.stateFile);
+    }
+
+    public updateChurn(files: string[]) {
+        // BUG MEDIO 2 FIX: Decay ALL existing churn BEFORE adding new impulse.
+        for (const key of this.fileChurn.keys()) {
+            const decayed = this.fileChurn.get(key)! * 0.95;
+            if (decayed < 0.01) this.fileChurn.delete(key);
+            else this.fileChurn.set(key, decayed);
+        }
+        // Add impulse to current files (they start at exactly 1.0 if new)
+        for (const f of files) {
+            this.fileChurn.set(f, (this.fileChurn.get(f) || 0) + 1.0);
+        }
+    }
+
+    public evaluateTectonicShift(files: string[]): { isShotgun: boolean; entropy: number; robustZ: number } {
+        const F = files.length;
+        if (F === 0) return { isShotgun: false, entropy: 0, robustZ: 0 };
+
+        const dirCounts = new Map<string, number>();
+        for (const f of files) {
+            const dir = path.dirname(f);
+            dirCounts.set(dir, (dirCounts.get(dir) || 0) + 1);
+        }
+        let entropy = 0;
+        for (const count of dirCounts.values()) {
+            const p = count / F;
+            entropy -= p * Math.log2(p);
+        }
+
+        const logF = Math.log(F);
+        this.recentLogSizes.push(logF);
+        if (this.recentLogSizes.length > this.MAD_WINDOW) this.recentLogSizes.shift();
+
+        if (this.recentLogSizes.length < 10) return { isShotgun: false, entropy, robustZ: 0 };
+
+        const sorted = [...this.recentLogSizes].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+        const deviations = sorted.map(x => Math.abs(x - median)).sort((a, b) => a - b);
+        const mad = deviations[Math.floor(deviations.length / 2)];
+
+        const robustZ = mad > 0 ? (0.6745 * (logF - median)) / mad : 0;
+        const isShotgun = robustZ > 3.0 && entropy > 1.5 && F >= 5;
+
+        return { isShotgun, entropy, robustZ };
+    }
+}
+
+export async function mineIndestructibleHistory(repoUrl: string) {
     const repoName = repoUrl.split('/').pop()!.replace('.git', '');
     const cloneDir = path.resolve(`/tmp/nreki-bare-${repoName}`);
-    const wtPath = path.resolve(`/tmp/${worktreeName}`);
+    // BUG CRÍTICO 5 FIX: Match exacto con el bash orquestador
+    const wtPath = path.resolve(`/tmp/nreki-wt-${repoName}`); 
     const outputFile = path.resolve(process.cwd(), `${repoName}_stgt_dataset.jsonl`);
 
     console.log(`[MINER] Repository: ${repoName}`);
-    console.log(`[MINER] Bare clone: ${cloneDir}`);
-    console.log(`[MINER] Output: ${outputFile}`);
 
     if (!fs.existsSync(cloneDir)) {
         console.log('[MINER] Cloning bare...');
         execSync(`git clone --bare ${repoUrl} ${cloneDir}`, { stdio: 'inherit' });
     }
 
-    // RESUMABLE MINING: skip already-processed commits
+    const drive = new ImmortalityDrive(repoName);
+    drive.load();
+
     const processedCommits = new Set<string>();
+    let historicalLines = 0;
+    let historicalPositives = 0;
+
     if (fs.existsSync(outputFile)) {
-        const lines = fs.readFileSync(outputFile, 'utf-8').split('\n').filter(Boolean);
-        lines.forEach(l => { try { processedCommits.add(JSON.parse(l).commit); } catch {} });
-        console.log(`[MINER] Resuming... Skipping ${processedCommits.size} commits.`);
+        const rl = readline.createInterface({ input: fs.createReadStream(outputFile), crlfDelay: Infinity });
+        for await (const line of rl) {
+            if (!line.trim()) continue;
+            historicalLines++;
+            try {
+                const parsed = JSON.parse(line);
+                processedCommits.add(parsed.commit);
+                if (parsed.target_future_collapse === 1) historicalPositives++;
+            } catch {}
+        }
+        console.log(`[MINER] Resuming... Loaded ${historicalLines} samples (${historicalPositives} positive).`);
     }
 
-    const logRaw = execSync('git log --format="%H|%s" --reverse -n 5000', { cwd: cloneDir, maxBuffer: 100 * 1024 * 1024 })
-        .toString().trim().split('\n').filter(Boolean);
+    // BUG MEDIO 4 FIX: Ensure sliding window hashes are marked as processed so they aren't re-mined
+    for (const snap of drive.slidingWindow) {
+        processedCommits.add(snap.commit);
+    }
 
-    const rawSnapshots: any[] = [];
-    const fileChurn = new Map<string, number>();
+    // BUG CRÍTICO 1 & 4 FIX: NO --reverse in git log. Fetch 5000 newest, then .reverse() in JS.
+    const logRaw = execSync('git log --format="%H|%s" -n 5000', { cwd: cloneDir, maxBuffer: 100 * 1024 * 1024 })
+        .toString().trim().split('\n').filter(Boolean).reverse();
 
-    // Initialize Layer 1 (Tree-sitter — zero node_modules, multi-language)
     const parser = new ASTParser();
     await parser.initialize();
 
-    console.log(`[MINER] Mining ${logRaw.length} commits using Layer 1 AST Topology...`);
+    console.log(`[MINER] Executing Crash-Only Tectonic Mining on ${logRaw.length} commits...`);
 
-    // ─── PHASE 1: INDESTRUCTIBLE TOPOLOGICAL EXTRACTION ───
-    for (let i = 1; i < logRaw.length; i++) {
-        if (!logRaw[i]) continue;
+    let extractedThisRun = 0;
+    let newPositives = 0;
+
+    for (let i = 0; i < logRaw.length; i++) {
         const [hash, ...msgParts] = logRaw[i].split('|');
-        const msg = msgParts.join('|').toLowerCase();
-
-        // Anti-Mechanical-Noise filter
-        const isRefactor = /refactor|rename|format|lint|prettier|chore/i.test(msg);
-
-        // Extract code-only diff
-        let codeFilesChanged: string[] = [];
-        try {
-            const diffRaw = execSync(`git diff --name-only ${logRaw[i - 1].split('|')[0]} ${hash}`, { cwd: cloneDir, maxBuffer: 50 * 1024 * 1024 })
-                .toString().trim().split('\n');
-            codeFilesChanged = diffRaw.filter(f => /\.(ts|tsx|js|jsx)$/i.test(f) && !f.includes('.test.') && !f.includes('.spec.'));
-        } catch { continue; }
-
-        // Kinetic Churn decay ALWAYS computed to maintain inertia
-        for (const f of codeFilesChanged) fileChurn.set(f, (fileChurn.get(f) || 0) + 1);
-        for (const key of fileChurn.keys()) fileChurn.set(key, fileChurn.get(key)! * 0.95);
-
+        
         if (processedCommits.has(hash)) continue;
 
-        if (fs.existsSync(wtPath)) fs.rmSync(wtPath, { recursive: true, force: true });
+        const msg = msgParts.join('|').toLowerCase();
+        
+        // BUG 4 FIX: Tightened Refactor regex to cosmetic changes only
+        const isCosmetic = /\b(format|lint|prettier|style|docs|typo)\b/i.test(msg);
+        // BUG 3 FIX: Added undo and rollback semantic reverts
+        const isRevert = /\b(revert|undo|rollback|hotfix)\b/i.test(msg) || msg.includes('this reverts commit');
+
+        let allFilesChanged: string[] = [];
         try {
-            execSync(`git worktree add --detach ${wtPath} ${hash}`, { cwd: cloneDir, stdio: 'ignore' });
+            // Usa diff-tree para no depender del commit padre y manejar merge commits
+            const diffRaw = execSync(`git diff-tree --no-commit-id --name-only -r ${hash}`, { cwd: cloneDir, maxBuffer: 50 * 1024 * 1024 })
+                .toString().trim().split('\n');
+            allFilesChanged = diffRaw.filter(Boolean);
         } catch { continue; }
 
+        // BUG MEDIO 1 FIX: Physics never stops. Update churn and evaluate BEFORE skip.
+        // Se cuenta TODO el commit (incluso si son markdowns) para la entropía del oráculo.
+        drive.updateChurn(allFilesChanged);
+        const analysis = drive.evaluateTectonicShift(allFilesChanged);
+
+        // Extraer los archivos útiles para el AST
+        const codeFilesChanged = allFilesChanged.filter(f => 
+            /\.(ts|tsx|js|jsx)$/i.test(f) && 
+            !f.endsWith('.d.ts') && // BUG CRÍTICO 1 FIX: Filtro estricto de declaraciones
+            !f.includes('.test.') && 
+            !f.includes('.spec.')
+        );
+
+        // BUG CRÍTICO 2 FIX: Skip empty TS commits AFTER physics update
+        if (codeFilesChanged.length === 0) continue;
+
+        // BUG CRÍTICO 2 & 3 FIX: Cero fs.rmSync. Cero rm -rf. Uso puro de Git API.
+        try { execSync(`git worktree remove --force ${wtPath} 2>/dev/null`, { cwd: cloneDir, stdio: 'ignore' }); } catch {}
+        
         try {
-            // THE FERRARI: Extract graph in O(files) WITHOUT the TS Compiler
-            const repoMap = await generateRepoMap(wtPath, parser);
-            if (!repoMap.graph || repoMap.entries.length < 2) continue;
+            execSync(`git worktree add --detach ${wtPath} ${hash}`, { cwd: cloneDir, stdio: 'ignore' });
+            
+            // BUG MENOR 1 FIX: Kill Switch 15s con clearTimeout
+            let killTimer: NodeJS.Timeout | undefined;
 
-            const nodeIndex = new Map<string, number>();
-            repoMap.entries.forEach((entry, idx) => nodeIndex.set(entry.filePath, idx));
-            const N = nodeIndex.size;
+            const topologyTask = async () => {
+                const repoMap = await generateRepoMap(wtPath, parser);
+                if (!repoMap.graph || repoMap.entries.length < 2) throw new Error("INSUFFICIENT_GRAPH");
 
-            const sparseEdges: SparseEdge[] = [];
-            for (const [targetFile, consumers] of repoMap.graph.importedBy.entries()) {
-                const targetIdx = nodeIndex.get(targetFile);
-                if (targetIdx === undefined) continue;
-                for (const consumer of consumers) {
-                    const consumerIdx = nodeIndex.get(consumer);
-                    if (consumerIdx !== undefined && consumerIdx !== targetIdx) {
-                        sparseEdges.push({ u: consumerIdx, v: targetIdx, weight: 1.0 });
+                const nodeIndex = new Map<string, number>();
+                repoMap.entries.forEach((entry, idx) => nodeIndex.set(entry.filePath, idx));
+                const N = nodeIndex.size;
+
+                const sparseEdges: SparseEdge[] = [];
+                for (const [targetFile, consumers] of repoMap.graph.importedBy.entries()) {
+                    const targetIdx = nodeIndex.get(targetFile);
+                    if (targetIdx === undefined) continue;
+                    for (const consumer of consumers) {
+                        const consumerIdx = nodeIndex.get(consumer);
+                        if (consumerIdx !== undefined && consumerIdx !== targetIdx) {
+                            sparseEdges.push({ u: consumerIdx, v: targetIdx, weight: 1.0 });
+                        }
                     }
                 }
-            }
+                
+                if (N <= 1 || sparseEdges.length === 0) throw new Error("NO_EDGES");
 
-            if (N > 1 && sparseEdges.length > 0) {
                 const state = SpectralMath.analyzeTopology(N, sparseEdges);
                 const density = sparseEdges.length / (N * (N - 1));
+                const prScores = computePageRank(repoMap.entries.map(e => e.filePath), repoMap.graph.importedBy);
+                
+                return { N, density, state, prScores, nodeIndex };
+            };
 
-                // MASS: Reuse the PageRank engine from repo-map
-                const prScores = computePageRank(
-                    repoMap.entries.map(e => e.filePath),
-                    repoMap.graph.importedBy
-                );
+            const timeoutTask = new Promise<never>((_, reject) => {
+                killTimer = setTimeout(() => reject(new Error("AST_TIMEOUT_15S")), 15000);
+            });
 
-                // ARCHITECTURAL DISPERSION: real bleeding, not volume
-                const dirsTouched = new Set(codeFilesChanged.map(f => path.dirname(f)));
+            let topo: any;
+            try {
+                topo = await Promise.race([topologyTask(), timeoutTask]);
+            } finally {
+                if (killTimer) clearTimeout(killTimer);
+            }
+            
+            // BUG MEDIO 5 FIX: Log-compression of Spectral Gap against explosion
+            const gap = (topo.state.lambda3 ?? 0) - topo.state.fiedler;
+            const safe_density = Math.max(topo.density, 1e-9);
+            const normalizedGap = Math.sign(gap) * Math.log1p(Math.abs(gap / safe_density));
 
-                rawSnapshots.push({
-                    commit: hash,
-                    features: {
-                        N,
-                        density,
-                        normalized_gap: density > 0 ? ((state.lambda3 ?? 0) - state.fiedler) / density : 0,
-                        nodes: Array.from(nodeIndex.entries()).map(([filePath, idx]) => ({
-                            id: filePath,
-                            v2_signed: state.v2 ? state.v2[idx] : 0,
-                            v2_abs: state.v2 ? Math.abs(state.v2[idx]) : 0,
-                            v3_signed: state.v3 ? state.v3[idx] : 0,
-                            v3_abs: state.v3 ? Math.abs(state.v3[idx]) : 0,
-                            pr: prScores.get(filePath) || 0,
-                            churn: fileChurn.get(filePath) || 0,
-                        })),
-                    },
-                    _isRevert: msg.startsWith('revert ') || msg.includes('this reverts commit') || msg.includes('hotfix'),
-                    _isShotgun: codeFilesChanged.length >= 8 && dirsTouched.size >= 4,
-                    _isRefactor: isRefactor,
-                    _filesTouched: new Set(codeFilesChanged),
-                });
+            drive.slidingWindow.push({
+                commit: hash,
+                features: {
+                    N: topo.N,
+                    density: topo.density,
+                    spatial_entropy: parseFloat(analysis.entropy.toFixed(4)),
+                    robust_z: parseFloat(analysis.robustZ.toFixed(4)),
+                    normalized_gap: parseFloat(normalizedGap.toFixed(6)),
+                    nodes: Array.from(topo.nodeIndex.entries()).map(([filePath, idx]) => ({
+                        id: filePath,
+                        v2_signed: topo.state.v2 ? topo.state.v2[idx] : 0,
+                        v2_abs: topo.state.v2 ? Math.abs(topo.state.v2[idx]) : 0,
+                        v3_signed: topo.state.v3 ? topo.state.v3[idx] : 0,
+                        v3_abs: topo.state.v3 ? Math.abs(topo.state.v3[idx]) : 0,
+                        pr: topo.prScores.get(filePath) || 0, // YA NORMALIZADO 0-1 EN REPO-MAP
+                        churn: drive.fileChurn.get(filePath) || 0,
+                    })),
+                },
+                _isRevert: isRevert,
+                _isShotgun: analysis.isShotgun,
+                _isCosmetic: isCosmetic,
+                _filesTouched: new Set(allFilesChanged),
+            });
 
-                if (rawSnapshots.length % 25 === 0) {
-                    console.log(`[MINER] Progress: ${i}/${logRaw.length} (${rawSnapshots.length} extracted)`);
+            if (drive.slidingWindow.length > LOOKAHEAD_WINDOW) {
+                const target = drive.slidingWindow.shift()!;
+                let futureCollapse = 0;
+
+                for (const future of drive.slidingWindow) {
+                    if ((future._isRevert || future._isShotgun) && !future._isCosmetic) {
+                        const overlap = [...target._filesTouched].some((f: string) => future._filesTouched.has(f));
+                        if (overlap) {
+                            futureCollapse = 1;
+                            break;
+                        }
+                    }
+                }
+
+                fs.appendFileSync(outputFile, JSON.stringify({
+                    commit: target.commit,
+                    features: target.features,
+                    target_future_collapse: futureCollapse,
+                }) + '\n');
+                
+                extractedThisRun++;
+                if (futureCollapse) newPositives++;
+
+                if (extractedThisRun % 25 === 0) {
+                    console.log(`[MINER] Securely appended ${extractedThisRun} samples. Memory safe.`);
+                }
+
+                if (extractedThisRun >= BATCH_LIMIT) {
+                    console.log(`\n[NREKI] 💀 BATCH LIMIT (${BATCH_LIMIT}). Persisting Oracle and exiting to clear WASM RAM.`);
+                    drive.save(); // SERIALIZACIÓN OBLIGATORIA DE LA VENTANA
+                    try { execSync(`git worktree remove --force ${wtPath}`, { cwd: cloneDir, stdio: 'ignore' }); } catch {}
+                    process.exit(0); 
                 }
             }
-        } catch {
-            // Silent skip — commit may have broken tree-sitter parseable files
+        } catch (err: any) {
+            if (err.message === "AST_TIMEOUT_15S") {
+                console.log(`[MINER] ⚠️ Kill Switch activated on commit ${hash}. Deadlock averted.`);
+            }
+            // Silencioso para otros errores del AST, avanzamos.
         } finally {
-            try { execSync(`git worktree remove --force ${wtPath}`, { cwd: cloneDir, stdio: 'ignore' }); } catch {}
+            try { execSync(`git worktree remove --force ${wtPath} 2>/dev/null`, { cwd: cloneDir, stdio: 'ignore' }); } catch {}
         }
     }
 
-    console.log(`[MINER] Phase 1 complete: ${rawSnapshots.length} snapshots`);
+    // BUG MEDIO 1 & MENOR 2 FIX: No drain final. "Pureza > Volumen". Los últimos commits mueren dignamente.
+    // Guardamos el estado final en disco. El próximo batch continuará justo desde la ventana.
+    drive.save(); 
+    
+    // Si realmente logramos consumir TODO el repositorio (no quedan más commits logRaw)
+    drive.cleanup();
 
-    // ─── PHASE 2: TEMPORAL ORACLE (Lookahead Ground Truth — Zero Leakage) ───
-    const LOOKAHEAD_WINDOW = 5;
+    const totalLines = historicalLines + extractedThisRun;
+    const totalPositives = historicalPositives + newPositives;
+    const pct = totalLines > 0 ? ((totalPositives / totalLines) * 100).toFixed(1) : '0';
 
-    let labeled = 0;
-    let positives = 0;
-
-    for (let t = 0; t < rawSnapshots.length - LOOKAHEAD_WINDOW; t++) {
-        const current = rawSnapshots[t];
-        let futureCollapse = 0;
-
-        for (let k = 1; k <= LOOKAHEAD_WINDOW; k++) {
-            const future = rawSnapshots[t + k];
-            if ((future._isRevert || future._isShotgun) && !future._isRefactor) {
-                const overlap = [...current._filesTouched].some((f: string) => future._filesTouched.has(f));
-                if (overlap) {
-                    futureCollapse = 1;
-                    break;
-                }
-            }
-        }
-
-        const finalData = {
-            commit: current.commit,
-            features: current.features,
-            target_future_collapse: futureCollapse,
-        };
-
-        fs.appendFileSync(outputFile, JSON.stringify(finalData) + '\n');
-        labeled++;
-        if (futureCollapse) positives++;
-    }
-
-    const pct = labeled > 0 ? (positives / labeled * 100).toFixed(1) : '0';
-    console.log(`[MINER] Phase 2 complete: ${labeled} labeled samples`);
-    console.log(`[MINER] Class balance: ${positives} positive (${pct}%), ${labeled - positives} negative`);
-    console.log(`[MINER] Dataset saved to ${outputFile}`);
+    console.log(`\n[MINER] 🎉 Dataset 100% complete! Global samples: ${totalLines} (${pct}% positive)`);
+    process.exit(42);
 }
 
-// ─── CLI ──────────────────────────────────────────────────────────
 const repoUrl = process.argv[2];
-if (!repoUrl) {
-    console.error('Usage: npx tsx scripts/chronos-miner.ts <repo-url>');
-    process.exit(1);
-}
-mineIndestructibleHistory(repoUrl).catch(err => {
-    console.error(`[MINER] Fatal: ${err.message}`);
-    process.exit(1);
-});
+if (!repoUrl) { console.error('Usage: npx tsx scripts/chronos-miner.ts <repo-url>'); process.exit(1); }
+mineIndestructibleHistory(repoUrl).catch(err => { console.error(`[MINER] Fatal: ${err.message}`); process.exit(1); });
