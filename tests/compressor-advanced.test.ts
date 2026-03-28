@@ -18,7 +18,7 @@ import {
     scoreTokens,
     filterTokens,
     type CompressionLevel,
-} from "../src/compressor-advanced.js";
+} from "../src/compressor.js";
 import { ASTParser } from "../src/parser.js";
 import { Embedder } from "../src/embedder.js";
 

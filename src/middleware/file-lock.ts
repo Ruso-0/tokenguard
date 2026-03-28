@@ -31,9 +31,14 @@ const LOCK_TIMEOUT_MS = 300_000;
 
 function normalizeLockKey(filePath: string): string {
     const resolved = path.resolve(filePath).replace(/\\/g, "/");
-    // AUDIT FIX: Only Win32 guarantees case-insensitivity (NTFS).
-    // macOS APFS supports case-sensitive volumes — don't assume.
-    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    // PATCH-9: macOS APFS is case-insensitive by default (like NTFS).
+    // Case-sensitive APFS volumes are opt-in and rare (<5% of Macs).
+    // Without this, concurrent edits to "App.ts" and "app.ts" get separate
+    // locks on macOS, causing file corruption.
+    // On the rare case-sensitive APFS volume, this is a false-positive lock
+    // collision (safe — just blocks the second edit until the first finishes).
+    const isCaseInsensitive = process.platform === "win32" || process.platform === "darwin";
+    return isCaseInsensitive ? resolved.toLowerCase() : resolved;
 }
 
 // ─── Public API ──────────────────────────────────────────────────────

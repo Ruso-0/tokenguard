@@ -110,11 +110,14 @@ export function extractDependencies(code: string, ext: string): ImportDependency
         }
     } else if (ext === ".py") {
         // ── Python: from app.core.auth import validate as check_auth ──
-        const pyFromRe = /^from\s+([a-zA-Z0-9_.]+)\s+import\s+([^#\n]+)/gm;
+        // Support single-line and parenthesized multi-line imports:
+        // from foo import (bar, baz)
+        const pyFromRe = /^from\s+([a-zA-Z0-9_.]+)\s+import\s+(?:\(([^)]*)\)|([^#\n]+))/gm;
         let match;
         while ((match = pyFromRe.exec(code)) !== null) {
             const pathHint = match[1].split(".").pop() || match[1];
-            for (const s of match[2].split(",")) {
+            const importList = (match[2] || match[3] || "").replace(/\\\n/g, " ");
+            for (const s of importList.split(",")) {
                 if (!s.trim()) continue;
                 const parts = s.trim().split(/\s+as\s+/);
                 const symbol = parts[0].trim();
@@ -140,8 +143,9 @@ export function extractDependencies(code: string, ext: string): ImportDependency
                 while ((m = lineRe.exec(inner)) !== null) {
                     const alias = m[1];
                     const fullPath = m[2];
-                    // Skip Go stdlib (no slash, no dot)
-                    if (!fullPath.includes("/") && !fullPath.includes(".")) continue;
+                    // Skip Go stdlib (no slash, no dot) — single-word packages with
+                    // a dot (e.g. "go.uber.org") or slash are third-party, keep them
+                    if (!fullPath.includes("/") && !fullPath.includes(".") && fullPath.length < 15) continue;
 
                     const pathHint = fullPath.split("/").pop() || fullPath;
                     const localName = alias || pathHint;

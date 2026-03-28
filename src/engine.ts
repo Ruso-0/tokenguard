@@ -21,10 +21,11 @@ import { NrekiDB } from "./database.js";
 import { Embedder, getEmbedder } from "./embedder.js";
 import { ASTParser, type ParseResult } from "./parser.js";
 import { Compressor, type CompressionResult } from "./compressor.js";
-import { AdvancedCompressor, type CompressionLevel, type AdvancedCompressionResult } from "./compressor-advanced.js";
+import { AdvancedCompressor, type CompressionLevel, type AdvancedCompressionResult } from "./compressor.js";
 import { shouldProcess } from "./utils/file-filter.js";
 import { readSource } from "./utils/read-source.js";
 import { getOrGenerateRepoMap, type RepoMap, type DependencyGraph } from "./repo-map.js";
+import { logger } from "./utils/logger.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -364,8 +365,8 @@ export class NrekiEngine {
                     skipped++;
                 }
             } catch (err) {
-                console.error(
-                    `[NREKI] Error indexing ${file}: ${(err as Error).message}`
+                logger.error(
+                    `Error indexing ${file}: ${(err as Error).message}`
                 );
                 errors++;
             }
@@ -779,8 +780,8 @@ export class NrekiEngine {
                     const res = await this.indexFile(filePath);
                     if (res) madeChanges = true;
                 } catch (err) {
-                    console.error(
-                        `[NREKI] Queue error for ${filePath}: ${(err as Error).message}`
+                    logger.error(
+                        `Queue error for ${filePath}: ${(err as Error).message}`
                     );
                 }
             }

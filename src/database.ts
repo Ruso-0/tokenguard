@@ -18,6 +18,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { codeTokenize } from "./utils/code-tokenizer.js";
+import { logger } from "./utils/logger.js";
 import { escapeRegExp } from "./utils/imports.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
@@ -93,19 +94,25 @@ function fastSimilarity(a: Float32Array, b: Float32Array): number {
  */
 class VectorIndex {
     private vectors = new Map<number, Float32Array>();
+    private _dirty = false;
+
+    get dirty(): boolean { return this._dirty; }
 
     insert(rowid: number, embedding: Float32Array): void {
         this.vectors.set(rowid, embedding);
+        this._dirty = true;
     }
 
     delete(rowid: number): void {
         this.vectors.delete(rowid);
+        this._dirty = true;
     }
 
     deleteBulk(rowids: number[]): void {
         for (const id of rowids) {
             this.vectors.delete(id);
         }
+        if (rowids.length > 0) this._dirty = true;
     }
 
     search(
@@ -146,6 +153,7 @@ class VectorIndex {
             // AUDIT FIX: Force deep copy to isolate SQLite writes from WASM memory
             chunks.push(Buffer.from(new Uint8Array(vec.buffer, vec.byteOffset, vec.byteLength)));
         }
+        this._dirty = false;
         return Buffer.concat(chunks);
     }
 
@@ -161,14 +169,17 @@ class VectorIndex {
             if (offset + 4 + vecBytes > buf.length) break;
             const rowid = buf.readUInt32LE(offset);
             offset += 4;
-            // FIX: Zero-copy view instead of deep copy. Float32 alignment
-            // is guaranteed because offset advances in 4-byte increments
-            // (header=4, rowid=4). Eliminates 50K+ heap allocations.
-            const vec = new Float32Array(
-                buf.buffer,
-                buf.byteOffset + offset,
-                dim
-            );
+            // Zero-copy when aligned, safe copy when not.
+            // offset always advances in 4-byte increments, but buf.byteOffset
+            // depends on the runtime's Buffer allocator and may not be aligned.
+            const absOffset = buf.byteOffset + offset;
+            let vec: Float32Array;
+            if (absOffset % 4 === 0) {
+                vec = new Float32Array(buf.buffer, absOffset, dim);
+            } else {
+                vec = new Float32Array(dim);
+                new Uint8Array(vec.buffer).set(buf.subarray(offset, offset + vecBytes));
+            }
             index.vectors.set(rowid, vec);
             offset += vecBytes;
         }
@@ -237,13 +248,17 @@ class KeywordIndex {
         return allTerms;
     }
 
-    /**
-     * Porter stemmer - full implementation of the Porter stemming algorithm.
-     * 5 steps with consonant-vowel pattern analysis for accurate English stemming.
-     */
+    /** Stem cache — deterministic function, no reason to recompute. */
+    private stemCache = new Map<string, string>();
+
     private stem(word: string): string {
         if (word.length <= 2) return word;
-        return PorterStemmer.stem(word);
+        let result = this.stemCache.get(word);
+        if (result === undefined) {
+            result = PorterStemmer.stem(word);
+            this.stemCache.set(word, result);
+        }
+        return result;
     }
 
     /** Add a document to the index. */
@@ -397,6 +412,8 @@ export class NrekiDB {
     private db!: SqlJsDatabase;
     private vecIndex = new VectorIndex();
     private kwIndex = new KeywordIndex();
+    /** In-memory identifier index: file path → unique identifiers in that file's raw code. */
+    private rawIdentsByFile = new Map<string, Set<string>>();
     private dbPath: string;
     private vecPath: string;
     private initPromise: Promise<void> | null = null;
@@ -437,8 +454,9 @@ export class NrekiDB {
             this.vecIndex = VectorIndex.deserialize(vecBuffer, storedDim);
         }
 
-        // Rebuild keyword index from existing data
+        // Rebuild in-memory indexes from existing data
         this.rebuildKeywordIndex();
+        this.rebuildRawIdentIndex();
 
         this._ready = true;
     }
@@ -518,6 +536,28 @@ export class NrekiDB {
         }
     }
 
+    /** Rebuild the in-memory raw identifier index from all existing chunks. */
+    private rebuildRawIdentIndex(): void {
+        this.rawIdentsByFile.clear();
+        const stmt = this.db.prepare("SELECT path, raw_code FROM chunks");
+        try {
+            while (stmt.step()) {
+                const row = stmt.getAsObject() as { path: string; raw_code: string };
+                this.addRawIdents(row.path, row.raw_code);
+            }
+        } finally {
+            stmt.free();
+        }
+    }
+
+    /** Extract identifiers from raw code and add to the per-file index. */
+    private addRawIdents(filePath: string, rawCode: string): void {
+        let idents = this.rawIdentsByFile.get(filePath);
+        if (!idents) { idents = new Set(); this.rawIdentsByFile.set(filePath, idents); }
+        const matches = rawCode.match(/[a-zA-Z_$][a-zA-Z0-9_$]*/g);
+        if (matches) for (const m of matches) idents.add(m);
+    }
+
     // ─── Metadata ────────────────────────────────────────────────
 
     /** Read a metadata value by key, or null if not set. */
@@ -551,15 +591,14 @@ export class NrekiDB {
         const storedDim = this.getMetadata("embedding_dim");
 
         if (storedDim && parseInt(storedDim, 10) !== activeDim) {
-            console.error(
-                `[NREKI] Embedding dimension changed (${storedDim} -> ${activeDim}). Clearing index.`
-            );
+            logger.warn(`Embedding dimension changed (${storedDim} -> ${activeDim}). Clearing index.`);
             // Clear all vectors
             this.vecIndex = new VectorIndex();
             // Clear all chunks and files so they get re-indexed
             this.db.run("DELETE FROM chunks");
             this.db.run("DELETE FROM files");
             this.kwIndex = new KeywordIndex();
+            this.rawIdentsByFile.clear();
             this.setMetadata("embedding_dim", String(activeDim));
             return true;
         }
@@ -585,9 +624,11 @@ export class NrekiDB {
         }
         fs.writeFileSync(this.dbPath, buffer);
 
-        // Save vector index
-        const vecData = this.vecIndex.serialize();
-        fs.writeFileSync(this.vecPath, vecData);
+        // Save vector index (skip if unchanged since last persist)
+        if (this.vecIndex.dirty) {
+            const vecData = this.vecIndex.serialize();
+            fs.writeFileSync(this.vecPath, vecData);
+        }
     }
 
     // ─── File Operations ─────────────────────────────────────────
@@ -634,8 +675,12 @@ export class NrekiDB {
         if (ids.length > 0) {
             this.vecIndex.deleteBulk(ids);
             this.kwIndex.deleteBulk(ids);
+            this.rawIdentsByFile.delete(filePath);
             this.db.run("DELETE FROM chunks WHERE path = ?", [filePath]);
         }
+        // PATCH-6: Also remove from files table so fileNeedsUpdate() doesn't
+        // skip re-indexing when the file is recreated with the same content.
+        this.db.run("DELETE FROM files WHERE path = ?", [filePath]);
     }
 
     // ─── Chunk Operations ────────────────────────────────────────
@@ -666,6 +711,7 @@ export class NrekiDB {
             this.vecIndex.insert(rowid, embedding);
         }
         this.kwIndex.insert(rowid, shorthand);
+        this.addRawIdents(filePath, rawCode);
         return rowid;
     }
 
@@ -1085,29 +1131,23 @@ export class NrekiDB {
     }
 
     /**
-     * Scan ALL chunks whose raw_code contains the given symbol name.
+     * Find all files whose raw code contains the given symbol name.
      * Returns distinct file paths. Used by prepare_refactor for 100% coverage.
+     *
+     * Uses the in-memory rawIdentsByFile index (built during insertChunk and
+     * rebuildRawIdentIndex at startup). Substring match on identifiers — same
+     * semantics as the previous LIKE %term% scan but O(unique_idents) instead
+     * of O(total_raw_code_bytes).
      */
     searchRawCode(symbolName: string): string[] {
         if (!this._ready) return [];
-        // C-04 + A-07: Escape backslashes first, then LIKE wildcards
-        const escaped = symbolName.replace(/\\/g, '\\\\').replace(/[%_]/g, '\\$&');
-        // TODO: Migrate to FTS5 or in-memory inverted index for O(1) lookups.
-        // Current LIKE %term% is O(N×M) full table scan. Acceptable for <50K chunks
-        // but trades off native binary dependency (FTS5 may require compilation).
-        const stmt = this.db.prepare(
-            `SELECT DISTINCT path FROM chunks WHERE raw_code LIKE ? ESCAPE '\\'`
-        );
-        try {
-            stmt.bind([`%${escaped}%`]);
-            const paths: string[] = [];
-            while (stmt.step()) {
-                paths.push(stmt.getAsObject().path as string);
-            }
-            return paths;
-        } finally {
-            stmt.free();
+        const results: string[] = [];
+        for (const [filePath, idents] of this.rawIdentsByFile) {
+            // PATCH-2: O(1) Set lookup instead of O(N) iteration with .includes().
+            // Exact match eliminates false positives (e.g. "id" no longer matches "width").
+            if (idents.has(symbolName)) { results.push(filePath); }
         }
+        return results;
     }
 
     close(): void {

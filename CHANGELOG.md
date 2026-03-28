@@ -2,6 +2,23 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## v7.1.2 - 9 Critical Patches
+
+### Fixed
+- **Ghost Deletion** (`nreki-kernel.ts`): `mutatedFiles` now cleaned on rollback — prevents `commitToDisk()` from deleting real files that belonged to failed transactions
+- **searchRawCode exact match** (`database.ts`): Replaced `String.includes()` with `Set.has()` — eliminates false positives (e.g. "id" no longer matches "width") and changes complexity from O(N) to O(1)
+- **Arrow function angleDepth** (`parser.ts`): `=>` operator no longer decrements `angleDepth` below 0 — prevents extracting entire arrow function bodies as "signatures" in the repo map
+- **Circuit Breaker exception visibility** (`circuit-breaker.ts`): `wrapWithCircuitBreaker` now catches handler exceptions via try/catch and converts them to `McpToolResponse` with `isError: true` — breaker is no longer blind to ENOENT loops and timeout cascades
+- **Prompt cache preservation** (`router.ts`): Context Heartbeat now injected AFTER original text for all actions (not just `map`) — preserves Anthropic prefix cache hit rate
+- **clearChunks files table** (`database.ts`): `clearChunks()` now also deletes from `files` table — prevents permanent invisibility when a file is deleted and recreated with the same content
+- **splitParams string-aware** (`shadow-generator.ts`): `splitParams()` now tracks string state (single, double, backtick quotes) — prevents splitting on commas inside string literals that produce broken `.d.ts` output
+- **LSP sidecar listener cleanup** (`lsp-sidecar-base.ts`): `proc.on("error")` handler now removes exit/SIGINT/SIGTERM listeners — prevents `MaxListenersExceededWarning` and memory leak on repeated spawn failures
+- **macOS case-insensitive file lock** (`file-lock.ts`): `normalizeLockKey` now treats `darwin` same as `win32` (lowercase) — prevents file corruption from parallel locks on `App.ts` vs `app.ts` on macOS APFS
+
+### Changed
+- Tests: 696 → 704 (8 new tests for patch coverage)
+- CI: replaced hardcoded `grep "696 passed"` with JSON reporter validation (no more brittle test count checks)
+
 ## v7.0.0 - Software Physics Engine
 
 ### Added
@@ -24,7 +41,7 @@ All notable changes to NREKI will be documented in this file.
 
 ### Changed
 - License changed from MIT to Apache 2.0
-- Tests: 696 tests
+- Tests: 696 tests (→ 704 in v7.1.2)
 - Vitest upgraded from 3.0.7 to 4.1.1
 - `detectMode` now returns "file" mode for 50-200 file projects (correct performance scaling)
 - `isTypeScriptFile` respects `allowJs` config (prevents false errors in strict projects)

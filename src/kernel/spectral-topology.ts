@@ -62,10 +62,10 @@ export class SpectralTopologist {
                 nodes.add(sourceId);
 
                 const findDependencies = (node: ts.Node) => {
-                    // ── PODADO RADICAL O(1) ──────────────────────────────
-                    // Solo necesitamos TypeReferenceNode en firmas y declaraciones.
-                    // Todo valor de ejecución se ignora inmediatamente.
-                    // Esto reduce la exploración de millones de nodos a miles.
+                    // ── RADICAL O(1) PRUNING ──────────────────────────────
+                    // Only TypeReferenceNode in signatures and declarations needed.
+                    // All runtime values are skipped immediately.
+                    // This reduces exploration from millions of nodes to thousands.
                     if (
                         ts.isBlock(node) ||
                         ts.isObjectLiteralExpression(node) ||
@@ -108,17 +108,17 @@ export class SpectralTopologist {
                             }
                         }
 
-                        // Los genéricos SÍ importan: Promise<User> → User es un edge
+                        // Generics DO matter: Promise<User> → User is an edge
                         if (node.typeArguments) node.typeArguments.forEach(findDependencies);
-                        return; // FIN de la rama. No bajamos más.
+                        return; // End of branch. Do not descend further.
                     }
 
-                    // Arrow/function expressions: solo firmas, NO body
+                    // Arrow/function expressions: signatures only, NOT body
                     if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
                         if (node.typeParameters) node.typeParameters.forEach(findDependencies);
                         node.parameters.forEach(findDependencies);
                         if (node.type) findDependencies(node.type);
-                        return; // NO entrar al body
+                        return; // Do NOT enter the body
                     }
 
                     ts.forEachChild(node, findDependencies);
@@ -314,6 +314,16 @@ export class SpectralMath {
     } {
         if (N <= 1) return { fiedler: 0, volume: 0 };
 
+        // Size guard: power iteration is O(N² × 150 iterations).
+        // For N>5000 this could block the event loop for hundreds of ms.
+        // Return a structural estimate instead.
+        if (N > 5000) {
+            let volume = 0;
+            for (const e of edges) volume += e.weight;
+            const avgDegree = (2 * edges.length) / N;
+            return { fiedler: avgDegree * 0.5, volume };
+        }
+
         // --- Edge deduplication (IDÉNTICO AL ORIGINAL - NO TOCAR) ---
         const edgeMap = new Map<number, Map<number, number>>();
 
@@ -388,29 +398,30 @@ export class SpectralMath {
             const v_next = new Float64Array(N);
             let mu = 0;
             let prev_mu = -1;
+            let prevDelta = Infinity;
 
             for (let iter = 0; iter < 150; iter++) {
-                // 1. Deflactar autovector trivial (constante)
+                // 1. Deflate trivial eigenvector (constant)
                 let sum = 0;
                 for (let i = 0; i < N; i++) sum += vec[i];
                 const mean = sum / N;
                 for (let i = 0; i < N; i++) vec[i] -= mean;
 
-                // 2. Ortogonalización Gram-Schmidt contra vectores previos
+                // 2. Gram-Schmidt orthogonalization against previous vectors
                 for (const dv of deflateVectors) {
                     let dot = 0;
                     for (let i = 0; i < N; i++) dot += vec[i] * dv[i];
                     for (let i = 0; i < N; i++) vec[i] -= dot * dv[i];
                 }
 
-                // 3. Normalización L2
+                // 3. L2 normalization
                 let normSq = 0;
                 for (let i = 0; i < N; i++) normSq += vec[i] * vec[i];
                 if (normSq < 1e-18) break;
                 const rNorm = 1.0 / Math.sqrt(normSq);
                 for (let i = 0; i < N; i++) vec[i] *= rNorm;
 
-                // 4. SpMV fusionado: (cI - L)v + Rayleigh Quotient
+                // 4. Fused SpMV: (cI - L)v + Rayleigh Quotient
                 let norm = 0;
                 mu = 0;
                 for (let i = 0; i < N; i++) {
@@ -439,15 +450,19 @@ export class SpectralMath {
                 }
                 for (let i = 0; i < N; i++) vec[i] = v_next[i] / norm;
 
-                if (Math.abs(mu - prev_mu) < 1e-7 && maxVecDiff < 1e-6) break;
+                const delta = Math.abs(mu - prev_mu);
+                if (delta < 1e-7 && maxVecDiff < 1e-6) break;
+                // Divergence guard: if eigenvalue delta is growing instead of shrinking, bail out
+                if (iter > 20 && delta > prevDelta * 2) break;
+                prevDelta = delta;
                 prev_mu = mu;
             }
 
-            // GAUGE FIXING (Canonicalización de Fase)
-            // Lv = λv → si v es autovector, -v también lo es.
-            // Power iteration converge a v o -v arbitrariamente por ruido de coma flotante.
-            // Para que una red neuronal temporal no vea saltos de fase ficticios entre commits,
-            // forzamos orientación determinista: la componente de mayor magnitud es siempre positiva.
+            // GAUGE FIXING (Phase Canonicalization)
+            // Lv = λv → if v is an eigenvector, -v is too.
+            // Power iteration converges to v or -v arbitrarily due to floating-point noise.
+            // To prevent a temporal neural network from seeing fictitious phase jumps between commits,
+            // we force deterministic orientation: the largest-magnitude component is always positive.
             let maxAbs = -1;
             let signMultiplier = 1;
             for (let i = 0; i < N; i++) {
@@ -464,10 +479,10 @@ export class SpectralMath {
             return { val: Math.max(0, c - mu), vec };
         };
 
-        // Extraer λ₂ (Fiedler) — seedModifier=0 preserva comportamiento original
+        // Extract λ₂ (Fiedler) — seedModifier=0 preserves original behavior
         const res2 = powerIteration([], 0);
 
-        // Extraer λ₃ — seedModifier=99991 garantiza subespacio diferente, deflactando v₂
+        // Extract λ₃ — seedModifier=99991 ensures different subspace, deflating v₂
         const res3 = powerIteration([res2.vec], 99991);
 
         return {

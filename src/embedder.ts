@@ -41,6 +41,11 @@ export const MODEL_PRIORITY: ModelSpec[] = [
 
 // ─── Embedder ────────────────────────────────────────────────────────
 
+import { logger } from "./utils/logger.js";
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- @xenova/transformers doesn't export typed pipeline
+type XenovaPipeline = any;
+
 /**
  * Singleton embedding engine with model fallback chain.
  *
@@ -53,14 +58,16 @@ export const MODEL_PRIORITY: ModelSpec[] = [
  * - Singleton pattern: avoids loading model multiple times
  */
 export class Embedder {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- FeatureExtractionPipeline from @xenova/transformers uses Tensor with incompatible DataArray union type
-    private pipeline: any = null; // FeatureExtractionPipeline
+    private pipeline: XenovaPipeline = null;
     private initPromise: Promise<void> | null = null;
     private loadedModel: ModelSpec | null = null;
     private isReady = false;
 
     /** Optional: pin to a specific model, skipping the fallback chain. */
     private pinnedModelId: string | null;
+
+    /** Read-only access to the pinned model ID. */
+    public get modelId(): string | null { return this.pinnedModelId; }
 
     constructor(modelId?: string) {
         this.pinnedModelId = modelId ?? null;
@@ -81,7 +88,7 @@ export class Embedder {
 
     private async _loadModel(): Promise<void> {
         // Dynamic import to avoid loading 32 MB at require-time
-        let pipeline: any;
+        let pipeline: XenovaPipeline;
         try {
             ({ pipeline } = await import("@xenova/transformers"));
         } catch (err) {
@@ -101,7 +108,7 @@ export class Embedder {
             });
             this.loadedModel = spec;
             this.isReady = true;
-            console.error(`[NREKI] Loaded embedding model: ${spec.name} (${spec.type})`);
+            logger.info(`Loaded embedding model: ${spec.name} (${spec.type})`);
             return;
         }
 
@@ -113,10 +120,10 @@ export class Embedder {
                 });
                 this.loadedModel = spec;
                 this.isReady = true;
-                console.error(`[NREKI] Loaded embedding model: ${spec.name} (${spec.type})`);
+                logger.info(`Loaded embedding model: ${spec.name} (${spec.type})`);
                 return;
             } catch {
-                console.error(`[NREKI] Model ${spec.name} not available, trying next...`);
+                logger.warn(`Model ${spec.name} not available, trying next...`);
             }
         }
 
@@ -209,17 +216,21 @@ export class Embedder {
 // ─── Singleton Instance ──────────────────────────────────────────────
 
 let _instance: Embedder | null = null;
+let _creating = false;
 
 /** Get or create the global Embedder singleton. */
 export function getEmbedder(modelId?: string): Embedder {
-    if (!_instance) {
+    if (_instance && modelId && modelId !== _instance.modelId && !_creating) {
+        // Model drift: destroy and recreate.
+        // NrekiDB.checkEmbeddingDimension() will purge stale vectors.
+        _creating = true;
         _instance = new Embedder(modelId);
-    } else if (modelId && modelId !== (_instance as any).pinnedModelId) {
-        console.error(
-            `[NREKI] Warning: getEmbedder() called with modelId "${modelId}" ` +
-            `but singleton already initialized with "${(_instance as any).pinnedModelId ?? 'default'}". ` +
-            `The original model will be used.`
-        );
+        _creating = false;
+        logger.warn(`Model drift detected. Recreating embedder with ${modelId}. Vector index will be purged.`);
+    } else if (!_instance && !_creating) {
+        _creating = true;
+        _instance = new Embedder(modelId);
+        _creating = false;
     }
-    return _instance;
+    return _instance!;
 }

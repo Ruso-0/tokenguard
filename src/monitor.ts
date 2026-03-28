@@ -10,6 +10,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { logger } from "./utils/logger.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -169,6 +170,7 @@ export class TokenMonitor {
             if (bytesToRead < 0) {
                 this.lastReadPosition = 0;
                 bytesToRead = stat.size;
+                this.entries = [];
             }
 
             if (bytesToRead > 0) {
@@ -193,9 +195,7 @@ export class TokenMonitor {
                 this.lastReadPosition = stat.size;
             }
         } catch (err) {
-            console.error(
-                `[NREKI] Failed to read usage log: ${(err as Error).message}`
-            );
+            logger.error(`Failed to read usage log: ${(err as Error).message}`);
         } finally {
             fs.closeSync(fd);
         }

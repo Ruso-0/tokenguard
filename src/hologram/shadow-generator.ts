@@ -12,6 +12,7 @@ import Parser from "web-tree-sitter";
 import { ParserPool } from "../parser-pool.js";
 import fs from "fs";
 import path from "path";
+import { toPosix } from "../utils/to-posix.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -37,8 +38,6 @@ export interface ScanResult {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
-
-const toPosix = (p: string): string => path.normalize(p).replace(/\\/g, "/");
 
 const IGNORE_DIRS = new Set([
     "node_modules", "dist", "build", ".git", ".next", "coverage",
@@ -642,13 +641,31 @@ function stripConstructorParamProperties(sig: string): string {
     return before + cleaned.join(", ") + after;
 }
 
-/** Split parameter string respecting nested brackets. */
+/** Split parameter string respecting nested brackets AND string literals. */
 function splitParams(params: string): string[] {
     const result: string[] = [];
     let depth = 0;
     let current = "";
+    // PATCH-7: Track string state to avoid splitting on commas inside quotes.
+    // Without this, `constructor(public filter = "a,b")` produces broken .d.ts.
+    let inString: string | null = null;
     for (let i = 0; i < params.length; i++) {
         const ch = params[i];
+        if (inString) {
+            if (ch === "\\" && i + 1 < params.length) {
+                current += ch + params[i + 1];
+                i++;
+                continue;
+            }
+            if (ch === inString) inString = null;
+            current += ch;
+            continue;
+        }
+        if (ch === '"' || ch === "'" || ch === "`") {
+            inString = ch;
+            current += ch;
+            continue;
+        }
         if (ch === "(" || ch === "<" || ch === "[" || ch === "{") depth++;
         if (ch === ")" || ch === "]" || ch === "}") depth--;
         if (ch === ">" && !(i > 0 && params[i - 1] === "=") && depth > 0) depth--;

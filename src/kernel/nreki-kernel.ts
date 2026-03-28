@@ -2,11 +2,14 @@ import * as ts from "typescript";
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
+import type Parser from "web-tree-sitter";
 import { isSensitivePath } from "../utils/path-jail.js";
 import { readSource } from "../utils/read-source.js";
-// escapeRegExp moved to backend (Strangler Fig Act 3)
-import type { LanguageBackend } from "./language-backend.js";
-import { TypeScriptStradaBackend } from "./backends/typescript-strada.js";
+import { toPosix as toPosixUtil } from "../utils/to-posix.js";
+import { logger, setTxId, clearTxId } from "../utils/logger.js";
+import { latencyTracker } from "../utils/latency-tracker.js";
+import { TsCompilerWrapper } from "./backends/ts-compiler-wrapper.js";
+import type { LspSidecarBase } from "./backends/lsp-sidecar-base.js";
 
 // ─── Async FIFO Mutex (P10) ────────────────────────────────────────
 
@@ -49,7 +52,7 @@ export class AsyncMutex {
     async withLock<T>(fn: () => Promise<T> | T): Promise<T> {
         const unlock = await this.lock();
         try {
-            return await Promise.resolve().then(fn);
+            return await fn();
         } finally {
             unlock();
         }
@@ -79,6 +82,8 @@ export interface NrekiInterceptResult {
     healedFiles?: string[]; // Extra files touched by the Auto-Healer (for nreki_undo backups)
     regressions?: TypeRegression[];
     postContracts?: Map<string, Map<string, string>>;
+    /** Non-fatal notices (e.g., degraded validation for LSP sidecars) */
+    warnings?: string[];
 }
 
 export type NrekiMode = "auto" | "syntax" | "file" | "project" | "hologram";
@@ -92,9 +97,9 @@ export type NrekiMode = "auto" | "syntax" | "file" | "project" | "hologram";
 // @author Jherson Eddie Tintaya Holguin (Ruso-0)
 
 export interface PreEditContract {
-    typeStr: string;    // Visual truncado para logs (150 chars max)
-    toxicity: number;   // Toxicidad exacta via TypeFlags O(1)
-    isUntyped: boolean; // true si el tipo es bare any o unknown
+    typeStr: string;    // Truncated type string for logs (150 chars max)
+    toxicity: number;   // Exact toxicity score via TypeFlags O(1)
+    isUntyped: boolean; // true if the type is bare any or unknown
 }
 
 export class NrekiKernel {
@@ -107,7 +112,8 @@ export class NrekiKernel {
     private mutex = new AsyncMutex();
     private compilerOptions!: ts.CompilerOptions;
     private rootNames!: Set<string>;
-    private host!: ts.CompilerHost;
+    // Exposed for test access (JIT holography tests use (kernel as any).host)
+    public host!: ts.CompilerHost;
     private booted = false;
     private _healingStats = { applied: 0, failed: 0 };
 
@@ -117,17 +123,15 @@ export class NrekiKernel {
     }
     private mutatedFiles = new Set<string>();
     private bootErrorCount: number = -1;
+
+    // ─── LSP Sidecars (Go, Python — async child processes) ────
+    private lspSidecars = new Map<string, LspSidecarBase>();
     private tsBuildInfoPath!: string;
 
-    // ─── Language Backend (Strangler Fig Phase 1) ──────────
-    // The backend is currently a stub. All real logic still lives
-    // in NrekiKernel methods. In Phase 2+, logic will be extracted
-    // from the kernel into the backend, one method at a time.
-    private backend: LanguageBackend = new TypeScriptStradaBackend();
-    /** Typed accessor for the TypeScript backend during Strangler Fig migration. */
-    private get tsBackend(): TypeScriptStradaBackend {
-        return this.backend as TypeScriptStradaBackend;
-    }
+    // ─── TypeScript Compiler Wrapper ──────────────────────────
+    // Direct composition. No polymorphic interface. The kernel
+    // owns the VFS + ACID; the wrapper encapsulates TS API brujería.
+    private tsBackend = new TsCompilerWrapper();
 
     // Performance Modes
     public mode: "file" | "project" | "hologram" = "project";
@@ -149,15 +153,13 @@ export class NrekiKernel {
     // ─── JIT Holography (v6.1) ─────────────────────────────────
     // On-demand shadow generation: no upfront scan needed
     private jitMode = false;           // true when booting without pre-computed shadows
-    private jitParser?: any;           // web-tree-sitter Parser instance
-    private jitTsLanguage?: any;       // web-tree-sitter Language for TypeScript
+    private jitParser?: Parser;        // web-tree-sitter Parser instance
+    private jitTsLanguage?: Parser.Language; // web-tree-sitter Language for TypeScript
     private jitClassifiedCache = new Set<string>();  // tsPath → already classified
-    private jitClassifyFn?: (filePath: string, content: string, parser: any, lang: any) => { prunable: boolean; shadow: string | null };
+    private jitClassifyFn?: (filePath: string, content: string, parser: Parser, lang: Parser.Language) => { prunable: boolean; shadow: string | null };
 
-    // P26: POSIX normalization -TS uses forward slashes internally
-    private toPosix(p: string): string {
-        return path.normalize(p).replace(/\\/g, "/");
-    }
+    // P26: POSIX normalization — delegates to shared utility
+    private toPosix(p: string): string { return toPosixUtil(p); }
 
     // P30: Only TypeScript-compatible files enter rootNames
     private isTypeScriptFile(filePath: string): boolean {
@@ -190,7 +192,7 @@ export class NrekiKernel {
             const cached = fs.readFileSync(versionFile, "utf-8").trim();
             if (cached !== ts.version) {
                 fs.unlinkSync(this.tsBuildInfoPath);
-                console.error(`[NREKI] TS version changed (${cached} -> ${ts.version}). Cache purged.`);
+                logger.warn(`TS version changed (${cached} -> ${ts.version}). Cache purged.`);
                 return false;
             }
             return true;
@@ -198,13 +200,6 @@ export class NrekiKernel {
             return false; // First boot or corrupted cache
         }
     }
-
-    /**
-     * Release cached AST data for files that have been mutated.
-     * Uses releaseDocumentWithKey + getKeyForCompilationSettings to
-     * precisely target the correct registry bucket. Prevents
-     * DocumentRegistry from accumulating stale AST versions.
-     */
 
     /** Write TS version guard file alongside the cache. */
     private writeTsVersionGuard(): void {
@@ -223,7 +218,7 @@ export class NrekiKernel {
     public boot(workspacePath: string, mode?: "file" | "project" | "hologram"): void {
         if (this.booted) throw new Error("[NREKI] Kernel already booted");
         if (mode) this.mode = mode;
-        console.error(`[NREKI] Booting VFS-LSP Kernel (${this.mode} mode). Applying CompilerHost overrides...`);
+        logger.info(`Booting VFS-LSP Kernel (${this.mode} mode). Applying CompilerHost overrides...`);
         this.projectRoot = this.toPosix(path.resolve(workspacePath));
         this.initConfig();
 
@@ -235,7 +230,7 @@ export class NrekiKernel {
                 this.rootNames = new Set(
                     [...this.rootNames].filter(f => /\.d\.[mc]?ts$/i.test(f)),
                 );
-                console.error(`[NREKI] JIT Holography active. rootNames: ${this.rootNames.size} (.d.ts only). Shadows on-demand.`);
+                logger.info(`JIT Holography active. rootNames: ${this.rootNames.size} (.d.ts only). Shadows on-demand.`);
             } else {
                 // Eager mode: pre-computed shadows available
                 this.jitMode = false;
@@ -260,7 +255,7 @@ export class NrekiKernel {
         // The backend uses them to create CompilerHost + LanguageService.
         // VFS, hologram, JIT state stay in the kernel. Always.
         const self = this;
-        const vfsAdapter: import("./language-backend.js").VfsAdapter = {
+        const vfsAdapter: import("./backends/ts-compiler-wrapper.js").VfsAdapter = {
             readFile(fileName: string): string | undefined {
                 const posixPath = self.toPosix(path.resolve(self.projectRoot, fileName));
 
@@ -339,7 +334,7 @@ export class NrekiKernel {
             getModifiedTime(fileName: string): Date {
                 const posixPath = self.toPosix(path.resolve(self.projectRoot, fileName));
                 if (self.vfsClock.has(posixPath)) return self.vfsClock.get(posixPath)!;
-                return ts.sys.getModifiedTime ? ts.sys.getModifiedTime(fileName)! : new Date();
+                return ts.sys.getModifiedTime?.(fileName) ?? new Date();
             },
 
             directoryExists(dirName: string): boolean {
@@ -353,7 +348,7 @@ export class NrekiKernel {
                 return self.vfsClock.get(posixPath)?.getTime().toString() || "1";
             },
 
-            getScriptSnapshot(fileName: string): any {
+            getScriptSnapshot(fileName: string): ts.IScriptSnapshot | undefined {
                 const posixPath = self.toPosix(path.resolve(self.projectRoot, fileName));
 
                 // HOLOGRAM INTERCEPT for LanguageService
@@ -380,9 +375,8 @@ export class NrekiKernel {
 
         this.tsBackend.createCompilerInfra(this.projectRoot, vfsAdapter);
 
-        // Copy references for backward compat (kernel code still uses this.host, etc.)
+        // Sync host reference for test access (JIT holography tests)
         this.host = this.tsBackend.host;
-        // References synced via tsBackend (Strangler Fig 2CD)
         // ──────────────────────────────────────────────────────────────
 
         // Incremental cache: delegate to backend
@@ -415,8 +409,29 @@ export class NrekiKernel {
         if (this.mode === "project") {
             this.tsBackend.captureBaseline(undefined, this.mode);
         }
-        // D2: Clean orphaned transaction backups from previous crashes
+        // D2: WAL-aware crash recovery.
+        // If a previous session crashed mid-commit, the WAL tells us
+        // exactly which files to restore from their .bak backups.
         const txDir = path.join(this.projectRoot, ".nreki", "transactions");
+        const walPath = path.join(txDir, "wal.json");
+        if (fs.existsSync(walPath)) {
+            try {
+                const wal = JSON.parse(fs.readFileSync(walPath, "utf-8"));
+                if (wal.status === "pending" && Array.isArray(wal.files)) {
+                    logger.warn(`WAL recovery: restoring ${wal.files.length} file(s) from crashed transaction`);
+                    for (const entry of wal.files) {
+                        if (entry.backup && fs.existsSync(entry.backup)) {
+                            fs.renameSync(entry.backup, entry.target);
+                        } else if (!entry.backup && fs.existsSync(entry.target)) {
+                            // File was newly created in the crashed tx — remove it
+                            fs.unlinkSync(entry.target);
+                        }
+                    }
+                }
+            } catch (walErr) {
+                logger.error(`WAL recovery failed: ${walErr}`);
+            }
+        }
         if (fs.existsSync(txDir)) {
             try { fs.rmSync(txDir, { recursive: true, force: true }); } catch { /* best effort */ }
         }
@@ -426,9 +441,9 @@ export class NrekiKernel {
 
         this.booted = true;
         // Log backend info for diagnostics
-        console.error(`[NREKI] Backend: ${this.backend.name} (healing: ${this.backend.capabilities.supportsAutoHealing}, ttrd: ${this.backend.capabilities.supportsTTRD})`);
-        console.error(
-            `[NREKI] Kernel booted. Tracking ${this.rootNames.size} files. ` +
+        logger.info(`Backend: ${this.tsBackend.name} (healing: ${this.tsBackend.capabilities.supportsAutoHealing}, ttrd: ${this.tsBackend.capabilities.supportsTTRD})`);
+        logger.info(
+            `Kernel booted. Tracking ${this.rootNames.size} files. ` +
             `Baseline: ${this.tsBackend.baselineCount} invariants. ` +
             `Boot errors: ${this.bootErrorCount}.`
         );
@@ -498,167 +513,122 @@ export class NrekiKernel {
      *          only delete files the healer added, never the LLM's files
      */
     private async attemptAutoHealing(
-        initialErrors: ts.Diagnostic[],
+        initialErrors: NrekiStructuredError[],
         parentEditedFiles: Set<string>,
         filesToEvaluate: Set<string>
-    ): Promise<{ healed: boolean; appliedFixes: string[]; newlyTouchedFiles: Set<string>; finalErrors: ts.Diagnostic[] }> {
-        if (!this.tsBackend.tsLanguageService || initialErrors.length === 0) {
+    ): Promise<{ healed: boolean; appliedFixes: string[]; newlyTouchedFiles: Set<string>; finalErrors: NrekiStructuredError[] }> {
+        if (initialErrors.length === 0) {
             return { healed: false, appliedFixes: [], newlyTouchedFiles: new Set(), finalErrors: initialErrors };
         }
 
-        const formatOptions = ts.getDefaultFormatCodeSettings();
-        const preferences: ts.UserPreferences = {};
+        const MAX_ITERATIONS = 10;
+        const fixDescriptions = new Set<string>();
 
-        // Safe fix whitelist: only 100% structural fixes that don't mutate business logic.
-        // fixAwaitInSyncFunction is an optimistic lock: if it causes cascade, the invariant aborts it.
-        // fixOverrideModifier: the actual internal name in TS 5.x is "fixAddOverrideModifier".
-        const SAFE_FIXES = new Set([
-            "import",                                         // TS2304: Cannot find name → add import
-            "fixMissingImport",                               // TS2686: Alternative internal name
-            "fixAwaitInSyncFunction",                         // TS1308: LLM wrote await but forgot async
-            "fixPromiseResolve",                              // Wraps returns in Promise.resolve()
-            "fixMissingProperties",                           // TS2739/TS2741: Incomplete interfaces
-            "fixClassDoesntImplementInheritedAbstractMember", // TS2515: Abstract classes
-            "fixAddMissingMember",                            // TS2339: Property declarations
-            "fixAddOverrideModifier",                         // TS4114: Add 'override' keyword
-        ]);
-
-        const MAX_ITERATIONS = 10; // Safety limit against infinite loops (redundant due to the invariant, but safe)
-        const fixDescriptions = new Set<string>(); // Deduplicator
-
-        // BUG 2 FIXED: Clone the scan set to isolate caller state
         const localEditedFiles = new Set(parentEditedFiles);
         const newlyTouchedFiles = new Set<string>();
 
-        // BUG 4 FIXED: Micro-UndoLog - only copies files the healer touches, not the entire VFS
         const healUndoLog = new Map<string, {
             content: string | null | undefined; time: Date | undefined; wasInRoot: boolean;
         }>();
 
-        // Blacklist: avoid retrying fixes that already caused cascade at the same coordinate
         const failedFixHashes = new Set<string>();
 
-        let currentErrors = initialErrors;
+        let currentErrors: NrekiStructuredError[] = initialErrors;
         let iteration = 0;
 
-        // Fix iteration loop: Evaluate → Patch 1 → Recompile → Repeat
         while (currentErrors.length > 0 && iteration < MAX_ITERATIONS) {
             let appliedAnyFix = false;
 
-            for (const diag of currentErrors) {
-                if (!diag.file || diag.start === undefined || diag.length === undefined) continue;
+            for (const error of currentErrors) {
+                const fixes = await this.tsBackend.getAutoFixes(error.file, error);
+                if (fixes.length === 0) continue;
+                const bestFix = fixes[0];
+                const fixHash = `${error.file}:${error.line}:${bestFix.description}`;
+                if (failedFixHashes.has(fixHash)) continue;
 
-                const posixPath = this.toPosix(path.resolve(this.projectRoot, diag.file.fileName));
+                // Backup state before applying fix
+                const microUndoLog = new Map<string, {
+                    content: string | null | undefined; time: Date | undefined; wasInRoot: boolean;
+                }>();
 
-                // BUG 1 FIXED: diag.code may come as string. getCodeFixesAtPosition expects number[].
-                const errorCode = typeof diag.code === "number" ? diag.code : Number(diag.code);
+                for (const change of bestFix.changes) {
+                    const changePath = change.filePath;
+                    const state = {
+                        content: this.vfs.has(changePath) ? this.vfs.get(changePath) : undefined,
+                        time: this.vfsClock.get(changePath),
+                        wasInRoot: this.rootNames.has(changePath),
+                    };
+                    microUndoLog.set(changePath, state);
+                    if (!healUndoLog.has(changePath)) healUndoLog.set(changePath, state);
+                }
 
-                const fixes = this.tsBackend.tsLanguageService.getCodeFixesAtPosition(
-                    posixPath, diag.start, diag.start + diag.length, [errorCode], formatOptions, preferences
-                );
+                // Apply fix to VFS
+                for (const change of bestFix.changes) {
+                    const changePath = change.filePath;
+                    let content = this.vfs.get(changePath) ?? this.tsBackend.host.readFile(changePath) ?? "";
 
-                const safeFix = fixes.find(f => SAFE_FIXES.has(f.fixName));
+                    const sortedChanges = [...change.textChanges].sort((a, b) => b.start - a.start);
 
-                if (safeFix) {
-                    const fixHash = `${posixPath}:${diag.start}:${safeFix.fixName}`;
-                    if (failedFixHashes.has(fixHash)) continue;
-
-                    // Backup state before applying fix (rollback if fix increases errors)
-                    const microUndoLog = new Map<string, {
-                        content: string | null | undefined; time: Date | undefined; wasInRoot: boolean;
-                    }>();
-
-                    for (const change of safeFix.changes) {
-                        const changePath = this.toPosix(path.resolve(this.projectRoot, change.fileName));
-                        const state = {
-                            content: this.vfs.has(changePath) ? this.vfs.get(changePath) : undefined,
-                            time: this.vfsClock.get(changePath),
-                            wasInRoot: this.rootNames.has(changePath),
-                        };
-                        microUndoLog.set(changePath, state);
-
-                        // Macro-UndoLog: save original state ONLY the first time during entire healing
-                        if (!healUndoLog.has(changePath)) healUndoLog.set(changePath, state);
+                    for (const textChange of sortedChanges) {
+                        const start = textChange.start;
+                        const end = start + textChange.length;
+                        content = content.slice(0, start) + textChange.newText + content.slice(end);
                     }
 
-                    // Apply fix to VFS
-                    for (const change of safeFix.changes) {
-                        const changePath = this.toPosix(path.resolve(this.projectRoot, change.fileName));
-                        let content = this.vfs.get(changePath) ?? this.host.readFile(change.fileName) ?? "";
+                    this.vfs.set(changePath, content);
+                    this.vfsClock.set(changePath, new Date(this.logicalTime));
+                    localEditedFiles.add(changePath);
 
-                        // Sort descending (bottom-up) to protect intra-fix offsets
-                        const sortedChanges = [...change.textChanges].sort((a, b) => b.span.start - a.span.start);
-
-                        for (const textChange of sortedChanges) {
-                            const start = textChange.span.start;
-                            const end = start + textChange.span.length;
-                            content = content.slice(0, start) + textChange.newText + content.slice(end);
-                        }
-
-                        this.vfs.set(changePath, content);
-                        this.vfsClock.set(changePath, new Date(this.logicalTime));
-                        localEditedFiles.add(changePath);
-
-                        if (!parentEditedFiles.has(changePath)) newlyTouchedFiles.add(changePath);
-                        if (!this.rootNames.has(changePath) && this.isTypeScriptFile(changePath)) {
-                            this.rootNames.add(changePath);
-                        }
+                    if (!parentEditedFiles.has(changePath)) newlyTouchedFiles.add(changePath);
+                    if (!this.rootNames.has(changePath) && this.isTypeScriptFile(changePath)) {
+                        this.rootNames.add(changePath);
                     }
+                }
 
-                    // Recompile after fix (~20ms)
+                // Recompile after fix
+                this.logicalTime += 1000;
+                this.tsBackend.updateProgram();
+                const newEvaluate = new Set(filesToEvaluate);
+                for (const f of localEditedFiles) newEvaluate.add(f);
+                const newErrors = await this.tsBackend.getDiagnostics(newEvaluate, localEditedFiles, this.mode);
+
+                if (newErrors.length >= currentErrors.length) {
+                    // MICRO-ROLLBACK
+                    for (const [p, state] of microUndoLog.entries()) {
+                        if (state.content !== undefined) this.vfs.set(p, state.content); else this.vfs.delete(p);
+                        if (state.time) this.vfsClock.set(p, state.time); else this.vfsClock.delete(p);
+                        if (state.wasInRoot) this.rootNames.add(p); else this.rootNames.delete(p);
+
+                        if (!parentEditedFiles.has(p)) {
+                            localEditedFiles.delete(p);
+                        }
+                        newlyTouchedFiles.delete(p);
+                    }
                     this.logicalTime += 1000;
                     this.tsBackend.updateProgram();
-                // DR/LS synced via tsBackend
-                    const newEvaluate = new Set(filesToEvaluate);
-                    for (const f of localEditedFiles) newEvaluate.add(f);
-                    await this.tsBackend.getDiagnostics(newEvaluate, localEditedFiles, this.mode);
-                    const newRawErrors = this.tsBackend.tsLastDiagnostics;
+                    failedFixHashes.add(fixHash);
+                } else {
+                    // FIX ACCEPTED
+                    const changesPreview = bestFix.changes.map(c => {
+                        const file = path.basename(c.filePath);
+                        const texts = c.textChanges.map(t => t.newText.trim()).filter(Boolean);
+                        return `${file}: [${texts.join(", ")}]`;
+                    }).join(" | ");
 
-                    // Fix must reduce error count. If not, rollback.
-                    if (newRawErrors.length >= currentErrors.length) {
-                        // MICRO-ROLLBACK: mutation caused cascade or was ineffective
-                        for (const [p, state] of microUndoLog.entries()) {
-                            if (state.content !== undefined) this.vfs.set(p, state.content); else this.vfs.delete(p);
-                            if (state.time) this.vfsClock.set(p, state.time); else this.vfsClock.delete(p);
-                            if (state.wasInRoot) this.rootNames.add(p); else this.rootNames.delete(p);
+                    fixDescriptions.add(`- ${bestFix.description} -> \`${changesPreview}\``);
+                    appliedAnyFix = true;
+                    currentErrors = newErrors;
 
-                            // BUG 5 FIXED: Never blind Shield 2 to files the LLM edited
-                            if (!parentEditedFiles.has(p)) {
-                                localEditedFiles.delete(p);
-                            }
-                            newlyTouchedFiles.delete(p);
-                        }
-                        this.logicalTime += 1000;
-                        this.tsBackend.updateProgram();
-                // DR/LS synced via tsBackend
-                        failedFixHashes.add(fixHash); // Add to blacklist
-                    } else {
-                        // FIX ACCEPTED
-                        const changesPreview = safeFix.changes.map(c => {
-                            const file = path.basename(c.fileName);
-                            const texts = c.textChanges.map(t => t.newText.trim()).filter(Boolean);
-                            return `${file}: [${texts.join(", ")}]`;
-                        }).join(" | ");
-
-                        fixDescriptions.add(`- ${safeFix.description} -> \`${changesPreview}\``);
-                        appliedAnyFix = true;
-                        currentErrors = newRawErrors;
-
-                        // Break: AST mutated, old offsets invalid.
-                        // Return to while loop with fresh offsets from updateProgram().
-                        break;
-                    }
+                    break;
                 }
             }
 
-            if (!appliedAnyFix) break; // No valid fix for any remaining error
+            if (!appliedAnyFix) break;
             iteration++;
         }
 
         // Healing result evaluation
         if (currentErrors.length > 0) {
-            // ACID Rollback: Full healing failed.
-            // Restore VFS to exact pre-healing state to return clean errors to the agent.
             if (healUndoLog.size > 0) {
                 for (const [p, state] of healUndoLog.entries()) {
                     if (state.content !== undefined) this.vfs.set(p, state.content); else this.vfs.delete(p);
@@ -666,21 +636,17 @@ export class NrekiKernel {
                     if (state.wasInRoot) this.rootNames.add(p); else this.rootNames.delete(p);
                 }
                 this.logicalTime += 1000;
-                // A-03: Only set clock for files that remain in VFS (avoid orphaned entries)
                 for (const p of healUndoLog.keys()) {
                     if (this.vfs.has(p)) this.vfsClock.set(p, new Date(this.logicalTime));
                 }
                 this.tsBackend.updateProgram();
-                // DR/LS synced via tsBackend
             }
 
             this._healingStats.failed++;
-            // BUG 3 FIXED: Return initialErrors, do NOT recalculate (semantic iterator was consumed)
             return { healed: false, appliedFixes: [], newlyTouchedFiles: new Set(), finalErrors: initialErrors };
         }
 
         this._healingStats.applied++;
-        // On success: merge newly touched files into the parent's edited set
         for (const file of localEditedFiles) parentEditedFiles.add(file);
 
         return {
@@ -703,10 +669,14 @@ export class NrekiKernel {
         // Corruption guard: if a previous timeout left the VFS in a partial state, rebuild
         if (this.tsBackend.isCorrupted) {
             this.tsBackend.purgeCache();
-            console.error("[NREKI] Rebuilding after timeout-corrupted state.");
+            logger.warn("Rebuilding after timeout-corrupted state.");
         }
 
         return this.mutex.withLock(async () => {
+        const txId = crypto.randomBytes(4).toString("hex");
+        setTxId(txId);
+        logger.info(`interceptAtomicBatch: ${edits.length} file(s)`);
+        try {
         const t0 = performance.now();
 
         const rollbackState = new Map<string, {
@@ -721,6 +691,10 @@ export class NrekiKernel {
             const explicitlyEditedFiles = new Set<string>();
             // A-02: Snapshot vfsDirectories for rollback
             const savedDirectories = new Set(this.vfsDirectories);
+
+            // PATCH-1: Track which files THIS transaction adds to mutatedFiles.
+            // On rollback, only these are removed — preserving prior valid mutations.
+            const transactionMutated = new Set<string>();
 
             // HOLOGRAM: set currentEditTargets so VFS hooks show them as real .ts
             if (this.mode === "hologram") {
@@ -777,6 +751,8 @@ export class NrekiKernel {
             const preContracts = await this.tsBackend.extractCanonicalTypes(explicitlyEditedFiles);
 
             // A-01: Wrap Phase 1-4 so partial VFS mutations are rolled back on throw
+            // Sidecar edits hoisted for catch-path compensatory rollback (Bomba 1)
+            const sidecarEdits = new Map<LspSidecarBase, Array<{filePath: string; content: string | null}>>();
             try {
 
             // PHASE 1: Inject entire batch into VFS
@@ -805,6 +781,7 @@ export class NrekiKernel {
 
                 this.vfs.set(posixPath, edit.proposedContent);
                 this.vfsClock.set(posixPath, new Date(this.logicalTime));
+                if (!this.mutatedFiles.has(posixPath)) transactionMutated.add(posixPath);
                 this.mutatedFiles.add(posixPath);
 
                 // P29: Tombstone removes from rootNames
@@ -834,12 +811,65 @@ export class NrekiKernel {
             // Cannot call it again without updateProgram() in between.
             const originalFatalErrors = await this.tsBackend.getDiagnostics(filesToEvaluate, explicitlyEditedFiles, this.mode);
 
+            // ─── Phase 2.5: LSP Sidecar Validation (Go, Python) ─────────
+            const sidecarWarnings: string[] = [];
+
+            // Collect non-TS edits grouped by sidecar
+            sidecarEdits.clear();
+            for (const edit of edits) {
+                const posixPath = this.toPosix(path.resolve(this.projectRoot, edit.targetFile));
+                const ext = path.extname(posixPath).toLowerCase();
+                const sidecar = this.lspSidecars.get(ext);
+                if (!sidecar) continue;
+                const list = sidecarEdits.get(sidecar) || [];
+                list.push({ filePath: posixPath, content: edit.proposedContent });
+                sidecarEdits.set(sidecar, list);
+            }
+
+            // Boot + validate each sidecar
+            for (const [sidecar, scEdits] of sidecarEdits) {
+                if (!sidecar.isHealthy()) {
+                    try {
+                        await sidecar.boot();
+                    } catch {
+                        sidecarWarnings.push(
+                            `[⚠️ NREKI WARNING: '${sidecar.command[0]}' not found or crashed. ` +
+                            `Layer 2 Semantic Shield OFFLINE for ${sidecar.languageId} files. ` +
+                            `Code passed syntax only. Install to enable strict validation.]`,
+                        );
+                        continue;
+                    }
+                }
+                try {
+                    const sidecarErrors = await sidecar.validateEdits(scEdits);
+                    // ACID: Merge sidecar errors. If ANY backend rejects, NOTHING touches disk.
+                    originalFatalErrors.push(...sidecarErrors);
+                } catch {
+                    sidecarWarnings.push(
+                        `[⚠️ NREKI WARNING: ${sidecar.languageId} validation timed out. ` +
+                        `Code passed without semantic check.]`,
+                    );
+                }
+            }
+            // ─── End Phase 2.5 ───────────────────────────────────────────
+
             // PHASE 4: Verdict
             if (originalFatalErrors.length > 0) {
 
                 // ─── NREKI L3.3: Iterative Auto-Healing ─────────────────
+                // Only attempt auto-healing on TypeScript errors.
+                // LSP sidecars have supportsAutoHealing: false in v1.
+                const tsOnlyErrors = originalFatalErrors.filter(e => this.isTypeScriptFile(e.file));
+                const lspOnlyErrors = originalFatalErrors.filter(e => !this.isTypeScriptFile(e.file));
                 const tHealStart = performance.now();
-                const healing = await this.attemptAutoHealing(this.tsBackend.tsLastDiagnostics, explicitlyEditedFiles, filesToEvaluate);
+                const healing = tsOnlyErrors.length > 0
+                    ? await this.attemptAutoHealing(tsOnlyErrors, explicitlyEditedFiles, filesToEvaluate)
+                    : { healed: false, appliedFixes: [] as string[], newlyTouchedFiles: new Set<string>(), finalErrors: [] as NrekiStructuredError[] };
+                // If TS healed but LSP still has errors, overall still fails
+                if (healing.healed && lspOnlyErrors.length > 0) {
+                    healing.healed = false;
+                    healing.finalErrors = lspOnlyErrors;
+                }
 
                 if (healing.healed) {
                     const latency = (performance.now() - t0).toFixed(2);
@@ -865,18 +895,7 @@ export class NrekiKernel {
                     const postContracts = await this.tsBackend.extractCanonicalTypes(finalEditedFiles);
                     const regressions = this.tsBackend.computeTypeRegressions(preContracts, postContracts);
 
-                    // Restore hologram veil after healed success
-                    if (this.mode === "hologram" && temporarilyUnveiled.size > 0) {
-                        for (const file of temporarilyUnveiled) {
-                            this.prunedTsLookup.add(file);
-                            this.shadowDtsLookup.add(file.replace(/\.([mc]?)tsx?$/, ".d.$1ts"));
-                            this.rootNames.delete(file);
-                            this.vfsClock.set(file, new Date(this.logicalTime + 1));
-                            // JIT: force re-classify on next access (content may have changed)
-                            this.jitClassifiedCache.delete(file);
-                        }
-                    }
-                    this.currentEditTargets.clear();
+                    this.restoreHologramVeil(temporarilyUnveiled);
 
                     return {
                         safe: true,
@@ -894,6 +913,7 @@ export class NrekiKernel {
                                 [file, new Map([...syms].map(([sym, contract]) => [sym, contract.typeStr]))]
                               ))
                             : undefined,
+                        warnings: sidecarWarnings.length > 0 ? sidecarWarnings : undefined,
                     };
                 }
                 // ─── END Auto-Healing ────────────────────────────────────
@@ -913,6 +933,15 @@ export class NrekiKernel {
                     else this.rootNames.delete(posixPath);
                 }
 
+                // BOMBA 1 FIX: Compensatory Rollback — heal sidecar VFS
+                // Without this, the LSP's internal VFS retains the rejected
+                // edit and future validations run against a phantom state.
+                this.rollbackSidecars(sidecarEdits, rollbackState);
+
+                // PATCH-1: Remove this transaction's files from mutatedFiles
+                // to prevent ghost deletion in the next commitToDisk().
+                for (const file of transactionMutated) this.mutatedFiles.delete(file);
+
                 // B6: Restore logicalTime on rollback
                 this.logicalTime = savedLogicalTime;
                 // A-02: Restore vfsDirectories
@@ -926,19 +955,9 @@ export class NrekiKernel {
                 // DR/LS synced via tsBackend
 
                 const latency = (performance.now() - t0).toFixed(2);
+                latencyTracker.record("intercept", parseFloat(latency));
 
-                // Restore hologram veil after rejection
-                if (this.mode === "hologram" && temporarilyUnveiled.size > 0) {
-                    for (const file of temporarilyUnveiled) {
-                        this.prunedTsLookup.add(file);
-                        this.shadowDtsLookup.add(file.replace(/\.([mc]?)tsx?$/, ".d.$1ts"));
-                        this.rootNames.delete(file);
-                        this.vfsClock.set(file, new Date(this.logicalTime + 1));
-                        // JIT: force re-classify on next access (content may have changed)
-                        this.jitClassifiedCache.delete(file);
-                    }
-                }
-                this.currentEditTargets.clear();
+                this.restoreHologramVeil(temporarilyUnveiled);
 
                 return {
                     safe: false, exitCode: 2, latencyMs: latency, structured,
@@ -956,29 +975,19 @@ export class NrekiKernel {
             const postContracts = await this.tsBackend.extractCanonicalTypes(explicitlyEditedFiles);
             const regressions = this.tsBackend.computeTypeRegressions(preContracts, postContracts);
 
-            // Restore hologram veil after successful intercept
-            if (this.mode === "hologram" && temporarilyUnveiled.size > 0) {
-                for (const file of temporarilyUnveiled) {
-                    this.prunedTsLookup.add(file);
-                    this.shadowDtsLookup.add(file.replace(/\.([mc]?)tsx?$/, ".d.$1ts"));
-                    this.rootNames.delete(file);
-                    this.vfsClock.set(file, new Date(this.logicalTime + 1));
-                    // JIT: force re-classify on next access (content may have changed)
-                    this.jitClassifiedCache.delete(file);
-                }
-            }
-            this.currentEditTargets.clear();
+            this.restoreHologramVeil(temporarilyUnveiled);
 
             return {
                 safe: true,
                 exitCode: 0,
-                latencyMs: (performance.now() - t0).toFixed(2),
+                latencyMs: (() => { const l = (performance.now() - t0).toFixed(2); latencyTracker.record("intercept", parseFloat(l)); return l; })(),
                 regressions: regressions.length > 0 ? regressions : undefined,
                 postContracts: postContracts.size > 0
                     ? new Map([...postContracts].map(([file, syms]) =>
                         [file, new Map([...syms].map(([sym, contract]) => [sym, contract.typeStr]))]
                       ))
                     : undefined,
+                warnings: sidecarWarnings.length > 0 ? sidecarWarnings : undefined,
             };
 
             } catch (phaseError) {
@@ -991,21 +1000,16 @@ export class NrekiKernel {
                     if (state.wasInRoot) this.rootNames.add(posixPath);
                     else this.rootNames.delete(posixPath);
                 }
+                // BOMBA 1 FIX: Compensatory Rollback on crash path
+                this.rollbackSidecars(sidecarEdits, rollbackState);
+
+                // PATCH-1: Remove this transaction's files from mutatedFiles (crash path)
+                for (const file of transactionMutated) this.mutatedFiles.delete(file);
+
                 // A-02: Restore vfsDirectories
                 this.vfsDirectories = savedDirectories;
                 this.logicalTime = savedLogicalTime;
-                // Restore hologram veil on failure
-                if (this.mode === "hologram" && temporarilyUnveiled.size > 0) {
-                    for (const file of temporarilyUnveiled) {
-                        this.prunedTsLookup.add(file);
-                        this.shadowDtsLookup.add(file.replace(/\.([mc]?)tsx?$/, ".d.$1ts"));
-                        this.rootNames.delete(file);
-                        this.vfsClock.set(file, new Date(this.logicalTime + 1));
-                        // JIT: force re-classify on next access (content may have changed)
-                        this.jitClassifiedCache.delete(file);
-                    }
-                }
-                this.currentEditTargets.clear();
+                this.restoreHologramVeil(temporarilyUnveiled);
                 // FIX: Poison the compiler cache to force cold rebuild.
                 // Without this, the TypeScript BuilderProgram retains state
                 // from the failed transaction, causing phantom errors on
@@ -1013,6 +1017,9 @@ export class NrekiKernel {
                 this.tsBackend.purgeCache(true);
                 throw phaseError;
             }
+        } finally {
+            clearTxId();
+        }
         });
     }
 
@@ -1028,9 +1035,13 @@ export class NrekiKernel {
         const physicalUndoLog: { target: string; backup: string | null }[] = [];
         const createdTmps: string[] = [];
 
+        // Scope writes to files mutated in the current transaction only.
+        // Prevents stale VFS entries from prior intercepts leaking into this commit.
+        const filesToCommit = new Set(this.mutatedFiles);
+
         try {
             // PHASE 1: Physical backup
-            for (const posixPath of this.vfs.keys()) {
+            for (const posixPath of filesToCommit) {
                 const osPath = path.normalize(posixPath);
                 if (fs.existsSync(osPath)) {
                     const txDir = path.join(this.projectRoot, ".nreki", "transactions");
@@ -1043,8 +1054,23 @@ export class NrekiKernel {
                 }
             }
 
+            // WAL: Write intent log before destructive Phase 2.
+            // If the process crashes between Phase 1 (backup) and Phase 2 (write),
+            // boot() will find this WAL and automatically restore from backups.
+            const txDir = path.join(this.projectRoot, ".nreki", "transactions");
+            const walPath = path.join(txDir, "wal.json");
+            try {
+                if (!fs.existsSync(txDir)) fs.mkdirSync(txDir, { recursive: true });
+                fs.writeFileSync(walPath, JSON.stringify({
+                    status: "pending",
+                    ts: new Date().toISOString(),
+                    files: physicalUndoLog.map(l => ({ target: l.target, backup: l.backup })),
+                }), "utf-8");
+            } catch { /* WAL write failure is non-fatal — proceed without crash safety */ }
+
             // PHASE 2: Destructive writes
-            for (const [posixPath, content] of this.vfs.entries()) {
+            for (const posixPath of filesToCommit) {
+                const content = this.vfs.get(posixPath) ?? null;
                 const osPath = path.normalize(posixPath);
                 if (content === null) {
                     if (fs.existsSync(osPath)) fs.unlinkSync(osPath);
@@ -1104,14 +1130,17 @@ export class NrekiKernel {
             for (const log of physicalUndoLog) {
                 if (log.backup && fs.existsSync(log.backup)) fs.unlinkSync(log.backup);
             }
+            // WAL: Transaction complete — delete intent log
+            try { if (fs.existsSync(walPath)) fs.unlinkSync(walPath); } catch { /* best effort */ }
 
             // Release stale AST versions from DocumentRegistry
             this.tsBackend.releaseMutatedDocuments(this.mutatedFiles);
+            this.mutatedFiles.clear();
 
-            console.error("[NREKI] Atomic commit materialized. Disk synchronized.");
+            logger.info("Atomic commit materialized. Disk synchronized.");
         } catch (error) {
             // PHYSICAL ROLLBACK
-            console.error(`[NREKI FATAL] OS write failure! Physical rollback: ${error}`);
+            logger.error(`OS write failure! Physical rollback: ${error}`);
 
             // AUDIT FIX: Clean orphan .tmp files written before the crash
             for (const tmpPath of createdTmps) {
@@ -1197,13 +1226,29 @@ export class NrekiKernel {
                 // DR/LS synced via tsBackend
             // Release stale AST versions from DocumentRegistry
             this.tsBackend.releaseMutatedDocuments(this.mutatedFiles);
-            console.error("[NREKI] Hard rollback executed. VFS purged.");
+            logger.warn("Hard rollback executed. VFS purged.");
         });
     }
 
     // ─── Utilities ─────────────────────────────────────────────────
 
-
+    /**
+     * Restore the hologram veil for temporarily unveiled files.
+     * Re-adds files to the pruned/shadow lookups, removes them from rootNames,
+     * and invalidates JIT classification cache. Clears currentEditTargets.
+     */
+    private restoreHologramVeil(temporarilyUnveiled: Set<string>): void {
+        if (this.mode === "hologram" && temporarilyUnveiled.size > 0) {
+            for (const file of temporarilyUnveiled) {
+                this.prunedTsLookup.add(file);
+                this.shadowDtsLookup.add(file.replace(/\.([mc]?)tsx?$/, ".d.$1ts"));
+                this.rootNames.delete(file);
+                this.vfsClock.set(file, new Date(this.logicalTime + 1));
+                this.jitClassifiedCache.delete(file);
+            }
+        }
+        this.currentEditTargets.clear();
+    }
 
     /**
      * Show which files depend on a symbol before the agent edits it.
@@ -1236,7 +1281,7 @@ export class NrekiKernel {
                     ts.isMethodDeclaration(parent) || ts.isVariableDeclaration(parent) ||
                     ts.isInterfaceDeclaration(parent) || ts.isTypeAliasDeclaration(parent) ||
                     ts.isPropertySignature(parent) || ts.isMethodSignature(parent)
-                ) && (parent as any).name === node) {
+                ) && (parent as ts.NamedDeclaration).name === node) {
                     targetPos = node.getStart(sourceFile);
                     return;
                 }
@@ -1384,13 +1429,13 @@ export class NrekiKernel {
     }
 
     /** Set JIT parser for on-demand shadow generation. Call BEFORE boot(). */
-    public setJitParser(parser: any, tsLanguage: any): void {
+    public setJitParser(parser: Parser, tsLanguage: Parser.Language): void {
         this.jitParser = parser;
         this.jitTsLanguage = tsLanguage;
     }
 
     /** Set JIT classifier function (classifyAndGenerateShadow). */
-    public setJitClassifier(fn: (filePath: string, content: string, parser: any, lang: any) => { prunable: boolean; shadow: string | null }): void {
+    public setJitClassifier(fn: (filePath: string, content: string, parser: Parser, lang: Parser.Language) => { prunable: boolean; shadow: string | null }): void {
         this.jitClassifyFn = fn;
     }
 
@@ -1456,5 +1501,78 @@ export class NrekiKernel {
             this.shadowDtsLookup.add(dtsPath);
             this.prunedTsLookup.add(tsPath);
         }
+    }
+
+    // ─── LSP Sidecar Management ─────────────────────────────────────
+
+    /**
+     * Compensatory Rollback — heal sidecar VFS on ACID abort.
+     *
+     * When `interceptAtomicBatch` rejects a transaction, the TypeScript VFS
+     * is rolled back via the `rollbackState` map. But LSP sidecars (gopls,
+     * pyright) have their OWN VFS in RAM. If we don't re-inject the original
+     * content, the sidecar's next `validateEdits` call will run against the
+     * phantom (rejected) code, causing a brain-split.
+     *
+     * This method sends `didChange` with the original content for every file
+     * that was modified in the aborted transaction. Fire-and-forget — we don't
+     * await the settle because the rollback is best-effort and must not block
+     * the error response to the LLM.
+     */
+    private rollbackSidecars(
+        sidecarEdits: Map<LspSidecarBase, Array<{filePath: string; content: string | null}>>,
+        rollbackState: Map<string, {content: string | null | undefined; time: Date | undefined; wasInRoot: boolean}>,
+    ): void {
+        if (sidecarEdits.size === 0) return;
+
+        for (const [sidecar, scEdits] of sidecarEdits) {
+            if (sidecar.isDead) continue;
+            const rollbacks: Array<{filePath: string; content: string | null}> = [];
+
+            for (const edit of scEdits) {
+                const posixPath = this.toPosix(path.resolve(this.projectRoot, edit.filePath));
+                const state = rollbackState.get(posixPath);
+
+                let originalContent: string | null = null;
+                if (state && state.content !== undefined) {
+                    originalContent = state.content;
+                } else {
+                    // File didn't exist in VFS, try reading from disk
+                    try { originalContent = fs.readFileSync(edit.filePath, "utf-8"); } catch { originalContent = null; }
+                }
+
+                rollbacks.push({ filePath: edit.filePath, content: originalContent });
+            }
+
+            if (rollbacks.length > 0) {
+                // Fire-and-forget: don't block the error response.
+                // If rollback fails, mark sidecar dead to force respawn on next use.
+                // This prevents brain-split where sidecar VFS disagrees with kernel VFS.
+                sidecar.validateEdits(rollbacks).catch(() => {
+                    sidecar.isDead = true;
+                });
+            }
+        }
+    }
+
+    /**
+     * Register an LSP sidecar for a file extension.
+     * Called during initialization (index.ts) when project markers are detected.
+     * Example: kernel.registerSidecar(".go", new GoLspSidecar(root));
+     */
+    public registerSidecar(ext: string, sidecar: LspSidecarBase): void {
+        this.lspSidecars.set(ext, sidecar);
+    }
+
+    /**
+     * Shutdown all LSP sidecars (kill child processes).
+     * Called on MCP server close to prevent orphan processes.
+     */
+    public async shutdownSidecars(): Promise<void> {
+        const unique = new Set(this.lspSidecars.values());
+        for (const sidecar of unique) {
+            try { await sidecar.shutdown(); } catch { /* best effort */ }
+        }
+        this.lspSidecars.clear();
     }
 }

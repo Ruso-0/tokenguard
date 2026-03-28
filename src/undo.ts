@@ -34,10 +34,22 @@ export function getBackupPath(projectRoot: string, filePath: string): string {
 /**
  * Save a backup of the current file content before editing.
  * Only keeps the LAST backup per file.
+ * Skips binary files (non-UTF-8) to prevent silent corruption.
  */
 export function saveBackup(projectRoot: string, filePath: string): void {
-    const resolved = path.resolve(filePath);
-    const content = fs.readFileSync(resolved, "utf-8");
+    // AUDIT FIX: Always resolve against projectRoot (consistent with getBackupPath)
+    const resolved = path.resolve(projectRoot, filePath);
+
+    // AUDIT FIX: Skip binary files — readFileSync("utf-8") silently corrupts non-text
+    let content: string;
+    try {
+        content = fs.readFileSync(resolved, "utf-8");
+    } catch {
+        return; // File doesn't exist or read error — nothing to backup
+    }
+
+    // Heuristic binary check: null bytes in first 8KB indicate binary
+    if (content.slice(0, 8192).includes("\0")) return;
 
     const dir = getBackupsDir(projectRoot);
     if (!fs.existsSync(dir)) {
@@ -63,7 +75,7 @@ export function restoreBackup(projectRoot: string, filePath: string): string {
     }
 
     const content = fs.readFileSync(backupPath, "utf-8");
-    const resolved = path.resolve(filePath);
+    const resolved = path.resolve(projectRoot, filePath);
     fs.writeFileSync(resolved, content, "utf-8");
 
     // Remove the backup after restore (one-shot undo)

@@ -40,6 +40,7 @@ import { wrapWithCircuitBreaker } from "./middleware/circuit-breaker.js";
 import { PreToolUseHook } from "./hooks/preToolUse.js";
 import { NrekiKernel } from "./kernel/nreki-kernel.js";
 import { ChronosMemory } from "./chronos-memory.js";
+import { logger } from "./utils/logger.js";
 
 // ─── Performance Mode Auto-Detection ────────────────────────────────
 
@@ -117,15 +118,15 @@ if (args[0] === "init") {
     if (fs.existsSync(claudePath)) {
         const existing = fs.readFileSync(claudePath, "utf-8");
         if (existing.includes(marker)) {
-            console.error("[NREKI] CLAUDE.md already contains NREKI instructions. Skipping.");
+            logger.info("CLAUDE.md already contains NREKI instructions. Skipping.");
             process.exit(0);
         }
         // Append to existing CLAUDE.md
         fs.appendFileSync(claudePath, "\n\n" + getClaudeMdContent(), "utf-8");
-        console.error("[NREKI] Appended NREKI instructions to existing CLAUDE.md");
+        logger.info("Appended NREKI instructions to existing CLAUDE.md");
     } else {
         fs.writeFileSync(claudePath, getClaudeMdContent(), "utf-8");
-        console.error("[NREKI] Created CLAUDE.md in " + process.cwd());
+        logger.info("Created CLAUDE.md in " + process.cwd());
     }
     process.exit(0);
 }
@@ -159,16 +160,42 @@ if (fs.existsSync(tsconfigPath)) {
     nrekiMode = detectMode(process.cwd());
 
     if (nrekiMode === "syntax") {
-        console.error("[NREKI] SYNTAX mode. Kernel disabled. Layer 1 AST only.");
+        logger.info("SYNTAX mode. Kernel disabled. Layer 1 AST only.");
     } else {
-        console.error(`[NREKI] ${nrekiMode.toUpperCase()} mode detected. Kernel boots on first edit.`);
+        logger.info(`${nrekiMode.toUpperCase()} mode detected. Kernel boots on first edit.`);
         kernel = new NrekiKernel(); // Instantiated but NOT booted
     }
 } else {
-    console.error(
-        "[NREKI] No tsconfig.json found. Semantic verification disabled. " +
-        "Operating in Tree-sitter-only mode (Layer 1)."
+    logger.info(
+        "No tsconfig.json found. Semantic verification disabled. " +
+        "Operating in Tree-sitter-only mode (Layer 1).",
     );
+}
+
+// ─── LSP Sidecars (auto-detect Go and Python projects) ──────────
+if (kernel) {
+    // Go: detect go.mod → register gopls sidecar
+    if (fs.existsSync(path.join(process.cwd(), "go.mod"))) {
+        try {
+            const { GoLspSidecar } = await import("./kernel/backends/go-sidecar.js");
+            kernel.registerSidecar(".go", new GoLspSidecar(process.cwd()));
+            logger.info("Go project detected (go.mod). gopls sidecar registered.");
+        } catch (err) {
+            logger.error(`Failed to load Go sidecar: ${(err as Error).message}`);
+        }
+    }
+
+    // Python: detect pyproject.toml, requirements.txt, setup.py, Pipfile → register pyright sidecar
+    const pyMarkers = ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"];
+    if (pyMarkers.some(f => fs.existsSync(path.join(process.cwd(), f)))) {
+        try {
+            const { PythonLspSidecar } = await import("./kernel/backends/python-sidecar.js");
+            kernel.registerSidecar(".py", new PythonLspSidecar(process.cwd()));
+            logger.info("Python project detected. pyright sidecar registered.");
+        } catch (err) {
+            logger.error(`Failed to load Python sidecar: ${(err as Error).message}`);
+        }
+    }
 }
 
 const hook = new PreToolUseHook({ tokenThreshold: 1000 });
@@ -180,8 +207,8 @@ const server = new McpServer({
 });
 
 if (!enableEmbeddings) {
-    console.error(
-        "[NREKI] Running in Lite mode (BM25 keyword search only). " +
+    logger.info(
+        "Running in Lite mode (BM25 keyword search only). " +
         "Run with --enable-embeddings for semantic search.",
     );
 }
@@ -347,7 +374,7 @@ server.tool(
     "and get session reports.",
     {
         action: z
-            .enum(["pin", "unpin", "status", "report", "reset", "set_plan", "memorize"])
+            .enum(["pin", "unpin", "status", "report", "reset", "set_plan", "memorize", "audit"])
             .describe(
                 "pin: add a persistent rule (injected into every map response). " +
                 "unpin: remove a pinned rule. " +
@@ -355,7 +382,8 @@ server.tool(
                 "report: full session savings receipt. " +
                 "reset: clear circuit breaker state to resume editing. " +
                 "set_plan: anchor a master plan file to prevent Claude from forgetting it during context compaction. " +
-                "memorize: write your current progress/thoughts to NREKI's active memory.",
+                "memorize: write your current progress/thoughts to NREKI's active memory. " +
+                "audit: run AHI (Automated Hardening Index) audit on the project.",
             ),
         text: z
             .string()
@@ -428,15 +456,15 @@ async function main(): Promise<void> {
                 const { classifyAndGenerateShadow } = await import("./hologram/shadow-generator.js");
                 kernel!.setJitParser(jitParser, tsLanguage);
                 kernel!.setJitClassifier(classifyAndGenerateShadow);
-                console.error("[NREKI] WASM parser pre-loaded. JIT Holography ready.");
+                logger.info("WASM parser pre-loaded. JIT Holography ready.");
             } catch (err) {
-                console.error(`[NREKI] WASM pre-load failed: ${(err as Error).message}`);
+                logger.warn(`WASM pre-load failed: ${(err as Error).message}`);
             }
         });
     }
 }
 
 main().catch((err) => {
-    console.error(`[NREKI] Fatal error: ${err.message}`);
+    logger.error(`Fatal error: ${err.message}`);
     process.exit(1);
 });

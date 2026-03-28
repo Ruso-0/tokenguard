@@ -25,7 +25,7 @@ import {
     preprocess,
     scoreTokens,
     filterTokens,
-} from "../src/compressor-advanced.js";
+} from "../src/compressor.js";
 import { PreToolUseHook } from "../src/hooks/preToolUse.js";
 import { Embedder } from "../src/embedder.js";
 

@@ -36,9 +36,11 @@ npm-debug.log*
 
 # Benchmark & test artifacts
 .nreki-bench*
+.nreki.vec
 .tokenguard-bench.vec
 .tokenguard-bench2.vec
 test-results-sicaep.json
+test-output.txt
 scripts/bench-compress.ts
 AUDIT_PACKAGE.md
 hologram-benchmark.mjs
@@ -46,6 +48,7 @@ hologram-lazy-benchmark.mjs
 hologram-scanner.mjs
 nreki-vscode-benchmark.md
 repomix-output.txt
+diag-parser.ts
 prisma-test/
 
 # NREKI runtime directory

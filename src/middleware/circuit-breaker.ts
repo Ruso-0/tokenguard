@@ -163,10 +163,25 @@ export function wrapWithCircuitBreaker(
         }
 
         // Execute the actual handler
-        const response = await handler();
+        // PATCH-4: Catch handler exceptions so the circuit breaker can see them.
+        // Without this, thrown errors bypass recordToolCall entirely, making
+        // the breaker blind to ENOENT loops, timeout cascades, etc.
+        let response: McpToolResponse;
+        try {
+            response = await handler();
+        } catch (err) {
+            response = {
+                content: [{
+                    type: "text" as const,
+                    text: `[NREKI] Fatal tool error: ${(err as Error).message}\n\n[NREKI saved ~0 tokens]`,
+                }],
+                isError: true,
+            };
+        }
 
         // Record the result for pattern detection
-        const responseText = response.content.map(c => c.text ?? "").filter(Boolean).join("\n");
+        // Truncate to 2KB before hashing — terminal output can be megabytes
+        const responseText = response.content.map(c => c.text ?? "").filter(Boolean).join("\n").slice(0, 2048);
         const hasError = response.isError === true || containsError(responseText);
 
         if (hasError) {
@@ -190,11 +205,11 @@ export function wrapWithCircuitBreaker(
 }
 
 /**
- * Reset middleware state (for testing).
+ * Legacy cleanup hook. Intentionally a no-op since v7.0.
  * WeakMap entries are GC'd when the CB instance is collected.
- * This function exists for backward compatibility.
+ * Tests create fresh CircuitBreaker instances, so no stale state persists.
+ * @deprecated Will be removed in v8. Tests should stop calling this.
  */
 export function resetMiddlewareState(): void {
-    // No-op: WeakMap state is per-instance and auto-collected.
-    // Tests create fresh CircuitBreaker instances, so no stale state persists.
+    // No-op: retained for backward compatibility with test imports.
 }

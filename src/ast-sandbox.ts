@@ -120,6 +120,9 @@ export class AstSandbox {
             }
         });
 
+        // Serialization gate: suppress the promise chain's rejection so that
+        // concurrent callers can await this.loadGate without triggering
+        // unhandled promise warnings. The actual error propagates via `load`.
         this.loadGate = load.then(() => {}, () => {});
         return load;
     }
@@ -164,13 +167,26 @@ export class AstSandbox {
                 const errors: AstError[] = [];
                 this.walkForErrors(tree.rootNode, lines, errors);
 
+                // Safety net: check for trailing ERROR at EOF that walkForErrors
+                // might miss if tree-sitter recovery hides it from hasError propagation
+                const lastChild = tree.rootNode.lastChild;
+                if (lastChild && (lastChild.type === "ERROR" || lastChild.isMissing) &&
+                    !errors.some(e => e.line === lastChild.startPosition.row + 1)) {
+                    errors.push({
+                        line: lastChild.startPosition.row + 1,
+                        column: lastChild.startPosition.column + 1,
+                        nodeType: lastChild.isMissing ? `MISSING(${lastChild.type})` : "ERROR",
+                        context: lines[lastChild.startPosition.row] ?? "",
+                    });
+                }
+
                 if (errors.length === 0) {
                     // hasError was true but no ERROR/MISSING nodes found
                     // (can happen with certain recoverable parse states)
                     return { valid: true, errors: [], suggestion: "" };
                 }
 
-                const suggestion = this.generateSuggestion(errors, lines);
+                const suggestion = this.generateSuggestion(errors);
                 return { valid: false, errors, suggestion };
             });
         } finally {
@@ -230,7 +246,7 @@ export class AstSandbox {
         depth: number = 0
     ): void {
         // M-09: Guard against stack overflow on deeply nested ASTs
-        if (depth > 200) return;
+        if (depth > 500) return;
 
         if (node.type === "ERROR" || node.isMissing) {
             const line = node.startPosition.row + 1;
@@ -267,7 +283,7 @@ export class AstSandbox {
      * Combines error location, context line, and heuristic hints
      * to help Claude understand exactly what went wrong.
      */
-    private generateSuggestion(errors: AstError[], _lines: string[]): string {
+    private generateSuggestion(errors: AstError[]): string {
         const parts: string[] = [];
 
         for (const error of errors) {
@@ -300,6 +316,11 @@ export class AstSandbox {
                 error.nodeType === "MISSING())"
             ) {
                 detail += ". Possible unclosed parenthesis '('";
+            } else if (
+                (ctx.match(/\[/) && !ctx.match(/\]/)) ||
+                error.nodeType === "MISSING(])"
+            ) {
+                detail += ". Possible unclosed bracket '['";
             } else if (error.nodeType === "MISSING(;)") {
                 detail += ". Add a semicolon ';'";
             }

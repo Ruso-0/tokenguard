@@ -1,31 +1,50 @@
 /**
- * typescript-strada.ts — TypeScript Backend (Strada API)
+ * ts-compiler-wrapper.ts - TypeScript Compiler Wrapper
  *
- * Wraps the current NrekiKernel's TypeScript Compiler API usage.
- * This is the STUB implementation for Strangler Fig Phase 1.
+ * Private wrapper encapsulating TypeScript compiler infrastructure.
+ * Uses the "Strada" pattern: Build -> LanguageService -> CompilerHost.
  *
- * All methods return empty/noop results. The kernel continues using
- * its internal logic directly. This stub exists ONLY to prove that
- * the interface compiles and the 704 tests still pass.
- *
- * In Phase 2+, real logic will be extracted from NrekiKernel into here.
- *
- * Dies with TypeScript 7.0 Strada API. Replaced by TypeScriptLSPBackend.
+ * The wrapper is a pure computation slave: it computes diagnostics
+ * but has no authority over the VFS or disk. The NrekiKernel
+ * orchestrates all state transitions.
  *
  * @author Jherson Eddie Tintaya Holguin (Ruso-0)
+ *
+ * Compiler Architecture:
+ *   CompilerHost → BuilderProgram → LanguageService
+ *   One DocumentRegistry shared across all instances.
  */
 
 import * as ts from "typescript";
 import * as path from "path";
 import * as crypto from "crypto";
-import type {
-    LanguageBackend,
-    BackendCapabilities,
-    BackendFix,
-    VfsAdapter,
-} from "../language-backend.js";
+// ─── Inlined Types (formerly in language-backend.ts) ────────────────
+
+export interface BackendCapabilities {
+    supportsAutoHealing: boolean;
+    supportsTTRD: boolean;
+}
+
+export interface BackendFix {
+    description: string;
+    changes: Array<{
+        filePath: string;
+        textChanges: Array<{ start: number; length: number; newText: string }>;
+    }>;
+}
+
+export interface VfsAdapter {
+    readFile(fileName: string): string | undefined;
+    fileExists(fileName: string): boolean;
+    getModifiedTime(fileName: string): Date;
+    directoryExists(dirName: string): boolean;
+    getScriptVersion(fileName: string): string;
+    getScriptSnapshot(fileName: string): ts.IScriptSnapshot | undefined;
+}
 import type { NrekiStructuredError, PreEditContract, TypeRegression } from "../nreki-kernel.js";
 import { escapeRegExp } from "../../utils/imports.js";
+import { toPosix as toPosixUtil } from "../../utils/to-posix.js";
+import { logger } from "../../utils/logger.js";
 
 // ─── Environment file classifier (copied from kernel) ─────────────
 const ENV_FILE_BASENAMES = new Set([
@@ -48,7 +67,7 @@ const isEnvironmentFile = (filePath: string): boolean => {
     return base.endsWith(".d.ts") || base.startsWith(".") || ENV_FILE_BASENAMES.has(base);
 };
 
-export class TypeScriptStradaBackend implements LanguageBackend {
+export class TsCompilerWrapper {
     readonly name = "TypeScript-Strada";
 
     readonly capabilities: BackendCapabilities = {
@@ -82,10 +101,8 @@ export class TypeScriptStradaBackend implements LanguageBackend {
     private baselineFrequencies = new Map<string, number>();
     private lastRawDiagnostics: ts.Diagnostic[] = [];
 
-    // POSIX normalization (duplicated from kernel — 1 line, no shared dependency needed)
-    private toPosix(p: string): string {
-        return path.normalize(p).replace(/\\/g, "/");
-    }
+    // POSIX normalization — delegates to shared utility
+    private toPosix(p: string): string { return toPosixUtil(p); }
 
     /**
      * Read tsconfig.json and initialize compilerOptions + rootNames.
@@ -210,7 +227,7 @@ export class TypeScriptStradaBackend implements LanguageBackend {
      */
     public updateProgram(): void {
         if (this.isStateCorrupted) {
-            console.error("[NREKI] Purging builder and LanguageService after early exit. Warm rebuild ~2-5s.");
+            logger.warn("Purging builder and LanguageService after early exit. Warm rebuild ~2-5s.");
             this.builderProgram = undefined;
 
             this.documentRegistry = ts.createDocumentRegistry(
@@ -315,9 +332,12 @@ export class TypeScriptStradaBackend implements LanguageBackend {
         if (mode === "project") {
             for (const file of program.getSourceFiles()) {
                 for (const diag of program.getSyntacticDiagnostics(file)) processDiag(diag);
+                // Use program.getSemanticDiagnostics(file) per file instead of
+                // builderProgram.getSemanticDiagnostics() to avoid consuming the
+                // builder's stateful affected-file iterator.
+                for (const diag of program.getSemanticDiagnostics(file)) processDiag(diag);
             }
             for (const diag of program.getGlobalDiagnostics()) processDiag(diag);
-            for (const diag of this.builderProgram.getSemanticDiagnostics()) processDiag(diag);
             return;
         }
 
@@ -529,16 +549,7 @@ export class TypeScriptStradaBackend implements LanguageBackend {
         return this.baselineFrequencies.size;
     }
 
-    async boot(_workspacePath: string, _mode: "file" | "project" | "hologram"): Promise<void> {
-        // STUB: Boot is still orchestrated by NrekiKernel.boot().
-        // initConfig() is called explicitly by the kernel, not from here.
-        // Phase 2+ will move the full boot sequence here.
-    }
 
-    async applyVirtualEdits(_edits: Array<{ filePath: string; content: string | null }>): Promise<void> {
-        // STUB: Real VFS injection lives in NrekiKernel.interceptAtomicBatch() for now.
-        // Phase 2+ will extract vfs.set() + vfsClock.set() here.
-    }
 
     async getDiagnostics(
         filesToEvaluate: Set<string>,
@@ -554,7 +565,7 @@ export class TypeScriptStradaBackend implements LanguageBackend {
         const fatalErrors: ts.Diagnostic[] = [];
         const program = this.builderProgram.getProgram();
 
-        const errorThreshold = 50 + (editedFiles.size * 20);
+        const errorThreshold = Math.min(500, 50 + (editedFiles.size * 20));
         const touchedEnvironment = Array.from(editedFiles).some(isEnvironmentFile);
 
         const processDiag = (diag: ts.Diagnostic) => {
@@ -621,21 +632,63 @@ export class TypeScriptStradaBackend implements LanguageBackend {
         return fatalErrors.map(d => this.toStructured(d));
     }
 
-    async getAutoFixes(_filePath: string, _error: NrekiStructuredError): Promise<BackendFix[]> {
-        // STUB: Real healing lives in NrekiKernel.attemptAutoHealing() for now.
-        // Phase 2+ will extract getCodeFixesAtPosition() here.
-        return [];
+    // Safe fix whitelist: only 100% structural fixes that don't mutate business logic.
+    private static readonly SAFE_FIXES = new Set([
+        "import",
+        "fixMissingImport",
+        "fixAwaitInSyncFunction",
+        "fixPromiseResolve",
+        "fixMissingProperties",
+        "fixClassDoesntImplementInheritedAbstractMember",
+        "fixAddMissingMember",
+        "fixAddOverrideModifier",
+    ]);
+
+    async getAutoFixes(filePath: string, error: NrekiStructuredError): Promise<BackendFix[]> {
+        if (!this.languageService) return [];
+
+        // Find the matching raw diagnostic (need byte offsets for TS API)
+        const errorCode = Number(error.code.replace("TS", ""));
+        const rawDiag = this.lastRawDiagnostics.find(d =>
+            d.file &&
+            d.code === errorCode &&
+            d.start !== undefined &&
+            d.length !== undefined &&
+            (this.toPosix(d.file.fileName) === filePath || this.toPosix(d.file.fileName).endsWith("/" + filePath))
+        );
+
+        if (!rawDiag || rawDiag.start === undefined || rawDiag.length === undefined || !rawDiag.file) {
+            return [];
+        }
+
+        const posixPath = this.toPosix(rawDiag.file.fileName);
+        const formatOptions = ts.getDefaultFormatCodeSettings();
+        const preferences: ts.UserPreferences = {};
+
+        const tsFixes = this.languageService.getCodeFixesAtPosition(
+            posixPath, rawDiag.start, rawDiag.start + rawDiag.length,
+            [errorCode], formatOptions, preferences
+        );
+
+        const results: BackendFix[] = [];
+        for (const fix of tsFixes) {
+            if (!TsCompilerWrapper.SAFE_FIXES.has(fix.fixName)) continue;
+
+            results.push({
+                description: fix.description,
+                changes: fix.changes.map(change => ({
+                    filePath: this.toPosix(change.fileName),
+                    textChanges: change.textChanges.map(tc => ({
+                        start: tc.span.start,
+                        length: tc.span.length,
+                        newText: tc.newText,
+                    })),
+                })),
+            });
+        }
+
+        return results;
     }
 
 
-
-    async shutdown(): Promise<void> {
-        // STUB: TypeScript backend is in-process. Nothing to kill.
-        // In LSP backends, this would be kill -9 on the child process.
-    }
-
-    isHealthy(): boolean {
-        // In-process TypeScript compiler can't crash independently.
-        return true;
-    }
 }

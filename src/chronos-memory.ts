@@ -70,7 +70,11 @@ export class ChronosMemory {
 
         const tmp = `${this.dbPath}.${crypto.randomBytes(4).toString("hex")}.tmp`;
         fs.writeFileSync(tmp, JSON.stringify(this.state, null, 2), "utf-8");
-        fs.renameSync(tmp, this.dbPath);
+        try {
+            fs.renameSync(tmp, this.dbPath);
+        } catch {
+            try { fs.unlinkSync(tmp); } catch { /* best effort cleanup */ }
+        }
     }
 
     private startSession(): void {
@@ -96,7 +100,13 @@ export class ChronosMemory {
             if (sessionsPassed > 0) {
                 data.cfiScore *= Math.pow(this.SESSION_DECAY, sessionsPassed);
                 data.lastSessionTouched = this.state.currentSessionId;
-                if (data.cfiScore < 1.0) delete this.state.files[file];
+                if (data.cfiScore < 1.0) {
+                    if (!data.unpaidTypeDebts || data.unpaidTypeDebts.length === 0) {
+                        delete this.state.files[file]; // Safe to forget — no outstanding debts
+                    } else {
+                        data.cfiScore = 0; // Keep the ledger alive — debts are eternal until paid
+                    }
+                }
             }
         }
         this.forcePersist();
@@ -249,7 +259,7 @@ export class ChronosMemory {
             // even if the original type was itself "toxic" (e.g., unknown).
             // Without this, unknown→any→unknown creates an eternal prison
             // where the debt never clears because isToxicType("unknown") = true.
-            if (currentType === debt.strictType || !NrekiKernel.isToxicType(currentType)) {
+            if (currentType.trim() === debt.strictType.trim() || !NrekiKernel.isToxicType(currentType)) {
                 paidSymbols.push(debt.symbol);
                 return false; // Debt cleared: type restored or detoxified
             }

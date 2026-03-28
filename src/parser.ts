@@ -13,6 +13,7 @@ import Parser from "web-tree-sitter";
 import path from "path";
 import { fileURLToPath } from "url";
 import { safeParse } from "./utils/safe-parse.js";
+import { logger } from "./utils/logger.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -191,9 +192,7 @@ export class ASTParser {
                 this.languageCache.set(ext, language);
                 return language;
             } catch (err) {
-                console.error(
-                    `[NREKI] Failed to load grammar for ${ext}: ${(err as Error).message}`
-                );
+                logger.error(`Failed to load grammar for ${ext}: ${(err as Error).message}`);
                 return null;
             }
         });
@@ -216,9 +215,7 @@ export class ASTParser {
             this.queryCache.set(ext, query);
             return query;
         } catch (err) {
-            console.error(
-                `[NREKI] Failed to create query for ${ext}: ${(err as Error).message}`
-            );
+            logger.error(`Failed to create query for ${ext}: ${(err as Error).message}`);
             return null;
         }
     }
@@ -365,10 +362,26 @@ export class ASTParser {
 
         for (let i = 0; i < rawCode.length; i++) {
             const char = rawCode[i];
+
+            // Skip string literals to avoid counting brackets inside them
+            if (char === '"' || char === "'" || char === "`") {
+                const quote = char;
+                i++;
+                while (i < rawCode.length) {
+                    if (rawCode[i] === "\\" ) { i++; }
+                    else if (rawCode[i] === quote) break;
+                    i++;
+                }
+                continue;
+            }
+
             if (char === "(") braceDepth++;
             if (char === ")") braceDepth--;
             if (char === "<") angleDepth++;
-            if (char === ">") angleDepth--;
+            // PATCH-3: Guard against `=>` arrow operator decrementing angleDepth below 0.
+            // Without this, arrow functions never hit the `angleDepth === 0` exit condition,
+            // causing the entire function body to be extracted as the "signature".
+            if (char === ">" && !(i > 0 && rawCode[i - 1] === "=") && angleDepth > 0) angleDepth--;
 
             // Signature ends at the first `{` at depth 0 (JS/TS/Go)
             // or first `:` at depth 0 for Python (A-02: skip colons inside parens)
@@ -378,7 +391,7 @@ export class ASTParser {
             }
             if (char === ":" && braceDepth === 0 && angleDepth === 0) {
                 // Python def/class colon - only match if this looks like Python
-                if (/^(?:async\s+)?def\s|^class\s/.test(rawCode)) {
+                if (/(?:^|\n)\s*(?:async\s+)?def\s|(?:^|\n)\s*class\s/.test(rawCode)) {
                     const signature = rawCode.slice(0, i + 1).trim();
                     return `[${nodeType}] ${signature} # TG:L${startLine}-L${endLine}`;
                 }

@@ -30,6 +30,9 @@ const SENSITIVE_PATTERNS: RegExp[] = [
     /[/\\]\.htpasswd$/i,               // Apache password file
     /[/\\]\.git-credentials$/i,         // Git credential file
     /[/\\]\.kube[/\\]config$/i,         // Kubernetes config
+    /\.age$/i,                          // age encryption keys
+    /[/\\]vault-token$/i,               // HashiCorp Vault token
+    /[/\\]\.terraform[/\\]/i,           // Terraform state (may contain secrets)
 ];
 
 /**

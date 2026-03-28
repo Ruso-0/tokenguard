@@ -87,8 +87,8 @@ function ahiToLevel(ahi: number): AuditReport["level"] {
 
 // ─── Test Detection ─────────────────────────────────────────────────
 
-const TEST_PATTERNS = [".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx", ".test.js", ".spec.js"];
-const IGNORE_DIRS = new Set(["node_modules", "dist", "build", ".git", "coverage", ".next", "__pycache__", ".nreki"]);
+const TEST_PATTERNS = [".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx", ".test.js", ".spec.js", ".test.mts", ".spec.mts", ".test.mjs", ".spec.mjs"];
+const IGNORE_DIRS = new Set(["node_modules", "dist", "build", ".git", "coverage", ".next", "__pycache__", ".nreki", ".turbo", ".vercel", ".svelte-kit"]);
 
 function findTestFiles(projectRoot: string): Set<string> {
     const testFiles = new Set<string>();
@@ -109,6 +109,9 @@ function findTestFiles(projectRoot: string): Set<string> {
     return testFiles;
 }
 
+/** Cached test file heads — avoids O(N*M) readFileSync calls across core files. */
+const testHeadCache = new Map<string, string>();
+
 function fileHasTest(filePath: string, _projectRoot: string, testFiles: Set<string>): boolean {
     const baseName = path.basename(filePath).replace(/\.(ts|tsx|js|jsx)$/, "");
     for (const testFile of testFiles) {
@@ -116,9 +119,13 @@ function fileHasTest(filePath: string, _projectRoot: string, testFiles: Set<stri
         if (testBase.startsWith(baseName + ".test.") || testBase.startsWith(baseName + ".spec.")) {
             return true;
         }
-        // Check if test file imports the target (first 50 lines for perf)
+        // Check if test file imports the target (first 50 lines, cached)
         try {
-            const head = fs.readFileSync(testFile, "utf-8").split("\n").slice(0, 50).join("\n");
+            let head = testHeadCache.get(testFile);
+            if (head === undefined) {
+                head = fs.readFileSync(testFile, "utf-8").split("\n").slice(0, 50).join("\n");
+                testHeadCache.set(testFile, head);
+            }
             if (head.includes(baseName) && (head.includes("import") || head.includes("require"))) {
                 return true;
             }

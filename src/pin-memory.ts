@@ -15,7 +15,7 @@ export interface PinnedRule {
     id: string;
     text: string;
     createdAt: number;
-    source: "user" | "claude";
+    source: "user" | "claude" | "agent";
 }
 
 // ─── Constants ──────────────────────────────────────────────────────
@@ -127,7 +127,7 @@ function escapePinContent(text: string): string {
 export function addPin(
     projectRoot: string,
     text: string,
-    source: "user" | "claude"
+    source: "user" | "claude" | "agent"
 ): { success: true; pin: PinnedRule } | { success: false; error: string } {
     if (text.length > MAX_PIN_LENGTH) {
         return {

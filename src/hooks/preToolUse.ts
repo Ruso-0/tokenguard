@@ -15,7 +15,7 @@ import fs from "fs";
 import path from "path";
 import { Embedder } from "../embedder.js";
 import { readSource } from "../utils/read-source.js";
-import type { CompressionLevel } from "../compressor-advanced.js";
+import type { CompressionLevel } from "../compressor.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
