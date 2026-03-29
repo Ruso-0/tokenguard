@@ -420,6 +420,29 @@ export function resolveImportFast(
                 if (resolved) return resolved;
             }
         }
+        // Python dot-notation: "app.core.auth" → "app/core/auth"
+        if (importStr.includes(".") && !importStr.includes("/")) {
+            const asPath = importStr.replace(/\./g, "/");
+            const resolved = lookup.get(asPath);
+            if (resolved) return resolved;
+            // Try without top-level package: "app.core.auth" → "core/auth"
+            const parts = asPath.split("/");
+            for (let i = 1; i < parts.length; i++) {
+                const sub = parts.slice(i).join("/");
+                const r = lookup.get(sub);
+                if (r) return r;
+            }
+        }
+        // Go package resolution: "github.com/org/project/utils" → match by suffix
+        if (importStr.includes("/") && !importStr.startsWith(".")) {
+            const segments = importStr.split("/");
+            // Try progressively shorter suffixes: utils, project/utils, org/project/utils
+            for (let i = segments.length - 1; i >= 0; i--) {
+                const suffix = segments.slice(i).join("/");
+                const resolved = lookup.get(suffix);
+                if (resolved) return resolved;
+            }
+        }
         return null;
     }
     let target = importStr.replace(/^@\//, "src/");

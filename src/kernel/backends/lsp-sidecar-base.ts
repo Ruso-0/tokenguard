@@ -41,12 +41,12 @@ interface RpcResponseError {
 
 // ─── LSP Diagnostic Types ───────────────────────────────────────────
 
-interface LspPosition {
+export interface LspPosition {
     line: number;
     character: number;
 }
 
-interface LspRange {
+export interface LspRange {
     start: LspPosition;
     end: LspPosition;
 }
@@ -81,8 +81,8 @@ export abstract class LspSidecarBase {
     private diagnostics = new Map<string, LspDiagnostic[]>();
     private openedFiles = new Set<string>();
 
-    private realProjectRoot: string;
-    private workspaceUri: string;
+    protected realProjectRoot: string;
+    protected workspaceUri: string;
 
     /** True if the process has exited or failed to boot. */
     public isDead = false;
@@ -111,7 +111,7 @@ export abstract class LspSidecarBase {
     // ─── Path Utilities ─────────────────────────────────────────────
 
     // POSIX normalization — delegates to shared utility
-    private toPosix(p: string): string { return toPosixUtil(p); }
+    protected toPosix(p: string): string { return toPosixUtil(p); }
 
     private toUri(p: string): string {
         const n = this.toPosix(p);
@@ -332,6 +332,76 @@ export abstract class LspSidecarBase {
         return errors;
     }
 
+    /**
+     * Request code actions (quickfixes) for a diagnostic.
+     * Returns TextEdit[] that the kernel can apply to VFS.
+     * The kernel decides if the fix is safe (whitelist).
+     */
+    async requestCodeActions(
+        filePath: string,
+        diagnostic: { range: LspRange; message: string; code?: number | string; source?: string }
+    ): Promise<Array<{ filePath: string; range: LspRange; newText: string; title: string }>> {
+        if (!this.proc || this.isDead) return [];
+
+        const relPath = this.toPosix(path.relative(this.realProjectRoot, filePath));
+        const uri = `${this.workspaceUri}/${relPath}`;
+
+        try {
+            const result = await this.request("textDocument/codeAction", {
+                textDocument: { uri },
+                range: diagnostic.range,
+                context: {
+                    diagnostics: [{
+                        range: diagnostic.range,
+                        message: diagnostic.message,
+                        code: diagnostic.code,
+                        source: diagnostic.source,
+                    }],
+                    only: ["quickfix"],
+                },
+            }, 5_000) as any[];
+
+            if (!result || !Array.isArray(result)) return [];
+
+            const edits: Array<{ filePath: string; range: LspRange; newText: string; title: string }> = [];
+
+            for (const action of result) {
+                if (!action.edit?.documentChanges && !action.edit?.changes) continue;
+
+                // WorkspaceEdit.changes format
+                const changes = action.edit?.changes || {};
+                for (const [changeUri, textEdits] of Object.entries(changes)) {
+                    for (const te of textEdits as any[]) {
+                        edits.push({
+                            filePath: changeUri.replace(this.workspaceUri + "/", ""),
+                            range: te.range,
+                            newText: te.newText,
+                            title: action.title || "",
+                        });
+                    }
+                }
+
+                // WorkspaceEdit.documentChanges format
+                for (const dc of action.edit?.documentChanges || []) {
+                    if (!dc.edits) continue;
+                    const dcUri = dc.textDocument?.uri || "";
+                    for (const te of dc.edits) {
+                        edits.push({
+                            filePath: dcUri.replace(this.workspaceUri + "/", ""),
+                            range: te.range,
+                            newText: te.newText,
+                            title: action.title || "",
+                        });
+                    }
+                }
+            }
+
+            return edits;
+        } catch {
+            return [];
+        }
+    }
+
     // ─── JSON-RPC Engine ────────────────────────────────────────────
 
     /** Parse incoming JSON-RPC frames from stdout. Uses Buffer (not string) for emoji safety. */
@@ -396,7 +466,7 @@ export abstract class LspSidecarBase {
     }
 
     /** Send a JSON-RPC request and wait for response. Rejects on timeout. */
-    private request(method: string, params: unknown, timeoutMs = 15_000): Promise<unknown> {
+    protected request(method: string, params: unknown, timeoutMs = 15_000): Promise<unknown> {
         if (!this.proc || this.isDead) {
             return Promise.reject(new Error(`${this.command[0]} is not running`));
         }
