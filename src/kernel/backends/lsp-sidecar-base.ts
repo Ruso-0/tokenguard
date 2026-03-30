@@ -141,10 +141,29 @@ export abstract class LspSidecarBase {
 
         return new Promise<void>((resolve, reject) => {
             try {
+                // ENV WHITELIST: Never propagate secrets (API keys, DB passwords, tokens)
+                // to third-party LSP binaries operating on untrusted code.
+                const SAFE_ENV_KEYS = [
+                    "PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
+                    "TMPDIR", "TEMP", "TMP", "TERM",
+                    // Go toolchain
+                    "GOPATH", "GOROOT", "GOMODCACHE", "GOFLAGS", "GOPROXY", "GONOSUMCHECK",
+                    // Python toolchain
+                    "PYTHONPATH", "VIRTUAL_ENV", "CONDA_DEFAULT_ENV", "CONDA_PREFIX",
+                    // Node (for tsx wrappers)
+                    "NODE_PATH", "NODE_OPTIONS",
+                ];
+                const safeEnv: Record<string, string> = {};
+                for (const key of SAFE_ENV_KEYS) {
+                    if (process.env[key] !== undefined) safeEnv[key] = process.env[key]!;
+                }
+                const finalEnv = this.spawnEnv ? { ...safeEnv, ...this.spawnEnv } : safeEnv;
+
                 this.proc = spawn(this.command[0], this.command.slice(1), {
                     cwd: this.realProjectRoot,
-                    env: this.spawnEnv ? { ...process.env, ...this.spawnEnv } : undefined,
+                    env: finalEnv,
                     stdio: ["pipe", "pipe", "pipe"],
+                    detached: process.platform !== "win32",
                 });
 
                 // Attach anti-zombie listeners now that proc exists
@@ -263,10 +282,20 @@ export abstract class LspSidecarBase {
                     this.proc.stdin.end();
                     this.proc.stdin.destroy();
                 }
-                this.proc.kill("SIGKILL");
+                // Kill the entire process group (-pid) on POSIX to prevent
+                // orphaned workers (gopls analyzers, pyright background threads).
+                if (process.platform !== "win32" && this.proc.pid) {
+                    try {
+                        process.kill(-this.proc.pid, "SIGKILL");
+                    } catch {
+                        this.proc.kill("SIGKILL");
+                    }
+                } else {
+                    this.proc.kill("SIGKILL");
+                }
             } catch { /* already dead */ }
         }
-        this.cleanupState(`[NREKI] ${this.command[0]} process terminated forcefully`);
+        this.cleanupState(`[NREKI] ${this.command[0]} process tree terminated forcefully`);
     }
 
     /**
@@ -333,31 +362,30 @@ export abstract class LspSidecarBase {
         // Collect diagnostics: pull (deterministic) or push (settle timer)
         if (changed) {
             if (this.supportsPullDiagnostics) {
-                // PULL MODE: Request diagnostics explicitly. Zero timers.
-                for (const edit of edits) {
-                    if (edit.content === null) continue;
-                    const relPath = this.toPosix(path.relative(this.realProjectRoot, edit.filePath));
-                    const uri = `${this.workspaceUri}/${relPath}`;
-                    await this.pullDiagnostics(uri);
+                // PULL MODE: Request diagnostics for ALL open files, not just edited ones.
+                // This catches cross-file breakage (editing api.py breaks consumer.py).
+                const pullPromises: Promise<void>[] = [];
+                for (const uri of this.openedFiles) {
+                    pullPromises.push(this.pullDiagnostics(uri));
                 }
+                await Promise.all(pullPromises);
             } else {
                 // PUSH MODE (fallback): Wait for server to push diagnostics.
                 await this.waitForSettle(5_000, 150);
             }
         }
 
-        // Collect errors (severity 1 only)
+        // Collect errors from ALL open files (severity 1 only).
+        // Cross-file: if editing file A breaks file B, we catch it here.
         const errors: NrekiStructuredError[] = [];
-        for (const edit of edits) {
-            if (edit.content === null) continue;
-            const relPath = this.toPosix(path.relative(this.realProjectRoot, edit.filePath));
-            const uri = `${this.workspaceUri}/${relPath}`;
+        for (const uri of this.openedFiles) {
             const diags = this.diagnostics.get(uri) || [];
+            const relPath = uri.replace(`${this.workspaceUri}/`, "");
 
             for (const d of diags) {
                 if (d.severity === 1) {
                     errors.push({
-                        file: this.toPosix(edit.filePath),
+                        file: this.toPosix(path.resolve(this.realProjectRoot, relPath)),
                         line: d.range.start.line + 1,
                         column: d.range.start.character + 1,
                         code: d.source ? `${this.languageId}-${d.source}` : this.languageId,
@@ -514,9 +542,14 @@ export abstract class LspSidecarBase {
                 }
                 // Notification from server (diagnostics)
                 else if (msg.method === "textDocument/publishDiagnostics") {
-                    const params = msg.params as { uri: string; diagnostics: LspDiagnostic[] };
-                    this.diagnostics.set(params.uri, params.diagnostics);
-                    this.triggerSettle();
+                    // RACE CONDITION GUARD: In pull mode, ignore async push notifications.
+                    // The LSP may send stale pushes after we've already received the
+                    // authoritative pull response, overwriting fresh data with old data.
+                    if (!this.supportsPullDiagnostics) {
+                        const params = msg.params as { uri: string; diagnostics: LspDiagnostic[] };
+                        this.diagnostics.set(params.uri, params.diagnostics);
+                        this.triggerSettle();
+                    }
                 }
                 // Other notifications (window/logMessage, etc.) — ignore
             } catch {

@@ -163,9 +163,9 @@ describe("isSensitivePath helper", () => {
         expect(isSensitivePath("/project/src/index.ts")).toBe(false);
     });
 
-    it("returns false for .envrc (not matching .env pattern)", () => {
-        // .envrc doesn't match /.env($|\.)/ because 'r' follows
-        expect(isSensitivePath("/project/.envrc")).toBe(false);
+    it("returns true for .envrc (direnv RCE vector)", () => {
+        // .envrc is now explicitly blocked as a direnv RCE vector
+        expect(isSensitivePath("/project/.envrc")).toBe(true);
     });
 });
 

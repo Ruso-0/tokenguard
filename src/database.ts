@@ -169,17 +169,11 @@ class VectorIndex {
             if (offset + 4 + vecBytes > buf.length) break;
             const rowid = buf.readUInt32LE(offset);
             offset += 4;
-            // Zero-copy when aligned, safe copy when not.
-            // offset always advances in 4-byte increments, but buf.byteOffset
-            // depends on the runtime's Buffer allocator and may not be aligned.
-            const absOffset = buf.byteOffset + offset;
-            let vec: Float32Array;
-            if (absOffset % 4 === 0) {
-                vec = new Float32Array(buf.buffer, absOffset, dim);
-            } else {
-                vec = new Float32Array(dim);
-                new Uint8Array(vec.buffer).set(buf.subarray(offset, offset + vecBytes));
-            }
+            // Always deep-copy. Zero-copy via Float32Array(buf.buffer, offset, dim)
+            // creates a VIEW that shares memory with the source buffer.
+            // If sql.js WASM reuses that memory region, vectors corrupt silently.
+            const vec = new Float32Array(dim);
+            new Uint8Array(vec.buffer).set(buf.subarray(offset, offset + vecBytes));
             index.vectors.set(rowid, vec);
             offset += vecBytes;
         }

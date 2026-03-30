@@ -2,6 +2,57 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## 7.3.1 (2026-03-30)
+
+### Security
+- **Path Jail:** Block `.git/hooks/` (RCE vector), `.envrc` (direnv RCE), `.age/` directories
+- **Path Jail:** Fail-closed on parent resolution errors (was fail-open on EACCES/ELOOP)
+- **LSP Sidecars:** ENV whitelist — secrets no longer leak to gopls/pyright child processes
+
+### Fixed
+- **TTRD Python:** `^\s*def` captures indented class methods (was `^def` — missed all methods inside classes)
+- **TTRD Python:** Triple-quoted docstrings no longer corrupt bracket balancer
+- **TTRD Go:** Private functions now tracked (was exported-only)
+- **Auto-Healer:** Global error comparison replaces per-file (prevents collateral damage approval)
+- **Auto-Healer:** Micro/macro rollbacks are synchronous (cures LSP split-brain)
+- **Pull Diagnostics:** Cross-file error collection from all open files
+- **Pull Diagnostics:** Push notifications suppressed in pull mode (race condition fix)
+- **WAL:** Atomic write via temp+rename (prevents truncation on crash)
+- **Hologram:** `currentEditTargets` cleared on rollback (prevents ghost unpruning)
+- **Process Kill:** `kill(-pid)` on POSIX kills entire process group (prevents zombie workers)
+- **VectorIndex:** Always deep-copy on deserialize (prevents buffer sharing with WASM)
+
+## v7.3.0 - Multi-Language Auto-Healing (2026-03-29)
+
+### Added — Multi-Language (9 Surgeries)
+- **LSP Auto-Healing Dual Cascade** (`nreki-kernel.ts`): Go (gopls) and Python (pyright) errors auto-fixed via `textDocument/codeAction`. Conservative whitelist: only import-related fixes. Ice Wall filter blocks "remove"/"delete" actions. TypeScript heals first (~20ms), then LSP (~300ms, max 2 iterations). Split-brain rollback re-syncs sidecar VFS on micro-rollback
+- **TTRD Syntactic v2** (`nreki-kernel.ts`): Hybrid micro-scanner (regex anchor + bracket balancer) extracts signatures from Python/Go. Detects toxic `Any`/`interface{}` injection, lost return types (`->`), and stripped parameter annotations. Zero false positives on clean refactors (e.g. `Dict[str, Union[...]]` → `ConfigPayload`)
+- **Pull Diagnostics LSP 3.17+** (`lsp-sidecar-base.ts`): `textDocument/diagnostic` replaces 150ms settle timer. Deterministic — NREKI waits for server response, not a timer. Falls back to push model for older LSP servers
+- **Python import resolution** (`repo-map.ts`): Dot-notation (`app.core.auth`) converted to slashes (`app/core/auth`) with progressive strip fallback. Real edges in dependency graph
+- **Go import resolution** (`repo-map.ts`): Suffix matching for `github.com/org/project/utils` → local `utils/`. Real edges in dependency graph
+- **`requestCodeActions()` + title** (`lsp-sidecar-base.ts`): LSP `textDocument/codeAction` exposed with action title for whitelist filtering. Supports both `WorkspaceEdit.changes` and `documentChanges` formats
+- **LSP coordinate translator** (`nreki-kernel.ts`): `getLspOffset()` converts LSP line/character (0-indexed) to byte offsets. Survives `\r\n` (Windows)
+- **Mock LSP Server** (`tests/mock-lsp-server.ts`): Full JSON-RPC 2.0 test server. 8 scenarios: `missing_import`, `clean`, `unfixable`, `destructive`, `multi_error`, `slow_response`. Responds to `initialize`, `textDocument/didOpen`, `textDocument/diagnostic`, `textDocument/codeAction`
+- **TypeScript Corsa Backend placeholder** (`ts-corsa-sidecar.ts`): Ready for Microsoft Project Corsa (TypeScript 7.0 in Go). Inherits `LspSidecarBase`. Strangler Fig hot-swap when Corsa ships
+
+### Added — Lifecycle Hardening
+- **SSOT `cleanupState()`** (`lsp-sidecar-base.ts`): Single idempotent embudo for all process death paths. `if (this.isDead) return` guard prevents double-cleanup when `forceKill()` and `exit` event collide
+- **Explicit timer tracking** (`lsp-sidecar-base.ts`): `PendingRequest` now stores `timer: NodeJS.Timeout`. `cleanupState()` kills all timers directly — no closure indirection
+- **`forceKill()` with stdin destroy** (`lsp-sidecar-base.ts`): Destroys stdin pipe before SIGKILL, forcing OS to propagate closure to entire process tree (kills tsx wrappers and grandchildren)
+- **`spawnEnv` injection** (`lsp-sidecar-base.ts`): Optional 4th constructor parameter for isolated env vars. Tests no longer mutate `process.env` globally
+
+### Added — Miner
+- **Chronos Miner v10 Turbine Oracle** (`chronos-miner.ts`): `git cat-file --batch` streaming (single process per chunk). Dynamic `import()` extraction. Pure TS/JS scope (`.mjs`, `.cjs` included). `node_modules/` and `dist/` filtered by regex segment. 512MB maxBuffer
+
+### Changed
+- Tests: 704 → 712 (44 suites). +8 LSP sidecar tests, +1 kernel CRLF test
+- `LspSidecarBase`: `request()`, `toPosix()`, `workspaceUri`, `realProjectRoot` changed from `private` to `protected`
+- `LspPosition` and `LspRange` interfaces exported for kernel consumption
+- `shutdown()` now delegates entirely to `forceKill()` → `cleanupState()`
+- Boot error handler, exit handler, and initialize catch all route through `cleanupState()` — zero asymmetric cleanup
+- Healing message now groups TypeScript fixes and LSP fixes separately in output
+- `interceptAtomicBatch()` uses Dual Cascade: TS healing first, then LSP healing only if TS succeeded
+
 ## v7.1.2 - 9 Critical Patches
 
 ### Fixed

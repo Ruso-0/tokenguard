@@ -195,13 +195,21 @@ export class NrekiKernel {
      * Usa Regex SOLO para anclar el inicio (def/func), y un
      * Bracket Balancer para parsear el interior.
      */
+    /**
+     * TTRD Sintáctico v2.1 — Hardened Regex Scanner.
+     * Fixes over v2:
+     *   - Python: ^\s* instead of ^ to capture indented class methods
+     *   - Python: Triple-quoted string ("""/''') skip before bracket balancer
+     *   - Go: [a-zA-Z_] instead of [A-Z] to capture private functions
+     */
     private extractRawSignatures(content: string, ext: string): Map<string, string> {
         const signatures = new Map<string, string>();
         if (ext !== ".py" && ext !== ".go") return signatures;
 
+        // FIX: ^\s* captures indented class methods. [a-zA-Z_] captures Go private funcs.
         const startRegex = ext === ".py"
-            ? /^(?:async\s+)?def\s+([a-zA-Z_]\w*)\s*\(/gm
-            : /^func\s+(?:\([^)]*\)\s+)?([A-Z][a-zA-Z0-9_]*)\s*\(/gm;
+            ? /^\s*(?:async\s+)?def\s+([a-zA-Z_]\w*)\s*\(/gm
+            : /^func\s+(?:\([^)]*\)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/gm;
 
         let match;
         while ((match = startRegex.exec(content)) !== null) {
@@ -219,6 +227,14 @@ export class NrekiKernel {
                     if (ch === '\\') i++;
                     else if (ch === inString) inString = null;
                     continue;
+                }
+                // FIX: Triple-quoted string detection (Python """/''')
+                if ((ch === '"' || ch === "'") && i + 2 < content.length
+                    && content[i + 1] === ch && content[i + 2] === ch) {
+                    const tripleQuote = ch + ch + ch;
+                    const endTriple = content.indexOf(tripleQuote, i + 3);
+                    if (endTriple !== -1) { i = endTriple + 2; continue; }
+                    break; // Unterminated triple-quote — abort this signature
                 }
                 if (ch === '"' || ch === "'" || ch === '`') {
                     inString = ch; continue;
@@ -879,11 +895,10 @@ export class NrekiKernel {
                     newErrors = currentErrors;
                 }
 
-                // TEOREMA DE REDUCCIÓN ESTRICTA
-                const oldFileErrors = currentErrors.filter(e => e.file === error.file).length;
-                const newFileErrors = newErrors.filter(e => e.file === error.file).length;
-
-                if (newFileErrors >= oldFileErrors) {
+                // TEOREMA DE REDUCCIÓN ESTRICTA — GLOBAL (not per-file)
+                // Evaluate against the ENTIRE error pool. A fix that silences
+                // api.py but breaks 50 consumers must be rejected.
+                if (newErrors.length >= currentErrors.length) {
                     // MICRO-ROLLBACK NREKI VFS
                     if (state.content !== undefined) this.vfs.set(changePath, state.content);
                     else this.vfs.delete(changePath);
@@ -894,15 +909,19 @@ export class NrekiKernel {
                     if (!parentEditedFiles.has(changePath)) localEditedFiles.delete(changePath);
                     newlyTouchedFiles.delete(changePath);
 
-                    // MICRO-ROLLBACK SIDECAR VFS (Cura Split-Brain)
-                    sidecar.validateEdits([{ filePath: changePath, content: state.content ?? null }]).catch(() => {});
+                    // MICRO-ROLLBACK SIDECAR VFS (Synchronous — cures Split-Brain)
+                    try {
+                        await sidecar.validateEdits([{ filePath: changePath, content: state.content ?? null }]);
+                    } catch {
+                        sidecar.isDead = true;
+                    }
 
                     failedFixHashes.add(fixHash);
                 } else {
                     // FIX ACEPTADO
                     fixDescriptions.add(`- LSP Auto-Heal (${sidecar.languageId}): ${fixDesc}`);
                     appliedAnyFix = true;
-                    currentErrors = currentErrors.filter(e => e.file !== error.file).concat(newErrors.filter(e => e.file === error.file));
+                    currentErrors = newErrors;
                     break;
                 }
             }
@@ -921,7 +940,11 @@ export class NrekiKernel {
             }
             if (rollbacks.length > 0) {
                 this.logicalTime += 1000;
-                sidecar.validateEdits(rollbacks).catch(() => {});
+                try {
+                    await sidecar.validateEdits(rollbacks);
+                } catch {
+                    sidecar.isDead = true;
+                }
             }
             this._healingStats.failed++;
             return { healed: false, appliedFixes: [], newlyTouchedFiles: new Set(), finalErrors: initialErrors };
@@ -1293,7 +1316,7 @@ export class NrekiKernel {
                 // BOMBA 1 FIX: Compensatory Rollback — heal sidecar VFS
                 // Without this, the LSP's internal VFS retains the rejected
                 // edit and future validations run against a phantom state.
-                this.rollbackSidecars(sidecarEdits, rollbackState);
+                await this.rollbackSidecars(sidecarEdits, rollbackState);
 
                 // PATCH-1: Remove this transaction's files from mutatedFiles
                 // to prevent ghost deletion in the next commitToDisk().
@@ -1303,6 +1326,8 @@ export class NrekiKernel {
                 this.logicalTime = savedLogicalTime;
                 // A-02: Restore vfsDirectories
                 this.vfsDirectories = savedDirectories;
+                // FIX: Clear hologram edit targets to prevent ghost unpruning
+                this.currentEditTargets.clear();
                 // P17 + P2 WARM-PATH: Advance clock instead of destroying program.
                 this.logicalTime += 1000;
                 for (const [posixPath] of rollbackState.entries()) {
@@ -1358,7 +1383,7 @@ export class NrekiKernel {
                     else this.rootNames.delete(posixPath);
                 }
                 // BOMBA 1 FIX: Compensatory Rollback on crash path
-                this.rollbackSidecars(sidecarEdits, rollbackState);
+                await this.rollbackSidecars(sidecarEdits, rollbackState);
 
                 // PATCH-1: Remove this transaction's files from mutatedFiles (crash path)
                 for (const file of transactionMutated) this.mutatedFiles.delete(file);
@@ -1366,6 +1391,8 @@ export class NrekiKernel {
                 // A-02: Restore vfsDirectories
                 this.vfsDirectories = savedDirectories;
                 this.logicalTime = savedLogicalTime;
+                // FIX: Clear hologram edit targets to prevent ghost unpruning
+                this.currentEditTargets.clear();
                 this.restoreHologramVeil(temporarilyUnveiled);
                 // FIX: Poison the compiler cache to force cold rebuild.
                 // Without this, the TypeScript BuilderProgram retains state
@@ -1418,12 +1445,21 @@ export class NrekiKernel {
             const walPath = path.join(txDir, "wal.json");
             try {
                 if (!fs.existsSync(txDir)) fs.mkdirSync(txDir, { recursive: true });
-                fs.writeFileSync(walPath, JSON.stringify({
+                // Atomic write via temp+rename. writeFileSync overwrites in-place
+                // and is NOT atomic — OOM/crash mid-write truncates the WAL.
+                // rename() is atomic on POSIX (single inode pointer swap).
+                const walTmpPath = `${walPath}.tmp`;
+                fs.writeFileSync(walTmpPath, JSON.stringify({
                     status: "pending",
                     ts: new Date().toISOString(),
                     files: physicalUndoLog.map(l => ({ target: l.target, backup: l.backup })),
                 }), "utf-8");
-            } catch { /* WAL write failure is non-fatal — proceed without crash safety */ }
+                fs.renameSync(walTmpPath, walPath);
+            } catch (walErr) {
+                // WAL write failure is non-fatal but must be logged — proceeding
+                // without crash safety means a power failure during Phase 2 is unrecoverable.
+                logger.warn(`WAL write failed: ${walErr}. Proceeding without crash recovery safety.`);
+            }
 
             // PHASE 2: Destructive writes
             for (const posixPath of filesToCommit) {
@@ -1876,12 +1912,13 @@ export class NrekiKernel {
      * await the settle because the rollback is best-effort and must not block
      * the error response to the LLM.
      */
-    private rollbackSidecars(
+    private async rollbackSidecars(
         sidecarEdits: Map<LspSidecarBase, Array<{filePath: string; content: string | null}>>,
         rollbackState: Map<string, {content: string | null | undefined; time: Date | undefined; wasInRoot: boolean}>,
-    ): void {
+    ): Promise<void> {
         if (sidecarEdits.size === 0) return;
 
+        const promises: Promise<void | NrekiStructuredError[]>[] = [];
         for (const [sidecar, scEdits] of sidecarEdits) {
             if (sidecar.isDead) continue;
             const rollbacks: Array<{filePath: string; content: string | null}> = [];
@@ -1902,14 +1939,14 @@ export class NrekiKernel {
             }
 
             if (rollbacks.length > 0) {
-                // Fire-and-forget: don't block the error response.
-                // If rollback fails, mark sidecar dead to force respawn on next use.
-                // This prevents brain-split where sidecar VFS disagrees with kernel VFS.
-                sidecar.validateEdits(rollbacks).catch(() => {
-                    sidecar.isDead = true;
-                });
+                promises.push(
+                    sidecar.validateEdits(rollbacks).catch(() => {
+                        sidecar.isDead = true;
+                    })
+                );
             }
         }
+        await Promise.all(promises);
     }
 
     /**

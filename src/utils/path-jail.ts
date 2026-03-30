@@ -13,6 +13,8 @@ import path from "path";
 
 const SENSITIVE_PATTERNS: RegExp[] = [
     /\.env($|\.)/i,                     // .env, .env.local, .env.production
+    /\.envrc($|\.)/i,                   // direnv RCE vector — executes on cd
+    /[/\\]\.git[/\\]hooks[/\\]/i,       // Git hooks — CRITICAL RCE vector (pre-commit, post-merge, etc.)
     /[/\\]\.ssh[/\\]/i,                 // .ssh/*
     /[/\\]\.gnupg[/\\]/i,              // .gnupg/*
     /[/\\]\.aws[/\\]/i,                // .aws/*
@@ -31,6 +33,7 @@ const SENSITIVE_PATTERNS: RegExp[] = [
     /[/\\]\.git-credentials$/i,         // Git credential file
     /[/\\]\.kube[/\\]config$/i,         // Kubernetes config
     /\.age$/i,                          // age encryption keys
+    /[/\\]\.age[/\\]/i,                // age key directories (recipients, identities)
     /[/\\]vault-token$/i,               // HashiCorp Vault token
     /[/\\]\.terraform[/\\]/i,           // Terraform state (may contain secrets)
 ];
@@ -112,7 +115,10 @@ export function safePath(workspaceRoot: string, inputPath: string): string {
                 if ((parentErr as Error).message.includes("Symlink escape blocked")) {
                     throw parentErr;
                 }
-                // Parent resolution failed for other reason — allow (conservative)
+                // FAIL-CLOSED: Any I/O error during security validation MUST deny access.
+                // EACCES (no permission), ELOOP (symlink loop), or any other OS error
+                // means we cannot verify the path is safe. Block it.
+                throw new Error(`Path validation failed securely during parent resolution: ${(parentErr as Error).message}`);
             }
         } else {
             throw err;
