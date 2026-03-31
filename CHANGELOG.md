@@ -2,6 +2,17 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## 7.4.1 (2026-03-31) — Normalized Laplacian + Isolated Node Exile
+
+### Features
+- **Spectral Topology:** `normalized: boolean = false` flag on `analyzeTopology()`. When true, uses symmetric normalized Laplacian (L_sym = I - D^{-1/2}AD^{-1/2}) confining λ₂ to [0, 2] instead of [0, ∞). Covers 4 critical traps: deflation against √D, div/0 guard for isolated nodes, shift constant c=2.0, and diagonal=1.0 for connected nodes.
+
+### Fixed
+- **Spectral Topology:** Isolated node exile in normalized path. Degree-0 nodes had eigenvalue c in the shifted matrix (cI - L_sym), dominating over the Fiedler. Power iteration converged to orphan files instead of real architectural bottlenecks. Fix: force `v_next[i] = 0` for isolated nodes.
+- **npx Windows:** CJS bin wrapper (`bin/nreki.cjs`) bridges CJS→ESM so `.cmd` shim resolves correctly on all platforms. `npx @ruso-0/nreki` now works on Windows.
+
+---
+
 ## 7.3.5 (2026-03-31) — Full Security Audit
 
 ### Security

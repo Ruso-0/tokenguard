@@ -474,9 +474,15 @@ export class SpectralMath {
 
                     if (normalized) {
                         // L_sym·v = v_i - Σ (w_ij / √(d_i × d_j)) × v_j
-                        // TRAMPA MORTAL 2: diagonal = 1.0 for connected nodes, 0 for isolated.
-                        // TRAMPA MORTAL 2: invSqrtD[i]=0 for degree=0 → no NaN.
-                        Lv_i = (degree[i] > 0) ? vec[i] : 0;
+                        // ISOLATED NODE EXILE: degree=0 nodes have eigenvalue c in the
+                        // shifted matrix (cI - L_sym), which DOMINATES over the Fiedler.
+                        // Without exile, power iteration converges to orphan files
+                        // instead of the real architectural bottleneck.
+                        if (degree[i] === 0) {
+                            v_next[i] = 0;
+                            continue;
+                        }
+                        Lv_i = vec[i]; // Diagonal of L_sym = 1.0 for connected nodes
                         const end = rowPtr[i + 1];
                         for (let k = rowPtr[i]; k < end; k++) {
                             const j = colIdx[k];
