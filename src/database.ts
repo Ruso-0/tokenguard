@@ -201,6 +201,8 @@ class KeywordIndex {
     private docTerms = new Map<number, string[]>();
     /** Total number of documents */
     private docCount = 0;
+    /** Running total of all term counts (for O(1) avgDocLen) */
+    private totalTerms = 0;
     /** Average document length in terms */
     private avgDocLen = 0;
 
@@ -286,6 +288,7 @@ class KeywordIndex {
         }
 
         this.docCount++;
+        this.totalTerms += terms.length;
         this.updateAvgDocLen();
     }
 
@@ -317,6 +320,7 @@ class KeywordIndex {
         }
 
         this.docTerms.delete(rowid);
+        this.totalTerms -= terms.length;
         this.docCount = Math.max(0, this.docCount - 1);
         this.updateAvgDocLen();
     }
@@ -328,15 +332,10 @@ class KeywordIndex {
     }
 
     private updateAvgDocLen(): void {
-        if (this.docCount === 0) {
-            this.avgDocLen = 0;
-            return;
-        }
-        let totalLen = 0;
-        for (const terms of this.docTerms.values()) {
-            totalLen += terms.length;
-        }
-        this.avgDocLen = totalLen / this.docCount;
+        // O(1): uses running total instead of iterating all documents.
+        // Before this fix, every insert/delete triggered O(N) iteration —
+        // causing O(N²) during bulk indexing (20K chunks = 200M iterations).
+        this.avgDocLen = this.docCount > 0 ? this.totalTerms / this.docCount : 0;
     }
 
     /**
@@ -609,19 +608,26 @@ export class NrekiDB {
     /** Persist database and vector index to disk. */
     save(): void {
         if (!this.db) return;
-        // Save SQLite database
+        // Save SQLite database — atomic via temp+rename.
+        // writeFileSync overwrites in-place and is NOT atomic.
+        // OOM/crash mid-write truncates the file to 0 bytes.
+        // rename() is atomic on POSIX (single inode pointer swap).
         const data = this.db.export();
         const buffer = Buffer.from(data);
         const dir = path.dirname(this.dbPath);
         if (dir && !fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true });
         }
-        fs.writeFileSync(this.dbPath, buffer);
+        const tmpDb = `${this.dbPath}.tmp`;
+        fs.writeFileSync(tmpDb, buffer);
+        fs.renameSync(tmpDb, this.dbPath);
 
         // Save vector index (skip if unchanged since last persist)
         if (this.vecIndex.dirty) {
             const vecData = this.vecIndex.serialize();
-            fs.writeFileSync(this.vecPath, vecData);
+            const tmpVec = `${this.vecPath}.tmp`;
+            fs.writeFileSync(tmpVec, vecData);
+            fs.renameSync(tmpVec, this.vecPath);
         }
     }
 
@@ -724,9 +730,13 @@ export class NrekiDB {
         }>
     ): void {
         this.db.run("BEGIN TRANSACTION");
+        // Track inserted IDs so we can purge RAM indexes on rollback.
+        // Without this, SQLite rows are reverted but vecIndex/kwIndex
+        // retain phantom entries that crash the result hydrator.
+        const insertedIds: number[] = [];
         try {
             for (const chunk of chunks) {
-                this.insertChunk(
+                const id = this.insertChunk(
                     chunk.path,
                     chunk.shorthand,
                     chunk.rawCode,
@@ -738,10 +748,14 @@ export class NrekiDB {
                     chunk.endIndex ?? 0,
                     chunk.symbolName ?? "",
                 );
+                insertedIds.push(id);
             }
             this.db.run("COMMIT");
         } catch (err) {
             this.db.run("ROLLBACK");
+            // Purge phantom entries from in-memory indexes
+            this.vecIndex.deleteBulk(insertedIds);
+            this.kwIndex.deleteBulk(insertedIds);
             throw err;
         }
     }

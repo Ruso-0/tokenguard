@@ -81,6 +81,7 @@ export abstract class LspSidecarBase {
     private pendingRequests = new Map<number, PendingRequest>();
     private diagnostics = new Map<string, LspDiagnostic[]>();
     private openedFiles = new Set<string>();
+    private docVersions = new Map<string, number>();
 
     protected readonly spawnEnv?: Record<string, string>;
     protected realProjectRoot: string;
@@ -248,6 +249,7 @@ export abstract class LspSidecarBase {
         if (this.isDead) return;
         this.isDead = true;
         this.openedFiles.clear();
+        this.docVersions.clear();
         this.diagnostics.clear();
 
         // 1. Settle Timers
@@ -335,10 +337,17 @@ export abstract class LspSidecarBase {
             const uri = `${this.workspaceUri}/${relPath}`;
 
             if (edit.content === null) {
-                // Tombstone: close the file in LSP
+                // Tombstone: simulate deletion by sending empty content.
+                // DO NOT use didClose — that tells the LSP to re-read from disk,
+                // but NREKI hasn't committed yet, so the LSP would see the old file.
+                // Empty content forces import errors in dependents (correct behavior).
                 if (this.openedFiles.has(uri)) {
-                    this.notifyLsp("textDocument/didClose", { textDocument: { uri } });
-                    this.openedFiles.delete(uri);
+                    const nextVer = (this.docVersions.get(uri) || 1) + 1;
+                    this.docVersions.set(uri, nextVer);
+                    this.notifyLsp("textDocument/didChange", {
+                        textDocument: { uri, version: nextVer },
+                        contentChanges: [{ text: "" }],
+                    });
                     this.diagnostics.delete(uri);
                     changed = true;
                 }
@@ -348,11 +357,15 @@ export abstract class LspSidecarBase {
                     textDocument: { uri, languageId: this.languageId, version: 1, text: edit.content },
                 });
                 this.openedFiles.add(uri);
+                this.docVersions.set(uri, 1);
                 changed = true;
             } else {
                 // Subsequent: didChange (full content replacement)
+                // FIX: Date.now() overflows int32 in gopls. Use monotonic counter.
+                const nextVer = (this.docVersions.get(uri) || 1) + 1;
+                this.docVersions.set(uri, nextVer);
                 this.notifyLsp("textDocument/didChange", {
-                    textDocument: { uri, version: Date.now() },
+                    textDocument: { uri, version: nextVer },
                     contentChanges: [{ text: edit.content }],
                 });
                 changed = true;
@@ -456,9 +469,15 @@ export abstract class LspSidecarBase {
                 // WorkspaceEdit.changes format
                 const changes = action.edit?.changes || {};
                 for (const [changeUri, textEdits] of Object.entries(changes)) {
+                    // FIX: Case-insensitive URI prefix removal for Windows.
+                    // gopls sends file:///c:/ but Node resolves to file:///C:/
+                    const wsPrefix = this.workspaceUri + "/";
+                    const cleanPath = changeUri.toLowerCase().startsWith(wsPrefix.toLowerCase())
+                        ? changeUri.substring(wsPrefix.length)
+                        : changeUri.replace(wsPrefix, "");
                     for (const te of textEdits as any[]) {
                         edits.push({
-                            filePath: changeUri.replace(this.workspaceUri + "/", ""),
+                            filePath: cleanPath,
                             range: te.range,
                             newText: te.newText,
                             title: action.title || "",
@@ -470,9 +489,13 @@ export abstract class LspSidecarBase {
                 for (const dc of action.edit?.documentChanges || []) {
                     if (!dc.edits) continue;
                     const dcUri = dc.textDocument?.uri || "";
+                    const dcWsPrefix = this.workspaceUri + "/";
+                    const dcCleanPath = dcUri.toLowerCase().startsWith(dcWsPrefix.toLowerCase())
+                        ? dcUri.substring(dcWsPrefix.length)
+                        : dcUri.replace(dcWsPrefix, "");
                     for (const te of dc.edits) {
                         edits.push({
-                            filePath: dcUri.replace(this.workspaceUri + "/", ""),
+                            filePath: dcCleanPath,
                             range: te.range,
                             newText: te.newText,
                             title: action.title || "",
@@ -497,8 +520,10 @@ export abstract class LspSidecarBase {
         this.buffer = Buffer.concat([this.buffer, chunk]);
 
         if (this.buffer.length > LspSidecarBase.MAX_BUFFER) {
-            logger.error(`[${this.languageId}] LSP buffer exceeded 10MB — resetting`);
-            this.buffer = Buffer.alloc(0);
+            logger.error(`[${this.languageId}] LSP buffer exceeded 10MB — stream corrupted, restarting sidecar`);
+            // Kill and restart: truncating the buffer desynchronizes the JSON-RPC
+            // stream permanently (remaining fragments lack Content-Length headers).
+            this.forceKill();
             return;
         }
 

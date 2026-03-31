@@ -321,7 +321,21 @@ export async function batchSemanticEdit(
         // Map each edit to its AST chunk
         const mappedEdits: Array<{ edit: BatchEditOp; chunk: ParsedChunk }> = [];
         for (const edit of fileEdits) {
-            const chunk = findChunkBySymbol(parseResult.chunks, edit.symbol);
+            // AMBIGUITY CHECK: Reject if multiple symbols share the same name.
+            // Without this, batch_edit silently overwrites the first match
+            // when the user intended a different overload or getter/setter.
+            const allMatches = parseResult.chunks.filter(c => {
+                const name = c.symbolName || extractName(c);
+                return name === edit.symbol;
+            });
+            if (allMatches.length > 1) {
+                return {
+                    success: false, editCount: edits.length, fileCount: editsByFile.size, files: [],
+                    error: `Ambiguous batch edit: ${allMatches.length} symbols named "${edit.symbol}" in ${edit.path}. ` +
+                           `Use nreki_navigate action:"outline" to identify exact targets, then edit individually.`,
+                };
+            }
+            const chunk = allMatches[0] || findChunkBySymbol(parseResult.chunks, edit.symbol);
             if (!chunk) {
                 const available = parseResult.chunks
                     .map(c => c.symbolName || extractName(c))
@@ -703,7 +717,11 @@ export async function semanticEdit(
         } catch {
             // Non-fatal: don't block the edit if backup fails
         }
-        fs.writeFileSync(filePath, newContent, "utf-8");
+        // Atomic write via temp+rename. writeFileSync is NOT atomic —
+        // OOM/crash mid-write truncates the file to 0 bytes.
+        const tmpPath = `${filePath}.nreki-${crypto.randomBytes(4).toString("hex")}.tmp`;
+        fs.writeFileSync(tmpPath, newContent, "utf-8");
+        fs.renameSync(tmpPath, filePath);
     }
 
     // Tokens avoided: without NREKI Claude reads full file + sends old symbol code.

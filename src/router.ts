@@ -20,6 +20,7 @@
 import fs from "fs";
 import path from "path";
 import { readSource } from "./utils/read-source.js";
+import { safePath } from "./utils/path-jail.js";
 import { getPinnedText } from "./pin-memory.js";
 
 import type { NrekiEngine } from "./engine.js";
@@ -132,8 +133,11 @@ export function applyContextHeartbeat(
             10,
         );
 
-        // FIX: Session restart detection - if counter reset, reset the injection marker
-        if (currentCalls <= lastInjectCalls) {
+        // FIX: Use strict < instead of <=. With <=, equal values (tool failure
+        // without counter increment) reset lastInjectCalls to 0, causing
+        // currentCalls - 0 >= 15 to be true on every subsequent call.
+        // This injects thousands of heartbeat tokens per session.
+        if (currentCalls < lastInjectCalls) {
             lastInjectCalls = 0;
             deps.engine.setMetadata("nreki_plan_last_inject", "0");
         }
@@ -148,7 +152,18 @@ export function applyContextHeartbeat(
                 let memoryPayload = "";
 
                 // LAYER 1: Plan File
-                const planPath = deps.engine.getMetadata("nreki_master_plan");
+                const rawPlanPath = deps.engine.getMetadata("nreki_master_plan");
+                // PATH JAIL: Validate plan path before reading.
+                // Without this, a prompt injection can set the plan to /etc/shadow
+                // and NREKI exfiltrates it into Claude's context every 15 calls.
+                let planPath: string | null = null;
+                if (rawPlanPath) {
+                    try {
+                        planPath = safePath(deps.engine.getProjectRoot(), rawPlanPath);
+                    } catch {
+                        planPath = null; // Path jail blocked — skip plan injection
+                    }
+                }
                 if (planPath && fs.existsSync(planPath)) {
                     let planContent: string;
                     try { planContent = readSource(planPath); } catch { planContent = ""; }

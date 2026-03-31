@@ -419,6 +419,12 @@ export class NrekiKernel {
                         }
                     }
                     if (self.prunedTsLookup.has(posixPath) && !self.currentEditTargets.has(posixPath)) {
+                        // FIX: Check VFS FIRST. A pruned file that was edited in a prior
+                        // transaction has real content in RAM that the compiler must see.
+                        if (self.vfs.has(posixPath)) {
+                            const content = self.vfs.get(posixPath);
+                            return content === null ? undefined : content;
+                        }
                         return undefined;
                     }
                 }
@@ -557,11 +563,17 @@ export class NrekiKernel {
                 if (wal.status === "pending" && Array.isArray(wal.files)) {
                     logger.warn(`WAL recovery: restoring ${wal.files.length} file(s) from crashed transaction`);
                     for (const entry of wal.files) {
-                        if (entry.backup && fs.existsSync(entry.backup)) {
-                            fs.renameSync(entry.backup, entry.target);
-                        } else if (!entry.backup && fs.existsSync(entry.target)) {
-                            // File was newly created in the crashed tx — remove it
-                            fs.unlinkSync(entry.target);
+                        // Per-entry try-catch: one failed restore must not abort the rest.
+                        // Without this, a lock on one file destroys backups for all others.
+                        try {
+                            if (entry.backup && fs.existsSync(entry.backup)) {
+                                fs.renameSync(entry.backup, entry.target);
+                            } else if (!entry.backup && fs.existsSync(entry.target)) {
+                                // File was newly created in the crashed tx — remove it
+                                fs.unlinkSync(entry.target);
+                            }
+                        } catch (entryErr) {
+                            logger.error(`WAL recovery failed for ${entry.target}: ${entryErr}`);
                         }
                     }
                 }
@@ -863,6 +875,14 @@ export class NrekiKernel {
 
                 const changePath = this.toPosix(path.resolve(this.projectRoot, bestFix.filePath || error.file));
 
+                // PATH JAIL: Validate LSP-suggested path against workspace root.
+                // A compromised gopls/pyright could suggest a path outside the project.
+                const healerRootPosix = this.toPosix(path.resolve(this.projectRoot));
+                if (!changePath.startsWith(healerRootPosix + "/") && changePath !== healerRootPosix) {
+                    failedFixHashes.add(fixHash);
+                    continue; // Reject path traversal from LSP
+                }
+
                 // Backup VFS (Micro-Rollback log)
                 const state = {
                     content: this.vfs.has(changePath) ? this.vfs.get(changePath) : undefined,
@@ -871,7 +891,14 @@ export class NrekiKernel {
                 if (!healUndoLog.has(changePath)) healUndoLog.set(changePath, state);
 
                 // Aplicar Fix traduciendo coordenadas LSP → byte offsets
-                let content = this.vfs.get(changePath) ?? fs.readFileSync(changePath, "utf-8");
+                let content: string;
+                try {
+                    content = this.vfs.get(changePath) ?? fs.readFileSync(changePath, "utf-8");
+                } catch {
+                    // File vanished between diagnostic and fix — skip this fix, try the next one
+                    failedFixHashes.add(fixHash);
+                    continue;
+                }
 
                 const startIdx = this.getLspOffset(content, bestFix.range.start.line, bestFix.range.start.character);
                 const endIdx = this.getLspOffset(content, bestFix.range.end.line, bestFix.range.end.character);
@@ -965,13 +992,13 @@ export class NrekiKernel {
         if (!this.booted) throw new Error("[NREKI] Kernel not booted");
         if (!edits || edits.length === 0) return { safe: true, exitCode: 0, latencyMs: "0.00" };
 
+        return this.mutex.withLock(async () => {
         // Corruption guard: if a previous timeout left the VFS in a partial state, rebuild
+        // Moved inside mutex to prevent concurrent purgeCache() calls.
         if (this.tsBackend.isCorrupted) {
             this.tsBackend.purgeCache();
             logger.warn("Rebuilding after timeout-corrupted state.");
         }
-
-        return this.mutex.withLock(async () => {
         const txId = crypto.randomBytes(4).toString("hex");
         setTxId(txId);
         logger.info(`interceptAtomicBatch: ${edits.length} file(s)`);
@@ -1051,9 +1078,15 @@ export class NrekiKernel {
 
             // TTRD SINTÁCTICO PRE-SCAN: Python/Go
             const preRawSignatures = new Map<string, Map<string, string>>();
+            const rootPosixTTRD = this.toPosix(path.resolve(this.projectRoot));
             for (const edit of edits) {
                 if (edit.proposedContent !== null) {
                     const posixPath = this.toPosix(path.resolve(this.projectRoot, edit.targetFile));
+                    // PATH JAIL: Block traversal BEFORE any I/O.
+                    // Without this, the LLM can read arbitrary files via targetFile.
+                    if (!posixPath.startsWith(rootPosixTTRD + "/") && posixPath !== rootPosixTTRD) {
+                        continue; // Phase 1 will throw the security error — skip silently here
+                    }
                     const ext = path.extname(posixPath).toLowerCase();
                     if (ext === ".py" || ext === ".go") {
                         const oldContent = this.vfs.get(posixPath) ?? this.tsBackend.host.readFile(posixPath) ?? "";
@@ -1155,6 +1188,7 @@ export class NrekiKernel {
                 try {
                     const sidecarErrors = await sidecar.validateEdits(scEdits);
                     // ACID: Merge sidecar errors. If ANY backend rejects, NOTHING touches disk.
+                    // NOTE: This mutates the array. Name reflects merged state, not "original" snapshot.
                     originalFatalErrors.push(...sidecarErrors);
                 } catch {
                     sidecarWarnings.push(
@@ -1240,6 +1274,14 @@ export class NrekiKernel {
                 };
 
                 if (healing.healed) {
+                    // CRITICAL FIX: Register healed files in mutatedFiles so commitToDisk()
+                    // persists them. Without this, auto-healed collateral files exist only
+                    // in VFS RAM and vanish when the transaction ends.
+                    for (const f of healing.newlyTouchedFiles) {
+                        if (!this.mutatedFiles.has(f)) transactionMutated.add(f);
+                        this.mutatedFiles.add(f);
+                    }
+
                     const latency = (performance.now() - t0).toFixed(2);
                     const healLatency = (performance.now() - tHealStart).toFixed(2);
 
@@ -1471,8 +1513,8 @@ export class NrekiKernel {
                     const dir = path.dirname(osPath);
                     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
                     const tmp = `${osPath}.nreki-${crypto.randomBytes(4).toString("hex")}.tmp`;
+                    createdTmps.push(tmp); // Push BEFORE write so catch can clean up on ENOSPC
                     fs.writeFileSync(tmp, content, "utf-8");
-                    createdTmps.push(tmp);
                     fs.renameSync(tmp, osPath);
                     createdTmps.pop(); // Rename succeeded — no longer orphan
                 }
@@ -1556,6 +1598,10 @@ export class NrekiKernel {
             this.vfs.clear();
             this.vfsClock.clear();
             this.vfsDirectories.clear();
+            // CRITICAL FIX: Clear mutatedFiles to prevent the next commitToDisk()
+            // from iterating stale entries, reading null from empty VFS,
+            // and executing fs.unlinkSync() on real user files.
+            this.mutatedFiles.clear();
             this.logicalTime += 1000;
 
             // Force cold rebuild from disk reality
@@ -1580,6 +1626,9 @@ export class NrekiKernel {
             this.vfs.clear();
             this.vfsClock.clear();
             this.vfsDirectories.clear();
+            // CRITICAL FIX: Prevent stale mutatedFiles from deleting real files
+            // in the next commitToDisk() call.
+            this.mutatedFiles.clear();
             this.initConfig(); // Re-sync rootNames from disk
             // BUG 1: In hologram mode, re-filter rootNames
             if (this.mode === "hologram") {
@@ -1907,10 +1956,8 @@ export class NrekiKernel {
      * content, the sidecar's next `validateEdits` call will run against the
      * phantom (rejected) code, causing a brain-split.
      *
-     * This method sends `didChange` with the original content for every file
-     * that was modified in the aborted transaction. Fire-and-forget — we don't
-     * await the settle because the rollback is best-effort and must not block
-     * the error response to the LLM.
+     * Awaits all rollbacks via Promise.all to ensure sidecar VFS consistency
+     * before returning. If a rollback fails, marks the sidecar dead for respawn.
      */
     private async rollbackSidecars(
         sidecarEdits: Map<LspSidecarBase, Array<{filePath: string; content: string | null}>>,

@@ -104,6 +104,11 @@ export class TsCompilerWrapper {
     // POSIX normalization — delegates to shared utility
     private toPosix(p: string): string { return toPosixUtil(p); }
 
+    // Pre-compiled regexes for getFingerprint (avoids 3 RegExp per diagnostic)
+    private rootRegex?: RegExp;
+    private nativeRootRegex?: RegExp;
+    private nativePosixRegex?: RegExp;
+
     /**
      * Read tsconfig.json and initialize compilerOptions + rootNames.
      * Extracted from NrekiKernel.initConfig().
@@ -297,11 +302,17 @@ export class TsCompilerWrapper {
             ? this.toPosix(path.resolve(this.projectRoot, diag.file.fileName))
             : "GLOBAL";
         let msg = ts.flattenDiagnosticMessageText(diag.messageText, "\n");
-        const nativeRoot = path.resolve(this.projectRoot);
-        const nativePosix = nativeRoot.replace(/\\/g, "/");
-        msg = msg.replace(new RegExp(escapeRegExp(this.projectRoot), "ig"), "<ROOT>");
-        msg = msg.replace(new RegExp(escapeRegExp(nativeRoot), "ig"), "<ROOT>");
-        msg = msg.replace(new RegExp(escapeRegExp(nativePosix), "ig"), "<ROOT>");
+        // FIX: Use pre-compiled regexes instead of creating 3 new RegExp per diagnostic.
+        if (!this.rootRegex) {
+            const nativeRoot = path.resolve(this.projectRoot);
+            const nativePosix = nativeRoot.replace(/\\/g, "/");
+            this.rootRegex = new RegExp(escapeRegExp(this.projectRoot), "ig");
+            this.nativeRootRegex = new RegExp(escapeRegExp(nativeRoot), "ig");
+            this.nativePosixRegex = new RegExp(escapeRegExp(nativePosix), "ig");
+        }
+        msg = msg.replace(this.rootRegex, "<ROOT>");
+        msg = msg.replace(this.nativeRootRegex!, "<ROOT>");
+        msg = msg.replace(this.nativePosixRegex!, "<ROOT>");
         return crypto.createHash("sha256").update(`${file}|TS${diag.code}|${msg}`).digest("hex");
     }
 
@@ -611,6 +622,14 @@ export class TsCompilerWrapper {
                 }
                 if (cascadeCount > errorThreshold) {
                     this.isStateCorrupted = true;
+                    // Include first 5 cascade errors so the LLM can diagnose the root cause
+                    const cascadeSample = fatalErrors
+                        .filter(d => d.file && !editedFiles.has(this.toPosix(d.file.fileName)))
+                        .slice(0, 5)
+                        .map(d => this.toStructured(d));
+                    const sampleText = cascadeSample.length > 0
+                        ? `\nSample: ${cascadeSample.map(e => `${e.file}:${e.line} ${e.code} ${e.message.slice(0, 80)}`).join(" | ")}`
+                        : "";
                     fatalErrors.push({
                         file: undefined,
                         start: undefined,
@@ -619,7 +638,7 @@ export class TsCompilerWrapper {
                         code: 9999,
                         messageText:
                             `Cascade exceeded threshold (${errorThreshold}). ` +
-                            `${cascadeCount} errors in non-edited files. Edit rejected.`,
+                            `${cascadeCount} errors in non-edited files. Edit rejected.${sampleText}`,
                     });
                     break;
                 }
@@ -633,14 +652,17 @@ export class TsCompilerWrapper {
     }
 
     // Safe fix whitelist: only 100% structural fixes that don't mutate business logic.
+    // Safe fix whitelist: only 100% structural fixes that don't mutate business logic.
+    // REMOVED: fixClassDoesntImplementInheritedAbstractMember — inserts throw stubs
+    // REMOVED: fixAddMissingMember — inserts throw stubs
+    // Both generate `throw new Error("Method not implemented.")` which compiles
+    // but crashes unconditionally at runtime. Better to return the error to the LLM.
     private static readonly SAFE_FIXES = new Set([
         "import",
         "fixMissingImport",
         "fixAwaitInSyncFunction",
         "fixPromiseResolve",
         "fixMissingProperties",
-        "fixClassDoesntImplementInheritedAbstractMember",
-        "fixAddMissingMember",
         "fixAddOverrideModifier",
     ]);
 
@@ -649,13 +671,16 @@ export class TsCompilerWrapper {
 
         // Find the matching raw diagnostic (need byte offsets for TS API)
         const errorCode = Number(error.code.replace("TS", ""));
-        const rawDiag = this.lastRawDiagnostics.find(d =>
-            d.file &&
-            d.code === errorCode &&
-            d.start !== undefined &&
-            d.length !== undefined &&
-            (this.toPosix(d.file.fileName) === filePath || this.toPosix(d.file.fileName).endsWith("/" + filePath))
-        );
+        // FIX: Match by line+column too. Without this, duplicate error codes
+        // (e.g., two TS2304 in the same file) always return the first diagnostic,
+        // causing the healer to apply the wrong fix in an infinite micro-rollback loop.
+        const rawDiag = this.lastRawDiagnostics.find(d => {
+            if (!d.file || d.code !== errorCode || d.start === undefined || d.length === undefined) return false;
+            const matchPath = this.toPosix(d.file.fileName) === filePath || this.toPosix(d.file.fileName).endsWith("/" + filePath);
+            if (!matchPath) return false;
+            const pos = ts.getLineAndCharacterOfPosition(d.file, d.start);
+            return (pos.line + 1) === error.line && (pos.character + 1) === error.column;
+        });
 
         if (!rawDiag || rawDiag.start === undefined || rawDiag.length === undefined || !rawDiag.file) {
             return [];

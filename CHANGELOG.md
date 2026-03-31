@@ -2,6 +2,46 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## 7.3.5 (2026-03-31) — Full Security Audit
+
+### Security
+- **Path Jail:** Symlink bypass on sensitive file check — now validates realpath target
+- **Path Jail:** TTRD pre-scan reads files before path jail validation (arbitrary file read)
+- **Path Jail:** LSP codeAction `bestFix.filePath` not validated against workspace
+- **Path Jail:** `compressFile`/`compressFileAdvanced` now enforce path jail
+- **Path Jail:** Context Heartbeat master plan path validated via safePath (LFI fix)
+- **LSP Sidecar:** `Date.now()` overflows int32 in gopls — replaced with monotonic counter
+- **LSP Sidecar:** Windows URI case mismatch breaks auto-healing on Windows
+- **Auto-Healer:** `SAFE_FIXES` removed `fixClassDoesntImplementInheritedAbstractMember` and `fixAddMissingMember` — both inject `throw new Error("Method not implemented.")` stubs
+
+### Critical Fixes
+- **Kernel:** `mutatedFiles` not cleared in `commitToDisk()` catch + `rollbackAll()` — next commit deletes real user files
+- **Kernel:** Auto-healed files never registered in `mutatedFiles` — healed code vanishes from disk
+- **Database:** `save()` atomic via temp+rename (prevents truncation on crash)
+- **Database:** `updateAvgDocLen()` O(N²) → O(1) via running total (prevents DoS on bulk indexing)
+
+### Fixed
+- **Kernel:** WAL recovery per-entry try-catch — one locked file no longer destroys all backups
+- **Kernel:** VFS ghosting in hologram — pruned files with VFS edits now visible to compiler
+- **Kernel:** `fs.readFileSync` unprotected in healer hot path — ENOENT no longer aborts transaction
+- **Kernel:** Corruption guard moved inside mutex (prevents concurrent `purgeCache()`)
+- **Kernel:** `createdTmps.push` before write (prevents orphaned .tmp on ENOSPC)
+- **Kernel:** `rollbackSidecars` docstring updated to reflect async behavior
+- **LSP Sidecar:** `didClose` tombstone replaced with empty `didChange` (prevents split-brain)
+- **LSP Sidecar:** Buffer overflow triggers `forceKill()` instead of silent truncation
+- **TS Compiler:** `getAutoFixes` matches by line+column (prevents infinite micro-rollback loop)
+- **TS Compiler:** Pre-compiled regex in `getFingerprint` (3 RegExp per diagnostic → 0)
+- **TS Compiler:** Cascade threshold includes sample of first 5 errors for LLM diagnosis
+- **Spectral:** Removed ObjectLiteral/ArrayLiteral/CallExpression pruning (Vue/Express/tRPC visibility)
+- **Spectral:** `isMethodDeclaration` + `isFunctionDeclaration` added to signature interceptor
+- **Database:** `insertChunksBatch` rollback purges phantom entries from RAM indexes
+- **Engine:** Thundering herd on `unlink` — `db.save()` replaced with 1s debounced `scheduleSave()`
+- **Engine:** Ghost chunks cleaned on early return (filtered/empty files)
+- **Engine:** T-RAG `cachedGraph` invalidated after watcher changes
+- **Semantic Edit:** Batch edit ambiguity check — rejects duplicate symbol names
+- **Semantic Edit:** Single edit atomic write via temp+rename
+- **Router:** Heartbeat `<=` → `<` prevents infinite injection loop on tool failure
+
 ## 7.3.1 (2026-03-30)
 
 ### Security

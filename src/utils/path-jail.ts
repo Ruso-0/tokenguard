@@ -125,8 +125,12 @@ export function safePath(workspaceRoot: string, inputPath: string): string {
         }
     }
 
-    // Block access to sensitive files
-    if (isSensitivePath(resolved)) {
+    // Block access to sensitive files — check BOTH logical and physical paths.
+    // Without this, a symlink like `temp -> .env` bypasses the blocklist.
+    let realTarget = resolved;
+    try { realTarget = fs.realpathSync(resolved); } catch { /* ENOENT: new file, no symlink to resolve */ }
+
+    if (isSensitivePath(resolved) || isSensitivePath(realTarget)) {
         throw new Error(`Access to sensitive file blocked: ${inputPath}`);
     }
 

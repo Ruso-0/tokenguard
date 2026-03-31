@@ -1,6 +1,6 @@
 {
   "name": "@ruso-0/nreki",
-  "version": "7.3.1",
+  "version": "7.3.5",
   "description": "MCP plugin that validates AI agent edits in RAM before they touch disk. Cross-file semantic checks for TypeScript, Go (gopls), and Python (pyright). Auto-healing, type regression detection, and spectral topology. Zero cloud dependencies.",
   "main": "dist/index.js",
   "type": "module",

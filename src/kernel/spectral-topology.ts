@@ -62,15 +62,14 @@ export class SpectralTopologist {
                 nodes.add(sourceId);
 
                 const findDependencies = (node: ts.Node) => {
-                    // ── RADICAL O(1) PRUNING ──────────────────────────────
-                    // Only TypeReferenceNode in signatures and declarations needed.
-                    // All runtime values are skipped immediately.
-                    // This reduces exploration from millions of nodes to thousands.
+                    // ── RADICAL O(1) PRUNING (CORRECTED v7.3.3) ────────────────
+                    // DO NOT prune ObjectLiterals, ArrayLiterals, or CallExpressions —
+                    // they contain method signatures, type assertions, and generics
+                    // (Express handlers, Vue defineComponent, tRPC routers, Pinia stores).
+                    // DO prune blocks (function bodies) and primitive literals
+                    // to maintain O(1) performance without sacrificing topology.
                     if (
                         ts.isBlock(node) ||
-                        ts.isObjectLiteralExpression(node) ||
-                        ts.isArrayLiteralExpression(node) ||
-                        ts.isCallExpression(node) ||
                         ts.isBinaryExpression(node) ||
                         ts.isTemplateExpression(node) ||
                         ts.isStringLiteral(node) ||
@@ -113,8 +112,16 @@ export class SpectralTopologist {
                         return; // End of branch. Do not descend further.
                     }
 
-                    // Arrow/function expressions: signatures only, NOT body
-                    if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+                    // ── STRUCTURAL FIX: Intercept ALL function signatures ────────
+                    // Extract type references from signatures but NEVER enter function bodies.
+                    // Added: isMethodDeclaration (Vue/Express/class methods)
+                    // Added: isFunctionDeclaration (nested named functions)
+                    if (
+                        ts.isArrowFunction(node) ||
+                        ts.isFunctionExpression(node) ||
+                        ts.isMethodDeclaration(node) ||
+                        ts.isFunctionDeclaration(node)
+                    ) {
                         if (node.typeParameters) node.typeParameters.forEach(findDependencies);
                         node.parameters.forEach(findDependencies);
                         if (node.type) findDependencies(node.type);

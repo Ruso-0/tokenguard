@@ -24,6 +24,7 @@ import { Compressor, type CompressionResult } from "./compressor.js";
 import { AdvancedCompressor, type CompressionLevel, type AdvancedCompressionResult } from "./compressor.js";
 import { shouldProcess } from "./utils/file-filter.js";
 import { readSource } from "./utils/read-source.js";
+import { safePath } from "./utils/path-jail.js";
 import { getOrGenerateRepoMap, type RepoMap, type DependencyGraph } from "./repo-map.js";
 import { logger } from "./utils/logger.js";
 
@@ -138,6 +139,7 @@ export class NrekiEngine {
     private indexingQueue = new Set<string>();
     private isIndexing = false;
     private initialized = false;
+    private saveTimeout: NodeJS.Timeout | null = null;
     private embedderReady = false;
 
     /** Files that have been read (raw or compressed) in this session. */
@@ -234,6 +236,9 @@ export class NrekiEngine {
 
         const filterResult = shouldProcess(filePath, stat.size);
         if (!filterResult.process) {
+            // Clean up stale chunks if this file was previously indexed
+            // but now exceeds size limits or is filtered out.
+            this.db.clearChunks(filePath);
             return null;
         }
 
@@ -283,7 +288,12 @@ export class NrekiEngine {
 
         // Parse AST
         const result = await this.parser.parse(filePath, content);
-        if (result.chunks.length === 0) return result;
+        if (result.chunks.length === 0) {
+            // File was emptied or parser couldn't extract anything.
+            // Clear old chunks to prevent ghost data in search results.
+            this.db.clearChunks(filePath);
+            return result;
+        }
 
         // Clear old chunks for this file
         this.db.clearChunks(filePath);
@@ -541,6 +551,11 @@ export class NrekiEngine {
     ): Promise<CompressionResult> {
         await this.initialize();
 
+        // PATH JAIL: Validate path before any I/O.
+        // Without this, the LLM can read arbitrary files via compress tool.
+        const projectRoot = this.config.watchPaths[0] || process.cwd();
+        filePath = safePath(projectRoot, filePath);
+
         // FIX 7: Check file size/extension
         const stat = fs.statSync(filePath);
         const filterResult = shouldProcess(filePath, stat.size);
@@ -564,6 +579,10 @@ export class NrekiEngine {
         preloadedContent?: string,
     ): Promise<AdvancedCompressionResult> {
         await this.initialize();
+
+        // PATH JAIL: Validate path before any I/O.
+        const projectRoot = this.config.watchPaths[0] || process.cwd();
+        filePath = safePath(projectRoot, filePath);
 
         // Validate size ALWAYS - even with preloaded content (prevents bypass)
         let sizeInBytes: number;
@@ -755,7 +774,7 @@ export class NrekiEngine {
             .on("change", (fp: string) => this.queueIndexing(fp))
             .on("unlink", (fp: string) => {
                 this.db.clearChunks(fp);
-                this.db.save();
+                this.scheduleSave();
             });
     }
 
@@ -787,7 +806,10 @@ export class NrekiEngine {
             }
         } finally {
             if (madeChanges) {
-                this.db.save(); // Persist SQLite to disk after watcher changes
+                this.scheduleSave(); // Persist SQLite to disk after watcher changes
+                // Invalidate topology cache — edits may have changed import graph.
+                // Without this, T-RAG applies stale PageRank tiers and blast radius.
+                this.cachedGraph = null;
             }
             this.isIndexing = false; // Always reset to prevent deadlocks
         }
@@ -835,8 +857,21 @@ export class NrekiEngine {
 
     // ─── Cleanup ──────────────────────────────────────────────────
 
+    /** Debounced save — coalesces rapid-fire events (e.g., folder deletion). */
+    private scheduleSave(): void {
+        if (this.saveTimeout) clearTimeout(this.saveTimeout);
+        this.saveTimeout = setTimeout(() => {
+            this.saveTimeout = null;
+            this.db.save();
+        }, 1_000);
+    }
+
     /** Shutdown engine: stop watcher and close database. */
     shutdown(): void {
+        if (this.saveTimeout) {
+            clearTimeout(this.saveTimeout);
+            this.saveTimeout = null;
+        }
         this.stopWatcher();
         this.db.close();
     }
