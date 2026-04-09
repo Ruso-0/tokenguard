@@ -1,6 +1,6 @@
 {
   "name": "@ruso-0/nreki",
-  "version": "8.0.1",
+  "version": "8.0.2",
   "description": "MCP plugin that validates AI agent edits in RAM before they touch disk. Spectral clustering, architecture diffs, bridge detection, dead code oracle, and cross-file semantic checks for TypeScript, Go (gopls), and Python (pyright). Zero cloud dependencies.",
   "main": "dist/index.js",
   "type": "module",

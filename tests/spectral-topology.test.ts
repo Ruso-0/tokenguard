@@ -152,6 +152,35 @@ describe("SpectralMath.analyzeTopology", () => {
         }
         expect(maxVal).toBeGreaterThan(0);
     });
+
+    it("should gracefully fail-closed on hub-heavy graphs causing IEEE 754 overflow (Numerical Sanity Firewall)", () => {
+        // MATEMÁTICA DEL OVERFLOW IEEE 754:
+        // En un grafo estrella K_{1,N-1}, tras la normalización L2, vec[i] ≈ 1/√N.
+        // El factor de desplazamiento c ≈ 2(N-1)w. Por tanto, val = c * vec[i] ≈ 2w√N.
+        // En el hot loop acumulamos norm += val * val.
+        // val² ≈ 4w²N, por lo que Σ(val²) ≈ 4w²N².
+        // Para desbordar Float64 (MAX_VALUE ≈ 1.79e308), necesitamos 4w²N² > 1.79e308.
+        // Con N=1000, el umbral exacto de desbordamiento es w > 6.7e150.
+        // Usamos w = 1e160 para garantizar el overflow térmico desde el interior
+        // del power iteration (Inf - Inf -> NaN) sin inyectar inputs malformados.
+        const N = 1000;
+        const edges: SparseEdge[] = [];
+        for (let i = 1; i < N; i++) {
+            edges.push({ u: 0, v: i, weight: 1e160 }); // Inyección de tensión térmica
+        }
+
+        const result = SpectralMath.analyzeTopology(N, edges);
+
+        // El firewall DEBE atrapar el NaN/Infinity interno y hacer fallback
+        // a la variante degenerada de la unión discriminada.
+        expect(result.fiedler).toBe(0);
+        expect(result.volume).toBeGreaterThan(0);
+
+        // El tipado y el runtime garantizan que los vectores espectrales no existen
+        expect(result.v2).toBeUndefined();
+        expect(result.lambda3).toBeUndefined();
+        expect(result.v3).toBeUndefined();
+    });
 });
 
 describe("SpectralTopologist integration", () => {

@@ -2,6 +2,34 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## 8.0.2 (2026-04-09) — Firewall Verification Test
+
+### Fixed (Test Coverage Gap)
+- **Numerical Sanity Firewall regression test:** v8.0.1 introduced an 8-layer
+  defense in depth against IEEE 754 NaN/Infinity propagation in the spectral
+  solver, but the firewall itself had no dedicated regression test — none of
+  the 712 existing tests constructed a graph that triggered real overflow in
+  the power iteration. This release adds a single test that builds a star
+  graph with extreme weights (1e150 × 1000 nodes), demonstrably overflows the
+  `norm` accumulator (`val² ≈ 1e306` × 1000 = `1e309 > Number.MAX_VALUE`),
+  and verifies that the Hot-Loop Thermal Guard catches `Infinity` in `norm`,
+  the λ₂ short-circuit catches the resulting `NaN`, and the function falls
+  back to the degenerate variant of the discriminated union (no `v2`,
+  `lambda3`, or `v3`). Defense without verification was half a defense; this
+  closes that gap.
+
+### Notes
+- **Tests:** 712 → 713 (the new firewall regression test).
+- **Behavioral change:** none. This is purely a coverage addition.
+- **No breaking changes.** No API surface modified.
+- The 3 deferred items from v8.0.1 remain deferred:
+  - **Kahan summation:** rejected (precision obliterated by `toFixed(4)`)
+  - **PageRank FP audit:** rejected (mathematically immune via L1 simplex)
+  - **God Object kernel refactor:** deferred to v8.1 (SRE rule: never mix
+    architectural refactors with critical patches)
+
+---
+
 ## 8.0.1 (2026-04-08) — IEEE 754 Hardening: NaN Sink Eradication
 
 ### Fixed (Critical — Mathematical Soundness)
