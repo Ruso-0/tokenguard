@@ -269,11 +269,11 @@ export class CircuitBreaker {
             }
         }
 
-        // Pattern 2: Same file written 5+ times in last 15 calls
+        // Pattern 2: Same file mutated 5+ times in last 15 calls (reads/compresses excluded)
         const recentWrites = history.slice(-SAME_FILE_WINDOW);
         const fileCounts = new Map<string, number>();
         for (const record of recentWrites) {
-            if (record.filePath) {
+            if (record.filePath && this.isMutation(record.toolName)) {
                 fileCounts.set(record.filePath, (fileCounts.get(record.filePath) || 0) + 1);
             }
         }
@@ -324,7 +324,7 @@ export class CircuitBreaker {
             const step2 = history[i + 1];
             const step3 = history[i + 2];
 
-            const isWrite = step1.filePath !== null;
+            const isWrite = step1.filePath !== null && this.isMutation(step1.toolName);
             const isTest = this.isTestLikeCall(step2);
             const isFail = step3.errorHash !== null;
 
@@ -337,6 +337,11 @@ export class CircuitBreaker {
         }
 
         return cycles;
+    }
+
+    private isMutation(toolName: string): boolean {
+        const mutations = ["nreki_code:edit", "nreki_code:batch_edit", "nreki_code:undo"];
+        return mutations.includes(toolName.toLowerCase());
     }
 
     /**

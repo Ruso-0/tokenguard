@@ -295,7 +295,7 @@ export class ChronosMemory {
                `File \`${norm}\` has a high error history (CFI Score: ${f.cfiScore.toFixed(1)}).\n` +
                `Past sessions: ${f.trips} circuit breaker trips, ${f.semanticErrors} cross-file type errors, ${f.autoHeals} auto-heals.\n` +
                `Last error: "${f.lastErrorPattern || 'Unknown'}".\n` +
-               `**Required**: Read this file uncompressed before editing (\`nreki_code action:"read" compress:false force_raw:true\`). Use \`batch_edit\` if changing signatures.\n`;
+               `**Required**: Read this file uncompressed before editing (\`nreki_code action:"read" compress:false _nreki_bypass:"chronos_recovery"\`). Use \`batch_edit\` if changing signatures.\n`;
 
         // Type debt details: tells the agent exactly what to restore
         if (f.unpaidTypeDebts && f.unpaidTypeDebts.length > 0) {

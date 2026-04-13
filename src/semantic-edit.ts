@@ -357,6 +357,19 @@ export async function batchSemanticEdit(
         return { success: false, editCount: 0, fileCount: 0, files: [], error: "No edits provided." };
     }
 
+    // LEY 4.5 — Batch Global Guillotine: reject oversized payloads
+    let totalPayloadLines = 0;
+    for (const edit of edits) {
+        if (edit.new_code) totalPayloadLines += edit.new_code.split("\n").length;
+        if (edit.replace_text) totalPayloadLines += edit.replace_text.split("\n").length;
+    }
+    if (totalPayloadLines > 150) {
+        return {
+            success: false, editCount: edits.length, fileCount: 0, files: [],
+            error: `Batch payload too large (${totalPayloadLines} lines, max 150). Use mode:"patch" to send smaller diffs.`,
+        };
+    }
+
     // 1. Group edits by file, resolving paths
     const editsByFile = new Map<string, BatchEditOp[]>();
     for (const edit of edits) {

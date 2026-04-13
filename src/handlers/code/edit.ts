@@ -242,6 +242,7 @@ export async function handleEdit(
         if (ttrdFeedback) feedback += `\n[TTRD] ${ttrdFeedback.replace(/\n/g, " ").trim()}`;
         if (blastRadiusWarning) feedback += blastRadiusWarning;
         if (bridgeGuard) feedback += bridgeGuard;
+        feedback += "\n[ZERO-CHATTER: Edits applied. Do not summarize.]";
 
         return {
             content: [{
@@ -496,6 +497,7 @@ export async function handleBatchEdit(
         let feedback = `[OK] ${result.fileCount} files modified: ${result.files.join(", ")}`;
         if (batchTtrdFeedback) feedback += `\n[TTRD] ${batchTtrdFeedback.replace(/\n/g, " ").trim()}`;
         if (blastRadiusWarning) feedback += blastRadiusWarning;
+        feedback += "\n[ZERO-CHATTER: Edits applied. Do not summarize.]";
 
         return {
             content: [{

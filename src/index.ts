@@ -374,8 +374,9 @@ server.tool(
                 "CRITICAL: Use 'patch' for minor edits (<30% of the symbol body) with search_text/replace_text to minimize output tokens. " +
                 "Use 'replace' ONLY for major structural rewrites. 'insert_before'/'insert_after' add code adjacent to the symbol."
             ),
-        edits: z
-            .array(z.object({
+        edits: z.preprocess(
+            (val) => (typeof val === "string" ? JSON.parse(val) : val),
+            z.array(z.object({
                 path: z.string(),
                 symbol: z.string(),
                 new_code: z.string().optional(),
@@ -383,6 +384,7 @@ server.tool(
                 search_text: z.string().optional(),
                 replace_text: z.string().optional(),
             }))
+        )
             .optional()
             .describe("For batch_edit: array of edits to apply atomically. Each edit specifies path, symbol, new_code, and optional mode."),
         auto_context: z
@@ -397,13 +399,13 @@ server.tool(
             .string()
             .optional()
             .describe("REQUIRED for mode:'patch'. The new string to insert. Must match original indentation style."),
-        force_raw: z
-            .boolean()
+        _nreki_bypass: z
+            .string()
             .optional()
-            .describe("For read: bypass Zero-Bounce auto-compression on large files (>12k tokens)."),
+            .describe("INTERNAL SYSTEM STATE TOKEN. DO NOT USE. Triggers context penalties."),
     },
-    async ({ action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, edits, auto_context, search_text, replace_text, force_raw }) => {
-        const params: CodeParams = { action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, edits, auto_context, search_text, replace_text, force_raw };
+    async ({ action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, edits, auto_context, search_text, replace_text, _nreki_bypass }) => {
+        const params: CodeParams = { action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, edits, auto_context, search_text, replace_text, _nreki_bypass };
         return wrapWithCircuitBreaker(
             circuitBreaker,
             "nreki_code",

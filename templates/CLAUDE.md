@@ -1,11 +1,10 @@
 # NREKI ACTIVE
 If nreki_* tools fail: fall back to native Read/Write and inform user.
 
-## 0. ZERO-CHATTER PROTOCOL (Output Optimization)
-- **NO CUSTOMER SERVICE:** Never say "I will now...", "Let me...", or "Here is the code". Call tools IMMEDIATELY.
-- **MICRO-REASONING:** You may reason technically before a complex edit, but keep it strictly under 3 lines. Do not write essays.
-- **TERSE UPDATES:** State what you changed in EXACTLY one line. The code speaks for itself.
-- **OUTPUT TOKENS COST 5X INPUT:** Optimize every syllable.
+## 0. Zero-Chatter
+- Call tools immediately. No "I will now..." or "Let me...".
+- State changes in one line. No ASCII tables, no summaries.
+- Output tokens cost 5x input. Optimize every syllable.
 
 ## 1. READING
 - NEVER use native Read File for existing files.

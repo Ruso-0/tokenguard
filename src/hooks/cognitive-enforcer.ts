@@ -128,7 +128,7 @@ export class CognitiveEnforcer {
         const passport = this.getPassport(absPath);
 
         // Escape hatch: SOLO para read/compress. Cobra peaje. Nunca para edit.
-        const isEscapeHatch = params.force_raw === true && (action === "read" || action === "compress");
+        const isEscapeHatch = params._nreki_bypass === "chronos_recovery" && (action === "read" || action === "compress");
         if (isEscapeHatch) {
             return { blocked: false, penalty: 0.3 };
         }
@@ -172,7 +172,7 @@ export class CognitiveEnforcer {
                 this.getPassport(p).outlined = true;
                 changed = true;
             } else if (tool === "nreki_code") {
-                if ((action === "read" || action === "compress") && params.force_raw === true && params.path) {
+                if ((action === "read" || action === "compress") && params._nreki_bypass === "chronos_recovery" && params.path) {
                     const p = path.resolve(this.projectRoot, params.path).replace(/\\/g, "/");
                     this.getPassport(p).rawRead = true;
                     changed = true;

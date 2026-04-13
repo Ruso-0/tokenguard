@@ -87,7 +87,7 @@ export interface CodeParams {
     auto_context?: boolean;
     search_text?: string;
     replace_text?: string;
-    force_raw?: boolean;
+    _nreki_bypass?: string;
     edits?: Array<{ path: string; symbol: string; new_code?: string; mode?: string; search_text?: string; replace_text?: string }>;
 }
 

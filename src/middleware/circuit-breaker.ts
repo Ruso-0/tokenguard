@@ -33,7 +33,7 @@ function generateLevel1Redirect(
         `Repeated fixes to the same code are failing with the same pattern:\n` +
         `> ${error}\n\n` +
         `**STRATEGY SHIFT: Stop patching. Rewrite from scratch.**\n\n` +
-        `1. Use \`nreki_code action:"read" compress:false force_raw:true path:"${fil}"\` to read the UNCOMPRESSED code. You CANNOT rewrite the logic if you read it compressed.\n` +
+        `1. Use \`nreki_code action:"read" compress:false _nreki_bypass:"chronos_recovery" path:"${fil}"\` to read the UNCOMPRESSED code. You CANNOT rewrite the logic if you read it compressed.\n` +
         `2. DO NOT use the native Write tool (it bypasses AST validation).\n` +
         `3. Use \`nreki_code action:"edit" mode:"insert_after" symbol:"${sym}"\` to safely append a NEW function \`${sym}_v2\` below the original. NREKI will validate it.\n` +
         `4. Implement the intended behavior cleanly from zero in \`${sym}_v2\`.\n` +
@@ -56,7 +56,7 @@ function generateLevel2Redirect(
         `The complexity is too high for monolithic code. Time to divide and conquer.\n` +
         `> ${error}\n\n` +
         `**MANDATORY STRATEGY: Break the logic into smaller pieces.**\n\n` +
-        `1. Use \`nreki_code action:"read" compress:false force_raw:true path:"${fil}"\` to read the full uncompressed code of \`${sym}\` and understand its responsibilities.\n` +
+        `1. Use \`nreki_code action:"read" compress:false _nreki_bypass:"chronos_recovery" path:"${fil}"\` to read the full uncompressed code of \`${sym}\` and understand its responsibilities.\n` +
         `2. Identify 2-3 distinct responsibilities inside \`${sym}\`.\n` +
         `3. DO NOT use the native Write tool (it bypasses AST validation).\n` +
         `4. Use \`nreki_code action:"edit" mode:"insert_before" symbol:"${sym}"\` to add small, pure helper functions above \`${sym}\` (data in → data out). NREKI will validate them.\n` +

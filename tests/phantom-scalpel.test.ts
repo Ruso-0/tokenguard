@@ -12,7 +12,7 @@
  * 8.  patch-delete: replace_text: "" deletes code
  * 9.  batch-patch-mixed: batch with patches and replaces atomically
  * 10. zero-bounce: auto-compress >12k token file
- * 11. zero-bounce-force-raw: force_raw bypasses auto-compression
+ * 11. zero-bounce-bypass: _nreki_bypass bypasses auto-compression
  * 12. skeleton-map: skeleton map omits v2/signatures, shows CORE exports
  * 13. pressure-heartbeat-kill: pressure >0.9 suppresses heartbeat
  * 14. pressure-plan-truncate: pressure 0.75 truncates plan
@@ -275,8 +275,8 @@ describe("Phantom Scalpel: Zero-Bounce I/O", () => {
         expect(fs.existsSync(filePath)).toBe(true);
     });
 
-    it("11. zero-bounce-force-raw: force_raw should bypass auto-compression", () => {
-        // This is a parameter validation test — force_raw:true should
+    it("11. zero-bounce-bypass: _nreki_bypass should bypass auto-compression", () => {
+        // This is a parameter validation test — _nreki_bypass:"chronos_recovery" should
         // cause the raw content to be returned even for large files.
         // Full integration test requires handler setup; verify the param exists.
         expect(true).toBe(true); // Placeholder — handler integration tested via e2e

@@ -102,7 +102,7 @@ export async function handleRead(
             : "medium";
 
         if (!compress) {
-            const forceRaw = params.force_raw === true;
+            const forceRaw = params._nreki_bypass === "chronos_recovery";
             const fullTokens = Embedder.estimateTokens(rawContent);
 
             // ─── ZERO-BOUNCE I/O (v9.0) ─────────────────────────────
@@ -124,7 +124,7 @@ export async function handleRead(
                         type: "text" as const,
                         text:
                             `[AUTO-SHIELD: File >12k tokens (${fullTokens.toLocaleString()}t). Auto-compressed to 'medium'. ` +
-                            `To read raw, pass force_raw:true. To inspect bodies, use compress with focus:"<symbol>".]\n\n` +
+                            `To inspect bodies, use compress with focus:"<symbol>".]\n\n` +
                             `\`\`\`\n${zbResult.compressed}\n\`\`\`` +
                             (autoContextBlock ? `\n\n${autoContextBlock}` : ""),
                     }],

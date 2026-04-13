@@ -139,21 +139,21 @@ describe("CircuitBreaker", () => {
     describe("Pattern 2: same file written repeatedly", () => {
         it("should trip after 5 writes to the same file", () => {
             for (let i = 0; i < 4; i++) {
-                const r = cb.recordToolCall("write", "ok", "src/utils.ts");
+                const r = cb.recordToolCall("nreki_code:edit", "ok", "src/utils.ts");
                 expect(r.tripped).toBe(false);
             }
-            const r5 = cb.recordToolCall("write", "ok", "src/utils.ts");
+            const r5 = cb.recordToolCall("nreki_code:edit", "ok", "src/utils.ts");
             expect(r5.tripped).toBe(true);
             expect(r5.reason).toContain("src/utils.ts");
             expect(r5.reason).toContain("modified 5 times");
         });
 
         it("should NOT trip with writes to different files", () => {
-            cb.recordToolCall("write", "ok", "src/a.ts");
-            cb.recordToolCall("write", "ok", "src/b.ts");
-            cb.recordToolCall("write", "ok", "src/c.ts");
-            cb.recordToolCall("write", "ok", "src/d.ts");
-            const r = cb.recordToolCall("write", "ok", "src/e.ts");
+            cb.recordToolCall("nreki_code:edit", "ok", "src/a.ts");
+            cb.recordToolCall("nreki_code:edit", "ok", "src/b.ts");
+            cb.recordToolCall("nreki_code:edit", "ok", "src/c.ts");
+            cb.recordToolCall("nreki_code:edit", "ok", "src/d.ts");
+            const r = cb.recordToolCall("nreki_code:edit", "ok", "src/e.ts");
             expect(r.tripped).toBe(false);
         });
     });
@@ -164,7 +164,7 @@ describe("CircuitBreaker", () => {
         it("should trip after 3 write→test→fail cycles", () => {
             // Use different errors each cycle so Pattern 1 doesn't trigger first
             for (let i = 0; i < 3; i++) {
-                cb.recordToolCall("write", "ok", `src/file${i}.ts`);
+                cb.recordToolCall("nreki_code:edit", "ok", `src/file${i}.ts`);
                 cb.recordToolCall("bash", "running tests...");
                 cb.recordToolCall("bash", `FAIL tests/auth.test.ts\nTypeError: variant ${i}`);
             }
@@ -177,7 +177,7 @@ describe("CircuitBreaker", () => {
         it("should NOT trip with successful test runs between writes", () => {
             // Use different files so Pattern 2 doesn't trigger
             for (let i = 0; i < 5; i++) {
-                cb.recordToolCall("write", "ok", `src/module${i}.ts`);
+                cb.recordToolCall("nreki_code:edit", "ok", `src/module${i}.ts`);
                 cb.recordToolCall("bash", "All tests passed. 214 tests, 0 failures");
             }
             const state = cb.getState();
