@@ -228,20 +228,14 @@ describe("Repo Map Text Rendering", () => {
         const text = repoMapToText(map);
 
         // Header line
-        expect(text).toContain("=== Repo Map (");
-        expect(text).toContain("files,");
-        expect(text).toContain("lines,");
-        expect(text).toMatch(/λ₂=[\d.]+\) ===/);
+        expect(text).toContain("=== NREKI STATIC REPO MAP ===");
 
-        // File entries
-        expect(text).toContain("src/auth.ts (");
-        expect(text).toContain("lines)");
+        // File entries (skeleton format: [TIER] file.ts (NL) exports: ...)
+        expect(text).toContain("auth.ts");
+        expect(text).toMatch(/\[\w+\] auth\.ts \(\d+L\)/);
 
         // Exports section
         expect(text).toContain("exports:");
-
-        // Imports section
-        expect(text).toContain("imports:");
     });
 
     it("should not contain timestamps in the text output", async () => {
@@ -314,13 +308,13 @@ describe("Repo Map Text Rendering", () => {
 
     it("should not use locale-dependent number formatting", async () => {
         const map = await generateRepoMap(testDir, parser);
-        const text = repoMapToText(map);
+        const text = repoMapToText(map, "full");
 
-        // The header should use plain numbers, not locale-formatted (e.g., no commas in "1,234")
-        const headerMatch = text.match(/=== Repo Map \((\d+) files, (\d+) lines, λ₂=[\d.]+\) ===/);
-        expect(headerMatch).not.toBeNull();
-        expect(Number(headerMatch![1])).toBe(map.totalFiles);
-        expect(Number(headerMatch![2])).toBe(map.totalLines);
+        // Metadata in footer should use plain numbers, not locale-formatted (e.g., no commas in "1,234")
+        const metadataMatch = text.match(/Files: (\d+) \| Lines: (\d+) \| lambda2: [\d.]+/);
+        expect(metadataMatch).not.toBeNull();
+        expect(Number(metadataMatch![1])).toBe(map.totalFiles);
+        expect(Number(metadataMatch![2])).toBe(map.totalLines);
     });
 });
 

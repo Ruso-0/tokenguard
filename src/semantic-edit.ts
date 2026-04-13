@@ -24,7 +24,7 @@ import crypto from "crypto";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
-export type EditMode = "replace" | "insert_before" | "insert_after";
+export type EditMode = "replace" | "insert_before" | "insert_after" | "patch";
 
 export interface EditResult {
     success: boolean;
@@ -36,6 +36,7 @@ export interface EditResult {
     syntaxValid: boolean;
     error?: string;
     oldRawCode?: string;
+    newRawCode?: string;
     newContent?: string;
 }
 
@@ -119,6 +120,11 @@ export interface SpliceTarget {
     startLine: number;
 }
 
+export interface SpliceResult {
+    newContent: string;
+    newRawCode: string;
+}
+
 /**
  * Find a chunk by symbol name. Prefers AST symbolName, falls back to regex extraction.
  */
@@ -150,9 +156,11 @@ export function findChunkBySymbol(
 export function applySemanticSplice(
     content: string,
     target: SpliceTarget,
-    newCode: string,
+    newCode: string | undefined,
     mode: EditMode = "replace",
-): string {
+    searchText?: string,
+    replaceText?: string,
+): SpliceResult {
     const { startIndex, rawCode } = target;
 
     // Verify tree-sitter byte position against actual content
@@ -194,6 +202,55 @@ export function applySemanticSplice(
     }
     const endIdx = startIdx + rawCode.length;
 
+    // ─── PHANTOM SCALPEL: Symbol-Scoped Patching (v9.0) ─────────
+    if (mode === "patch") {
+        if (!searchText || searchText.length < 2) {
+            throw new Error(
+                `[NREKI] Patch mode requires 'search_text' of at least 2 characters.`
+            );
+        }
+
+        const symbolContent = content.substring(startIdx, endIdx);
+
+        // Strict occurrence counting (no regex, no injection risk)
+        let pos = symbolContent.indexOf(searchText);
+        let occurrences = 0;
+        while (pos !== -1) {
+            occurrences++;
+            pos = symbolContent.indexOf(searchText, pos + searchText.length);
+        }
+
+        if (occurrences === 0) {
+            const preview = symbolContent.length > 300
+                ? symbolContent.substring(0, 300) + "..."
+                : symbolContent;
+            throw new Error(
+                `[NREKI] Patch failed: Exact string not found inside symbol "${target.symbolName}".\n` +
+                `Whitespace and indentation must match EXACTLY. ` +
+                `Target AST content starts with:\n\`\`\`\n${preview}\n\`\`\``
+            );
+        }
+        if (occurrences > 1) {
+            throw new Error(
+                `[NREKI] Patch ambiguous: "${searchText}" found ${occurrences} times ` +
+                `inside "${target.symbolName}". Provide more surrounding context ` +
+                `in 'search_text' to disambiguate.`
+            );
+        }
+
+        const patchedRawCode = symbolContent.replace(searchText, replaceText ?? "");
+
+        return {
+            newContent: content.slice(0, startIdx) + patchedRawCode + content.slice(endIdx),
+            newRawCode: patchedRawCode,
+        };
+    }
+    // ─── END PHANTOM SCALPEL ─────────────────────────────────────
+
+    if (newCode === undefined) {
+        throw new Error(`[NREKI] "new_code" is required for mode "${mode}".`);
+    }
+
     // Extract exact original indentation
     let lineStart = startIdx;
     while (lineStart > 0 && content[lineStart - 1] !== "\n") lineStart--;
@@ -231,13 +288,22 @@ export function applySemanticSplice(
 
     // Splice by mode
     if (mode === "insert_before") {
-        return content.slice(0, lineStart) + formattedNewCode + "\n\n" + content.slice(lineStart);
+        return {
+            newContent: content.slice(0, lineStart) + formattedNewCode + "\n\n" + content.slice(lineStart),
+            newRawCode: formattedNewCode,
+        };
     } else if (mode === "insert_after") {
         let endOfLine = endIdx;
         while (endOfLine < content.length && content[endOfLine] !== "\n") endOfLine++;
-        return content.slice(0, endOfLine) + "\n\n" + formattedNewCode + content.slice(endOfLine);
+        return {
+            newContent: content.slice(0, endOfLine) + "\n\n" + formattedNewCode + content.slice(endOfLine),
+            newRawCode: formattedNewCode,
+        };
     } else {
-        return content.slice(0, startIdx) + formattedNewCode + content.slice(endIdx);
+        return {
+            newContent: content.slice(0, startIdx) + formattedNewCode + content.slice(endIdx),
+            newRawCode: formattedNewCode,
+        };
     }
 }
 
@@ -256,8 +322,10 @@ export function detectSignatureChange(oldRawCode: string, newCode: string): bool
 export interface BatchEditOp {
     path: string;
     symbol: string;
-    new_code: string;
+    new_code?: string;
     mode?: EditMode;
+    search_text?: string;
+    replace_text?: string;
 }
 
 export interface BatchEditResult {
@@ -268,6 +336,7 @@ export interface BatchEditResult {
     error?: string;
     /** Per-edit old raw code (for blast radius detection) */
     oldRawCodes?: Map<string, string>;
+    newRawCodes?: Map<string, string>;
     vfs?: Map<string, string>;
 }
 
@@ -310,8 +379,9 @@ export async function batchSemanticEdit(
         }
     }
 
-    // Track old raw codes for blast radius detection
+    // Track old/new raw codes for blast radius detection
     const oldRawCodes = new Map<string, string>();
+    const newRawCodes = new Map<string, string>();
 
     // 3. For each file: parse ONCE, map edits, reverse splice
     for (const [filePath, fileEdits] of editsByFile.entries()) {
@@ -368,9 +438,10 @@ export async function batchSemanticEdit(
         mappedEdits.sort((a, b) => b.chunk.startIndex - a.chunk.startIndex);
 
         for (const { edit, chunk } of mappedEdits) {
-            oldRawCodes.set(`${edit.path}::${edit.symbol}`, chunk.rawCode);
+            const key = `${edit.path}::${edit.symbol}`;
+            oldRawCodes.set(key, chunk.rawCode);
             try {
-                virtualCode = applySemanticSplice(
+                const spliceRes = applySemanticSplice(
                     virtualCode,
                     {
                         startIndex: chunk.startIndex,
@@ -380,8 +451,12 @@ export async function batchSemanticEdit(
                         startLine: chunk.startLine,
                     },
                     edit.new_code,
-                    edit.mode || "replace",
+                    (edit.mode || "replace") as EditMode,
+                    edit.search_text,
+                    edit.replace_text,
                 );
+                virtualCode = spliceRes.newContent;
+                newRawCodes.set(key, spliceRes.newRawCode);
             } catch (err) {
                 return {
                     success: false, editCount: edits.length, fileCount: editsByFile.size, files: [],
@@ -480,6 +555,7 @@ export async function batchSemanticEdit(
         fileCount: editsByFile.size,
         files: writtenFiles,
         oldRawCodes,
+        newRawCodes,
         vfs,
     };
 }
@@ -499,11 +575,13 @@ export async function batchSemanticEdit(
 export async function semanticEdit(
     filePath: string,
     symbolName: string,
-    newCode: string,
+    newCode: string | undefined,
     parser: ASTParser,
     sandbox: AstSandbox,
     mode: EditMode = "replace",
     dryRun: boolean = false,
+    searchText?: string,
+    replaceText?: string,
 ): Promise<EditResult> {
     // Read file
     let content: string;
@@ -573,7 +651,7 @@ export async function semanticEdit(
         }
 
         // BONUS: JIT Heuristic - guess the intended symbol by comparing tokens
-        const codeTokens = new Set(newCode.match(/[a-zA-Z_]\w*/g) || []);
+        const codeTokens = new Set((newCode ?? "").match(/[a-zA-Z_]\w*/g) || []);
         let bestChunk: ParsedChunk | null = null;
         let bestScore = 0;
 
@@ -644,8 +722,9 @@ export async function semanticEdit(
 
     // Apply splice via shared pure function
     let newContent: string;
+    let spliceRes: SpliceResult;
     try {
-        newContent = applySemanticSplice(
+        spliceRes = applySemanticSplice(
             content,
             {
                 startIndex: chunk.startIndex,
@@ -656,14 +735,17 @@ export async function semanticEdit(
             },
             newCode,
             mode,
+            searchText,
+            replaceText,
         );
+        newContent = spliceRes.newContent;
     } catch (err) {
         return {
             success: false,
             filePath,
             symbolName,
             oldLines: rawCode.split("\n").length,
-            newLines: newCode.split("\n").length,
+            newLines: newCode ? newCode.split("\n").length : 0,
             tokensAvoided: 0,
             syntaxValid: false,
             error: (err as Error).message,
@@ -678,7 +760,7 @@ export async function semanticEdit(
             filePath,
             symbolName,
             oldLines: rawCode.split("\n").length,
-            newLines: newCode.split("\n").length,
+            newLines: (newCode ?? spliceRes.newRawCode).split("\n").length,
             tokensAvoided: 0,
             syntaxValid: false,
             error: "Unsupported file type for syntax validation.",
@@ -702,7 +784,7 @@ export async function semanticEdit(
             filePath,
             symbolName,
             oldLines: rawCode.split("\n").length,
-            newLines: newCode.split("\n").length,
+            newLines: (newCode ?? spliceRes.newRawCode).split("\n").length,
             tokensAvoided: 0,
             syntaxValid: false,
             error:
@@ -728,7 +810,7 @@ export async function semanticEdit(
     // With NREKI: only sends newCode. Savings = (fullFile + oldSymbol) - newCode.
     const fullFileTokens = Embedder.estimateTokens(content);
     const symbolTokens = Embedder.estimateTokens(rawCode);
-    const newCodeTokens = Embedder.estimateTokens(newCode);
+    const newCodeTokens = Embedder.estimateTokens(newCode ?? spliceRes.newRawCode);
     const tokensAvoided = Math.max(0, fullFileTokens + symbolTokens - newCodeTokens);
 
     return {
@@ -736,10 +818,11 @@ export async function semanticEdit(
         filePath,
         symbolName,
         oldLines,
-        newLines: newCode.split("\n").length,
+        newLines: (newCode ?? spliceRes.newRawCode).split("\n").length,
         tokensAvoided,
         syntaxValid: true,
         oldRawCode: rawCode,
+        newRawCode: spliceRes.newRawCode,
         newContent,
     };
 }

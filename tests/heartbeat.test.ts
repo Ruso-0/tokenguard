@@ -92,13 +92,13 @@ describe("Context Heartbeat: applyContextHeartbeat (token drift)", () => {
         expect(result.content[0].text).toBe("original result");
     });
 
-    it("injects heartbeat on safe action after 15000+ tokens of drift", () => {
-        const deps = makeMockDeps({ tokenDrift: 20000 });
+    it("injects heartbeat on safe action after 50000+ tokens of drift", () => {
+        const deps = makeMockDeps({ tokenDrift: 60000 });
         const response = makeResponse("original result");
 
         const result = applyContextHeartbeat("read", response, deps);
 
-        expect(result.content[0].text).toContain("CONTEXT HEARTBEAT");
+        expect(result.content[0].text).toContain("nreki_heartbeat");
         expect(result.content[0].text).toContain("original result");
     });
 
@@ -108,16 +108,16 @@ describe("Context Heartbeat: applyContextHeartbeat (token drift)", () => {
         for (const action of ["edit", "undo", "filter_output", "compress"]) {
             const response = makeResponse("result");
             const result = applyContextHeartbeat(action, response, deps);
-            expect(result.content[0].text).not.toContain("CONTEXT HEARTBEAT");
+            expect(result.content[0].text).not.toContain("nreki_heartbeat");
         }
     });
 
     it("injects on all safe actions (read, search, map, status, definition, references, outline)", () => {
         for (const action of ["read", "search", "map", "status", "definition", "references", "outline"]) {
-            const deps = makeMockDeps({ tokenDrift: 20000 });
+            const deps = makeMockDeps({ tokenDrift: 60000 });
             const response = makeResponse("result");
             const result = applyContextHeartbeat(action, response, deps);
-            expect(result.content[0].text).toContain("CONTEXT HEARTBEAT");
+            expect(result.content[0].text).toContain("nreki_heartbeat");
         }
     });
 
@@ -137,29 +137,29 @@ describe("Context Heartbeat: applyContextHeartbeat (token drift)", () => {
         const response = makeResponse("result");
 
         const result = applyContextHeartbeat("read", response, deps);
-        expect(result.content[0].text).not.toContain("CONTEXT HEARTBEAT");
+        expect(result.content[0].text).not.toContain("nreki_heartbeat");
     });
 
     it("restart detection: resets marker when currentDrift < lastInjectDrift", () => {
         // Simulate a previous session that set lastInjectDrift to 100000
         const deps = makeMockDeps({
-            tokenDrift: 20000,
-            metadata: { "nreki_plan_last_drift": "100000" },
+            tokenDrift: 60000,
+            metadata: { "nreki_plan_last_drift": "150000" },
         });
         const response = makeResponse("result");
 
         // currentDrift (30000) < lastInjectDrift (100000) → should reset and inject
         const result = applyContextHeartbeat("read", response, deps);
-        expect(result.content[0].text).toContain("CONTEXT HEARTBEAT");
+        expect(result.content[0].text).toContain("nreki_heartbeat");
     });
 
     it("updates last_drift marker after injection", () => {
         const metadata: Record<string, string> = {};
-        const deps = makeMockDeps({ tokenDrift: 20000, metadata });
+        const deps = makeMockDeps({ tokenDrift: 60000, metadata });
         const response = makeResponse("result");
 
         applyContextHeartbeat("read", response, deps);
-        expect(metadata["nreki_plan_last_drift"]).toBe("20000");
+        expect(metadata["nreki_plan_last_drift"]).toBe("60000");
     });
 });
 

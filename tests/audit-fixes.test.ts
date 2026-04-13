@@ -538,7 +538,7 @@ describe("v2.2 FIX 6: Repo map appears before pins", () => {
         // Simulate the nreki_map output order (FIX 6: map first, pins after)
         const fullText = mapText + (pinnedText ? "\n" + pinnedText : "");
 
-        const mapIndex = fullText.indexOf("=== Repo Map");
+        const mapIndex = fullText.indexOf("=== NREKI STATIC REPO MAP ===");
         const pinIndex = fullText.indexOf("=== PINNED RULES");
         expect(mapIndex).toBeGreaterThanOrEqual(0);
         expect(pinIndex).toBeGreaterThan(mapIndex);

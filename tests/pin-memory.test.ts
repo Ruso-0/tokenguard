@@ -222,7 +222,7 @@ describe("Pin Memory - nreki_map Integration", () => {
         // FIX 6: repo map first, pins after (preserves prompt cache)
         const fullText = mapText + "\n" + pinnedText;
 
-        const mapIdx = fullText.indexOf("=== Repo Map");
+        const mapIdx = fullText.indexOf("=== NREKI STATIC REPO MAP ===");
         const pinIdx = fullText.indexOf("=== PINNED RULES");
         expect(mapIdx).toBeGreaterThanOrEqual(0);
         expect(pinIdx).toBeGreaterThan(mapIdx);
@@ -234,7 +234,7 @@ describe("Pin Memory - nreki_map Integration", () => {
         const pinnedText = getPinnedText(testDir);
 
         expect(pinnedText).toBe("");
-        expect(mapText).toContain("=== Repo Map");
+        expect(mapText).toContain("=== NREKI STATIC REPO MAP ===");
         expect(mapText).not.toContain("PINNED RULES");
     });
 });

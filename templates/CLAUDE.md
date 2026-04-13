@@ -25,6 +25,13 @@ If the `nreki_*` tools fail to load, timeout, or return connection errors:
 * **NEVER use Native `Write` or `Replace` to modify existing files.** It bypasses the RAM safety shield.
 * **SINGLE EDITS:** ALWAYS use `nreki_code action:"edit" symbol:"<Name>"`.
 * **MULTI-FILE EDITS:** ALWAYS use `nreki_code action:"batch_edit"`. It is a strict ACID transaction.
+* **PATCH MODE (Minimum Output Tokens):** For ANY edit that changes less than 30% of a symbol's body,
+  you **MUST** use `mode:"patch"` with `search_text` and `replace_text`.
+  **NEVER** rewrite an entire function to change a single line. Output tokens are 5x more expensive than input.
+* **CRITICAL FOR PATCH:** Your `search_text` must be an EXACT substring of the existing AST node,
+  including exact whitespace and indentation. If patch fails, NREKI returns a preview of the actual AST content.
+* **SCAFFOLDING EXCEPTION:** When creating BRAND NEW files from scratch, use Native `Write`.
+  New files have nothing pre-existing to break. NREKI `edit`/`batch_edit` is for modifying existing code only.
 * **NEW FILES:** Use Native `Write` ONLY for creating brand-new files.
 * **RENAMING:** Run `nreki_navigate action:"prepare_refactor"` before renaming.
 

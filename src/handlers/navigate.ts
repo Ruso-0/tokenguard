@@ -20,6 +20,7 @@ import {
     type ReferenceResult,
 } from "../ast-navigator.js";
 import { getPinnedText, listPins } from "../pin-memory.js";
+import { repoMapToText } from "../repo-map.js";
 import { extractDependencies, cleanSignature, isSensitiveSignature, escapeRegExp } from "../utils/imports.js";
 import { logger } from "../utils/logger.js";
 
@@ -357,7 +358,15 @@ export async function handleMap(
     }
 
     const refresh = params.refresh === true;
-    const { text, fromCache } = await engine.getRepoMap(refresh);
+    const { text: cachedText, map, fromCache } = await engine.getRepoMap(refresh);
+
+    // Depth selection: skeleton (default) or full. Pressure >0.7 forces skeleton unless explicitly full.
+    const depth = (params.depth === "full") ? "full" : "skeleton";
+    const pressure = deps.pressure ?? 0;
+    const effectiveDepth = (pressure > 0.7 && params.depth !== "full") ? "skeleton" as const : depth as "skeleton" | "full";
+
+    // If full depth requested, regenerate text from map (cached text is always skeleton)
+    const text = effectiveDepth === "full" ? repoMapToText(map, "full", pressure) : cachedText;
 
     const pinnedText = getPinnedText(process.cwd());
     const fullText = text + (pinnedText ? "\n" + pinnedText : "");
@@ -371,7 +380,8 @@ export async function handleMap(
             text:
                 fullText +
                 `\n[NREKI repo map: ${tokens.toLocaleString()} tokens | ` +
-                `${fromCache ? "from cache (prompt-cacheable)" : "freshly generated"} | ` +
+                `${fromCache && effectiveDepth === "skeleton" ? "from cache (prompt-cacheable)" : "freshly generated"} | ` +
+                `depth: ${effectiveDepth} | ` +
                 `${pinnedText ? `${listPins(process.cwd()).length} pinned rules | ` : ""}` +
                 `This text is deterministic - place it early in context for Anthropic prompt caching]`,
         }],

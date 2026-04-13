@@ -25,14 +25,21 @@ export async function handleEdit(
     const file = params.path ?? "";
     const symbol = typeof params.symbol === "string" ? params.symbol : "";
     const new_code = typeof params.new_code === "string" ? params.new_code : "";
+    const search_text = typeof params.search_text === "string" ? params.search_text : undefined;
+    const replace_text = typeof params.replace_text === "string" ? params.replace_text : undefined;
 
-    if (!symbol || !new_code) {
-        return {
-            content: [{
-                type: "text" as const,
-                text: `Error: "symbol" and "new_code" are required for the edit action.\n\n[NREKI saved ~0 tokens]`,
-            }],
-        };
+    const mode = (typeof params.mode === "string" && ["replace", "insert_before", "insert_after", "patch"].includes(params.mode))
+        ? params.mode as EditMode
+        : "replace";
+
+    if (!symbol) {
+        return { content: [{ type: "text" as const, text: `Error: "symbol" is required.\n\n[NREKI saved ~0 tokens]` }], isError: true };
+    }
+    if (mode !== "patch" && !new_code) {
+        return { content: [{ type: "text" as const, text: `Error: "new_code" is required for mode "${mode}".\n\n[NREKI saved ~0 tokens]` }], isError: true };
+    }
+    if (mode === "patch" && (!search_text || search_text.length < 2)) {
+        return { content: [{ type: "text" as const, text: `Error: "search_text" (min 2 chars) is required for patch mode.\n\n[NREKI saved ~0 tokens]` }], isError: true };
     }
 
     let resolvedPath: string;
@@ -84,20 +91,19 @@ export async function handleEdit(
 
     try {
         const parser = engine.getParser();
-        const mode = (typeof params.mode === "string" && ["replace", "insert_before", "insert_after"].includes(params.mode))
-            ? params.mode as EditMode
-            : "replace";
 
         const useKernel = await ensureKernelBooted(deps);
 
         const result = await semanticEdit(
             resolvedPath,
             symbol,
-            new_code,
+            new_code || undefined,
             parser,
             sandbox,
             mode,
             useKernel,
+            search_text,
+            replace_text,
         );
 
         if (!result.success || (useKernel && !result.newContent)) {
@@ -191,25 +197,23 @@ export async function handleEdit(
 
         engine.logUsage(
             "nreki_code:edit",
-            Embedder.estimateTokens(new_code),
-            Embedder.estimateTokens(new_code),
+            Embedder.estimateTokens(result.newRawCode ?? new_code),
+            Embedder.estimateTokens(result.newRawCode ?? new_code),
             result.tokensAvoided,
         );
 
         let blastRadiusWarning = "";
-        if (result.oldRawCode && mode === "replace") {
+        if (result.oldRawCode && result.newRawCode && (mode === "replace" || mode === "patch")) {
             try {
-                const sigChanged = detectSignatureChange(result.oldRawCode, new_code);
+                const sigChanged = detectSignatureChange(result.oldRawCode, result.newRawCode);
                 if (sigChanged) {
                     const relPath = path.relative(process.cwd(), resolvedPath).replace(/\\/g, "/");
                     const dependents = await engine.findDependents(relPath);
                     if (dependents.length > 0) {
                         const depList = dependents.map(d => `  - ${d}`).join("\n");
                         blastRadiusWarning =
-                            `\n\n**[BLAST RADIUS]** Signature of \`${symbol}\` changed.\n` +
-                            `This file is imported by:\n${depList}\n\n` +
-                            `If you altered parameters or return types, use \`nreki_code action:"batch_edit"\` ` +
-                            `to update those files before running tests.`;
+                            `\n[BLAST RADIUS] Signature of "${symbol}" changed. Imported by:\n${depList}\n` +
+                            `Fix dependents via batch_edit before running tests.`;
                     }
                 }
             } catch { /* non-fatal */ }
@@ -226,33 +230,26 @@ export async function handleEdit(
                     const v2 = graph.v2Score?.get(relPath) || 0;
                     const inDeg = graph.inDegree.get(relPath) || 0;
                     bridgeGuard =
-                        `\n\n🛑 **NREKI STRUCTURAL GUARD**\n` +
-                        `Target \`${relPath}\` (v₂=${v2.toFixed(4)}) is a **CRITICAL STRUCTURAL BRIDGE** ` +
-                        `between architectural domains.\n` +
-                        `It is a **load-bearing wall** with ${inDeg} dependent file(s).\n\n` +
-                        `**DO NOT** bypass it by creating parallel paths.\n` +
-                        `If you modified its signature, use \`nreki_code action:"batch_edit"\` ` +
-                        `to migrate all dependents safely.\n` +
-                        `[NREKI: Fiedler Bridge Detection]`;
+                        `\n[BRIDGE GUARD] ${relPath} (v2=${v2.toFixed(4)}) is a critical structural bridge ` +
+                        `with ${inDeg} dependent(s). Fix dependents via batch_edit if signature changed.`;
                 }
             }
         } catch { /* non-fatal: graph may not be available */ }
 
+        // Dense M2M telemetry
+        logger.info(`[EDIT] ${file}::${symbol} — saved ~${result.tokensAvoided} tokens`);
+
+        let feedback = `[OK] ${file} modified: ${symbol} (${result.oldLines}→${result.newLines} lines)`;
+        if (kernelResult?.errorText) feedback += `\n${kernelResult.errorText}`;
+        if (kernelResult?.warnings?.length) feedback += `\n${kernelResult.warnings.join("\n")}`;
+        if (ttrdFeedback) feedback += `\n[TTRD] ${ttrdFeedback.replace(/\n/g, " ").trim()}`;
+        if (blastRadiusWarning) feedback += blastRadiusWarning;
+        if (bridgeGuard) feedback += bridgeGuard;
+
         return {
             content: [{
                 type: "text" as const,
-                text:
-                    `## Semantic Edit: SUCCESS\n\n` +
-                    `**Symbol:** ${symbol}\n` +
-                    `**File:** ${file}\n` +
-                    `**Lines:** ${result.oldLines} → ${result.newLines}\n` +
-                    `**Syntax:** validated ✓\n\n` +
-                    `[NREKI saved ~${result.tokensAvoided.toLocaleString()} tokens vs native read+edit]` +
-                    (kernelResult?.errorText ? `\n\n${kernelResult.errorText}` : "") +
-                    (kernelResult?.warnings?.length ? `\n\n${kernelResult.warnings.join("\n")}` : "") +
-                    ttrdFeedback +
-                    blastRadiusWarning +
-                    bridgeGuard,
+                text: feedback.trim(),
             }],
         };
     } finally {
@@ -282,11 +279,20 @@ export async function handleBatchEdit(
 
     for (let i = 0; i < edits.length; i++) {
         const e = edits[i];
-        if (!e.path || !e.symbol || !e.new_code) {
+        if (!e.path || !e.symbol) {
             return {
                 content: [{
                     type: "text" as const,
-                    text: `Error: edit[${i}] missing required fields (path, symbol, new_code).\n\n[NREKI saved ~0 tokens]`,
+                    text: `Error: edit[${i}] missing required fields (path, symbol).\n\n[NREKI saved ~0 tokens]`,
+                }],
+                isError: true,
+            };
+        }
+        if (e.mode !== "patch" && !e.new_code) {
+            return {
+                content: [{
+                    type: "text" as const,
+                    text: `Error: edit[${i}] missing "new_code" (required for ${e.mode ?? "replace"} mode).\n\n[NREKI saved ~0 tokens]`,
                 }],
                 isError: true,
             };
@@ -351,9 +357,11 @@ export async function handleBatchEdit(
             path: e.path,
             symbol: e.symbol,
             new_code: e.new_code,
-            mode: (e.mode && ["replace", "insert_before", "insert_after"].includes(e.mode))
+            mode: (e.mode && ["replace", "insert_before", "insert_after", "patch"].includes(e.mode))
                 ? e.mode as EditMode
                 : "replace",
+            search_text: e.search_text,
+            replace_text: e.replace_text,
         }));
 
         const useKernel = await ensureKernelBooted(deps);
@@ -386,14 +394,15 @@ export async function handleBatchEdit(
                 }
 
                 let batchDependents: string[] = [];
-                if (deps.nrekiMode === "hologram" && result.oldRawCodes) {
+                if (deps.nrekiMode === "hologram" && result.oldRawCodes && result.newRawCodes) {
                     try {
                         const changedFiles = new Set<string>();
                         for (const edit of batchOps) {
-                            if (edit.mode && edit.mode !== "replace") continue;
+                            if (edit.mode && edit.mode !== "replace" && edit.mode !== "patch") continue;
                             const key = `${edit.path}::${edit.symbol}`;
                             const oldRaw = result.oldRawCodes.get(key);
-                            if (oldRaw && detectSignatureChange(oldRaw, edit.new_code)) {
+                            const newRaw = result.newRawCodes.get(key);
+                            if (oldRaw && newRaw && detectSignatureChange(oldRaw, newRaw)) {
                                 changedFiles.add(
                                     path.relative(process.cwd(), safePath(process.cwd(), edit.path)).replace(/\\/g, "/")
                                 );
@@ -416,7 +425,7 @@ export async function handleBatchEdit(
                 }
 
                 if (kernelEdits.length > 0) {
-                    const kernelResult = await deps.kernel.interceptAtomicBatch(kernelEdits, batchDependents, true);
+                    const kernelResult = await deps.kernel.interceptAtomicBatch(kernelEdits, batchDependents, false);
                     const committedFiles = Array.from(result.vfs!.keys());
 
                     const verifyResult = await processKernelResult(
@@ -454,17 +463,16 @@ export async function handleBatchEdit(
         }
         // ─── End NREKI Layer 2 ───────────────────────────────────────
 
-        const fileList = result.files.map(f => `  - ${f}`).join("\n");
-
         let blastRadiusWarning = "";
-        if (result.oldRawCodes) {
+        if (result.oldRawCodes && result.newRawCodes) {
             try {
                 const changedSymbols: string[] = [];
                 for (const edit of batchOps) {
-                    if (edit.mode && edit.mode !== "replace") continue;
+                    if (edit.mode && edit.mode !== "replace" && edit.mode !== "patch") continue;
                     const key = `${edit.path}::${edit.symbol}`;
                     const oldRaw = result.oldRawCodes.get(key);
-                    if (oldRaw && detectSignatureChange(oldRaw, edit.new_code)) {
+                    const newRaw = result.newRawCodes.get(key);
+                    if (oldRaw && newRaw && detectSignatureChange(oldRaw, newRaw)) {
                         changedSymbols.push(edit.symbol);
                     }
                 }
@@ -479,30 +487,25 @@ export async function handleBatchEdit(
                     for (const f of result.files) allDependents.delete(f);
 
                     const depList = allDependents.size > 0
-                        ? `\nFiles that import these modules:\n${[...allDependents].map(d => `  - ${d}`).join("\n")}\n`
+                        ? `\nImported by: ${[...allDependents].join(", ")}`
                         : "";
 
                     blastRadiusWarning =
-                        `\n\n**[BLAST RADIUS]** Signature changed for: ${changedSymbols.map(s => `\`${s}\``).join(", ")}.` +
-                        depList +
-                        `\nIf you altered parameters or return types, use \`nreki_code action:"batch_edit"\` to update those files before running tests.`;
+                        `\n[BLAST RADIUS] Signature changed: ${changedSymbols.join(", ")}.${depList}`;
                 }
             } catch { /* non-fatal */ }
         }
 
+        logger.info(`[BATCH_EDIT] ${result.fileCount} files — complete`);
+
+        let feedback = `[OK] ${result.fileCount} files modified: ${result.files.join(", ")}`;
+        if (batchTtrdFeedback) feedback += `\n[TTRD] ${batchTtrdFeedback.replace(/\n/g, " ").trim()}`;
+        if (blastRadiusWarning) feedback += blastRadiusWarning;
+
         return {
             content: [{
                 type: "text" as const,
-                text:
-                    `## Batch Edit: SUCCESS\n\n` +
-                    `**Edits applied:** ${result.editCount}\n` +
-                    `**Files modified:** ${result.fileCount}\n` +
-                    `${fileList}\n\n` +
-                    `All files passed syntax validation.\n` +
-                    `Run \`npm run typecheck\` or your tests to verify types.\n\n` +
-                    `[NREKI batch edit complete]` +
-                    batchTtrdFeedback +
-                    blastRadiusWarning,
+                text: feedback.trim(),
             }],
         };
     } finally {

@@ -103,7 +103,7 @@ describe("BUG 3: applySemanticSplice local window search", () => {
             startLine: 9,
         };
 
-        const result = applySemanticSplice(
+        const { newContent: result } = applySemanticSplice(
             content,
             target,
             "reset() {\n        return 42;\n    }",

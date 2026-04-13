@@ -33,6 +33,8 @@ Guard context budget and prevent code corruption. Minimize token consumption whi
 4. For renaming symbols, use `nreki_navigate action:"prepare_refactor"` FIRST to get a confidence report, then `batch_edit` to apply.
 5. **NEVER** use native Write to modify existing code — it bypasses AST validation.
 6. Use native Write only for brand new files that don't exist yet.
+7. For minor changes (<30% of a function), use `mode:"patch"` with `search_text` and `replace_text` instead of rewriting the entire symbol.
+8. For brand new files, use native Write. NREKI edits are for existing code only.
 
 ### Safety Protocol
 1. Pin persistent rules with `nreki_guard action:"pin"`.

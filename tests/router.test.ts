@@ -221,10 +221,15 @@ describe("handleCode", () => {
         expect(result.content[0].type).toBe("text");
     });
 
-    it("dispatches 'edit' requires symbol and new_code", async () => {
-        const result = await handleCode("edit", { action: "edit", path: "test.ts" }, deps);
-        expect(result.content[0].text).toContain("symbol");
-        expect(result.content[0].text).toContain("new_code");
+    it("dispatches 'edit' validates required fields conditionally", async () => {
+        // 1. Fails on missing symbol first
+        const res1 = await handleCode("edit", { action: "edit", path: "test.ts" }, deps);
+        expect(res1.content[0].text).toContain("symbol");
+        expect(res1.content[0].text).not.toContain("new_code");
+
+        // 2. With symbol provided, fails on missing new_code
+        const res2 = await handleCode("edit", { action: "edit", path: "test.ts", symbol: "foo" }, deps);
+        expect(res2.content[0].text).toContain("new_code");
     });
 
     it("dispatches 'undo' requires valid file", async () => {

@@ -33,7 +33,7 @@ export interface RepoMap {
 }
 
 /** Cache format version. Bump when CachedRepoMap structure changes. */
-const CACHE_FORMAT_VERSION = 2;
+const CACHE_FORMAT_VERSION = 3;
 
 export interface CachedRepoMap {
     formatVersion?: number;
@@ -715,14 +715,15 @@ export async function generateRepoMap(
 
 // ─── Text Rendering (Deterministic) ─────────────────────────────────
 
-export function repoMapToText(map: RepoMap): string {
+export function repoMapToText(map: RepoMap, depth: "skeleton" | "full" = "skeleton", pressure: number = 0): string {
     const lines: string[] = [];
-    const fiedlerStr = map.graph?.fiedler !== undefined
-        ? map.graph.fiedler.toFixed(4) : "0.0000";
-    lines.push(`=== Repo Map (${map.totalFiles} files, ${map.totalLines} lines, λ₂=${fiedlerStr}) ===\n`);
+    const isSkeleton = depth === "skeleton";
+
+    // Static header (prefix cache safe — no volatile data)
+    lines.push(`=== NREKI STATIC REPO MAP ===\n`);
 
     if (!map.graph || !map.graph.clusters) {
-        // Fallback for pre-v7.5 caches (CACHE_FORMAT_VERSION = 1)
+        // Fallback for pre-v7.5 caches — render flat list
         for (const entry of map.entries) {
             lines.push(`${entry.filePath} (${entry.lineCount} lines)`);
             if (entry.exports.length > 0) lines.push(`  exports: ${entry.exports.join(", ")}`);
@@ -736,76 +737,76 @@ export function repoMapToText(map: RepoMap): string {
         return lines.join("\n");
     }
 
-    const grouped = {
-        bridge: [] as typeof map.entries,
-        cluster_a: [] as typeof map.entries,
-        cluster_b: [] as typeof map.entries,
-        orphan: [] as typeof map.entries,
-    };
+    // Group entries by directory
+    const dirs = new Map<string, { leafs: number; cores: RepoMapEntry[] }>();
     for (const entry of map.entries) {
-        const c = map.graph.clusters.get(entry.filePath) || "orphan";
-        grouped[c].push(entry);
+        const dir = path.dirname(entry.filePath);
+        if (!dirs.has(dir)) dirs.set(dir, { leafs: 0, cores: [] });
+
+        const tier = map.graph.tiers.get(entry.filePath);
+        const cluster = map.graph.clusters.get(entry.filePath);
+        const isCritical = tier === "core" || cluster === "bridge";
+
+        if (isSkeleton && !isCritical) {
+            dirs.get(dir)!.leafs++;
+        } else {
+            dirs.get(dir)!.cores.push(entry);
+        }
     }
 
-    const renderGroup = (title: string, entries: typeof map.entries, warning = "") => {
-        if (entries.length === 0) return;
-        lines.push(`=== ${title} ===`);
-        if (warning) lines.push(`⚠️ ${warning}`);
+    for (const [dir, data] of Array.from(dirs.entries()).sort((a, b) => stableCompare(a[0], b[0]))) {
+        const cleanDir = dir === "." ? "(root)" : dir;
 
-        if (title.includes("BRIDGE")) {
-            // Stress ranking: load / distance_to_center (physics-based)
-            entries.sort((a, b) => {
-                const v2A = Math.abs(map.graph!.v2Score?.get(a.filePath) || 0);
-                const v2B = Math.abs(map.graph!.v2Score?.get(b.filePath) || 0);
-                const degA = map.graph!.inDegree.get(a.filePath) || 0;
-                const degB = map.graph!.inDegree.get(b.filePath) || 0;
-                const stressA = degA / Math.max(v2A, 0.001);
-                const stressB = degB / Math.max(v2B, 0.001);
-                const diff = stressB - stressA;
-                // TIMSORT DETERMINISM GUARD: V8's Array.sort() (TimSort) breaks
-                // transitivity if the comparator returns NaN — the resulting
-                // order becomes implementation-defined, which would silently
-                // poison prompt cache byte-identity across runs. Force 0 (tie)
-                // on NaN so the sort stays stable and reproducible.
-                return Number.isNaN(diff) ? 0 : diff;
-            });
-        } else {
-            // PageRank proxy: inDegree descending, then line count
-            entries.sort((a, b) => {
-                const degA = map.graph!.inDegree.get(a.filePath) || 0;
-                const degB = map.graph!.inDegree.get(b.filePath) || 0;
-                if (degB !== degA) return degB - degA;
-                return b.lineCount - a.lineCount;
-            });
+        if (data.cores.length === 0 && isSkeleton) {
+            lines.push(`${cleanDir}/ [${data.leafs} peripheral files]`);
+            continue;
         }
 
-        for (const entry of entries) {
-            const inDeg = map.graph!.inDegree.get(entry.filePath) || 0;
-            const v2 = map.graph!.v2Score?.get(entry.filePath) || 0;
-            const tier = map.graph!.tiers.get(entry.filePath);
-            const tierStr = tier === "core" ? "[☢️ CORE] "
-                : tier === "logic" ? "[⚙️ LOGIC] " : "";
-            const v2Str = title.includes("BRIDGE")
-                ? ` [v₂=${v2.toFixed(3)}, In:${inDeg}]`
-                : ` (In:${inDeg})`;
+        const hiddenMsg = data.leafs > 0 ? ` [${data.leafs} hidden]` : "";
+        lines.push(`${cleanDir}/${hiddenMsg}`);
 
-            lines.push(`${tierStr}${entry.filePath} (${entry.lineCount} lines)${v2Str}`);
-            if (entry.exports.length > 0)
-                lines.push(`  exports: ${entry.exports.join(", ")}`);
-            for (const sig of entry.signatures) lines.push(`  ${sig}`);
-            if (entry.imports.length > 0) {
-                const shortened = entry.imports.map(shortenImport);
-                lines.push(`  imports: ${shortened.join(", ")}`);
+        // Sort cores deterministically for cache stability
+        data.cores.sort((a, b) => stableCompare(a.filePath, b.filePath));
+
+        for (const core of data.cores) {
+            const tier = map.graph!.tiers.get(core.filePath) || "leaf";
+            const relPath = path.relative(dir, core.filePath).replace(/\\/g, "/");
+            const cleanName = relPath.startsWith("../") ? path.basename(core.filePath) : relPath;
+
+            if (isSkeleton) {
+                // SKELETON: Zero volatile metrics. Cache safe.
+                let exportStr = "";
+                const isCrit = tier === "core" || map.graph!.clusters?.get(core.filePath) === "bridge";
+                if (isCrit && core.exports.length > 0 && pressure <= 0.7) {
+                    const topExports = core.exports.slice(0, 3).join(", ");
+                    const more = core.exports.length > 3 ? ", ..." : "";
+                    exportStr = ` exports: ${topExports}${more}`;
+                }
+                lines.push(`  [${tier.toUpperCase()}] ${cleanName} (${core.lineCount}L)${exportStr}`);
+            } else {
+                // FULL: All topology metadata
+                const inDeg = map.graph!.inDegree.get(core.filePath) || 0;
+                const v2 = map.graph!.v2Score?.get(core.filePath)?.toFixed(3) || "0";
+                const cluster = map.graph!.clusters?.get(core.filePath) || "orphan";
+                lines.push(`  [${tier.toUpperCase()}] ${cleanName} (${core.lineCount}L) (In:${inDeg}, v2:${v2}, ${cluster})`);
+                if (core.exports.length > 0) {
+                    lines.push(`    exports: ${core.exports.join(", ")}`);
+                }
+                for (const sig of core.signatures) lines.push(`    ${sig}`);
+                if (core.imports.length > 0) {
+                    lines.push(`    imports: ${core.imports.map(shortenImport).join(", ")}`);
+                }
             }
-            lines.push("");
         }
-    };
+        lines.push("");
+    }
 
-    renderGroup("🌉 STRUCTURAL BRIDGES (v₂ ≈ 0)", grouped.bridge,
-        "CRITICAL BOTTLENECKS: Do NOT bypass. Modify via batch_edit if signatures change.\n");
-    renderGroup("📦 DOMAIN CLUSTER A (Positive Polarity)", grouped.cluster_a);
-    renderGroup("📦 DOMAIN CLUSTER B (Negative Polarity)", grouped.cluster_b);
-    renderGroup("👻 ORPHANS & LEAVES", grouped.orphan);
+    // Volatile metadata at bottom (prefix cache preserver)
+    if (!isSkeleton) {
+        const fiedlerStr = map.graph?.fiedler !== undefined ? map.graph.fiedler.toFixed(4) : "0.0000";
+        lines.push(`=== TOPOLOGY METADATA ===`);
+        lines.push(`Files: ${map.totalFiles} | Lines: ${map.totalLines} | lambda2: ${fiedlerStr}`);
+    }
 
     return lines.join("\n");
 }

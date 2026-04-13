@@ -266,9 +266,13 @@ server.tool(
             .boolean()
             .optional()
             .describe("Auto-inject signatures of imported dependencies. Set to false for pure output without context."),
+        depth: z
+            .enum(["skeleton", "full"])
+            .optional()
+            .describe("For map: 'skeleton' (default) shows only CORE/BRIDGE files with top exports. 'full' shows all files with topology metrics."),
     },
-    async ({ action, query, symbol, path: navPath, limit, include_raw, kind, signatures, refresh, auto_context }) => {
-        const params: NavigateParams = { action, query, symbol, path: navPath, limit, include_raw, kind, signatures, refresh, auto_context };
+    async ({ action, query, symbol, path: navPath, limit, include_raw, kind, signatures, refresh, auto_context, depth }) => {
+        const params: NavigateParams = { action, query, symbol, path: navPath, limit, include_raw, kind, signatures, refresh, auto_context, depth };
         return wrapWithCircuitBreaker(
             circuitBreaker,
             "nreki_navigate",
@@ -335,15 +339,20 @@ server.tool(
             .optional()
             .describe("For filter_output: max output lines (1-1000, default 100)."),
         mode: z
-            .enum(["replace", "insert_before", "insert_after"])
+            .enum(["replace", "insert_before", "insert_after", "patch"])
             .optional()
-            .describe("For edit: how to apply new_code relative to the symbol. 'replace' (default) replaces the symbol. 'insert_before'/'insert_after' adds new_code adjacent to the symbol without removing it."),
+            .describe(
+                "CRITICAL: Use 'patch' for minor edits (<30% of the symbol body) with search_text/replace_text to minimize output tokens. " +
+                "Use 'replace' ONLY for major structural rewrites. 'insert_before'/'insert_after' add code adjacent to the symbol."
+            ),
         edits: z
             .array(z.object({
                 path: z.string(),
                 symbol: z.string(),
-                new_code: z.string(),
-                mode: z.enum(["replace", "insert_before", "insert_after"]).optional(),
+                new_code: z.string().optional(),
+                mode: z.enum(["replace", "insert_before", "insert_after", "patch"]).optional(),
+                search_text: z.string().optional(),
+                replace_text: z.string().optional(),
             }))
             .optional()
             .describe("For batch_edit: array of edits to apply atomically. Each edit specifies path, symbol, new_code, and optional mode."),
@@ -351,9 +360,21 @@ server.tool(
             .boolean()
             .optional()
             .describe("Auto-inject signatures of imported dependencies. Set to false for pure output without context."),
+        search_text: z
+            .string()
+            .optional()
+            .describe("REQUIRED for mode:'patch'. The EXACT existing string to replace inside the symbol. Must include exact original indentation and be unique within the symbol."),
+        replace_text: z
+            .string()
+            .optional()
+            .describe("REQUIRED for mode:'patch'. The new string to insert. Must match original indentation style."),
+        force_raw: z
+            .boolean()
+            .optional()
+            .describe("For read: bypass Zero-Bounce auto-compression on large files (>12k tokens)."),
     },
-    async ({ action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, edits, auto_context }) => {
-        const params: CodeParams = { action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, edits, auto_context };
+    async ({ action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, edits, auto_context, search_text, replace_text, force_raw }) => {
+        const params: CodeParams = { action, path: filePath, symbol, new_code, compress, level, focus, tier, output, max_lines, mode, edits, auto_context, search_text, replace_text, force_raw };
         return wrapWithCircuitBreaker(
             circuitBreaker,
             "nreki_code",

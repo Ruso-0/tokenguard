@@ -50,7 +50,7 @@ export async function handleRead(
 
         const rawContent = readSource(resolvedPath);
 
-        const autoContext = params.auto_context !== false;
+        const autoContext = params.auto_context === true;
         let autoContextBlock = "";
         let extraTokens = 0;
 
@@ -102,6 +102,36 @@ export async function handleRead(
             : "medium";
 
         if (!compress) {
+            const forceRaw = params.force_raw === true;
+            const fullTokens = Embedder.estimateTokens(rawContent);
+
+            // ─── ZERO-BOUNCE I/O (v9.0) ─────────────────────────────
+            if (!forceRaw && fullTokens > 12000) {
+                const zbResult = await engine.compressFileAdvanced(resolvedPath, "medium", rawContent);
+                engine.markFileRead(resolvedPath);
+                // CRITICAL: Do NOT call chronos.markReadUncompressed here.
+                // The agent did not see the raw logic. Edit gating stays active for fragile files.
+
+                engine.logUsage(
+                    "nreki_read",
+                    Embedder.estimateTokens(zbResult.compressed) + extraTokens,
+                    Embedder.estimateTokens(zbResult.compressed) + extraTokens,
+                    zbResult.tokensSaved,
+                );
+
+                return {
+                    content: [{
+                        type: "text" as const,
+                        text:
+                            `[AUTO-SHIELD: File >12k tokens (${fullTokens.toLocaleString()}t). Auto-compressed to 'medium'. ` +
+                            `To read raw, pass force_raw:true. To inspect bodies, use compress with focus:"<symbol>".]\n\n` +
+                            `\`\`\`\n${zbResult.compressed}\n\`\`\`` +
+                            (autoContextBlock ? `\n\n${autoContextBlock}` : ""),
+                    }],
+                };
+            }
+            // ─── END ZERO-BOUNCE ─────────────────────────────────────
+
             engine.markFileRead(resolvedPath);
 
             if (deps.chronos) deps.chronos.markReadUncompressed(resolvedPath);

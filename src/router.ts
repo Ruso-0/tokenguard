@@ -53,6 +53,7 @@ export interface RouterDependencies {
     kernel?: NrekiKernel;
     chronos?: ChronosMemory;
     nrekiMode?: "syntax" | "file" | "project" | "hologram";
+    pressure?: number;
 }
 
 /** Flat params for nreki_navigate (replaces target + options bag). */
@@ -67,6 +68,7 @@ export interface NavigateParams {
     signatures?: boolean;
     refresh?: boolean;
     auto_context?: boolean;
+    depth?: string;
 }
 
 /** Flat params for nreki_code (replaces path + options bag). */
@@ -83,7 +85,10 @@ export interface CodeParams {
     max_lines?: number;
     mode?: string;
     auto_context?: boolean;
-    edits?: Array<{ path: string; symbol: string; new_code: string; mode?: string }>;
+    search_text?: string;
+    replace_text?: string;
+    force_raw?: boolean;
+    edits?: Array<{ path: string; symbol: string; new_code?: string; mode?: string; search_text?: string; replace_text?: string }>;
 }
 
 /** Flat params for nreki_guard (replaces options bag). */
@@ -121,6 +126,13 @@ export function applyContextHeartbeat(
         return response;
     }
 
+    const pressure = deps.pressure ?? 0;
+
+    // PRESSURE LEVEL 3: Emergency survival — kill heartbeat entirely
+    if (pressure > 0.90) {
+        return response;
+    }
+
     // C4: Don't inject heartbeat during active circuit breaker escalation
     if (deps.circuitBreaker.getState().escalationLevel >= 2) {
         return response;
@@ -147,7 +159,7 @@ export function applyContextHeartbeat(
         // VÁLVULA DE ESCAPE: Opus 4.6 requiere anclajes más frecuentes (~15k).
         // Override via ENV sin recompilar. Default seguro: 15,000.
         const envThreshold = parseInt(process.env.NREKI_DRIFT_THRESHOLD || "0", 10);
-        const TOKEN_DRIFT_THRESHOLD = envThreshold > 0 ? envThreshold : 15000;
+        const TOKEN_DRIFT_THRESHOLD = envThreshold > 0 ? envThreshold : 50000;
 
         if (driftDelta >= TOKEN_DRIFT_THRESHOLD) {
             const safeActions = [
@@ -174,17 +186,20 @@ export function applyContextHeartbeat(
                 if (planPath && fs.existsSync(planPath)) {
                     let planContent: string;
                     try { planContent = readSource(planPath); } catch { planContent = ""; }
+
                     if (planContent && planContent.length < 15000) {
+                        // PRESSURE LEVEL 2: Truncate plan to summary
+                        if (pressure > 0.7) {
+                            const head = planContent.slice(0, 500);
+                            const tail = planContent.slice(-200);
+                            planContent = `${head}\n...[TRUNCATED — context pressure ${(pressure * 100).toFixed(0)}%]...\n${tail}`;
+                        }
+                        memoryPayload += `<nreki_plan file="${path.basename(planPath)}">\n${planContent}\n</nreki_plan>\n\n`;
+                    } else if (planContent) {
                         memoryPayload +=
-                            `=== PLAN FILE (${path.basename(planPath)}) ===\n` +
-                            `${planContent}\n\n`;
-                    } else {
-                        memoryPayload +=
-                            `=== PLAN FILE ===\n` +
-                            `[WARNING: Your plan file "${path.basename(planPath)}" exceeds 15,000 characters (${planContent.length.toLocaleString()} chars). ` +
-                            `NREKI skipped injection to protect your context window. ` +
-                            `Summarize it or split it into smaller files, then re-anchor with: ` +
-                            `nreki_guard action:"set_plan" text:"<shorter_plan_file>"]\n\n`;
+                            `<nreki_plan file="${path.basename(planPath)}" status="too_large">\n` +
+                            `Plan exceeds 15,000 chars (${planContent.length.toLocaleString()}). ` +
+                            `Summarize or split, then re-anchor with nreki_guard action:"set_plan".\n</nreki_plan>\n\n`;
                     }
                 }
 
@@ -240,31 +255,16 @@ export function applyContextHeartbeat(
 
                 // TOP-INJECTION: State ABOVE, tool result BELOW
                 if (memoryPayload.trim().length > 0) {
-                    const header =
-                        `=================================================================\n` +
-                        ` [NREKI CONTEXT HEARTBEAT] (Drift: ${driftDelta.toLocaleString()} tokens | Limit: ${TOKEN_DRIFT_THRESHOLD.toLocaleString()})\n` +
-                        ` Context compaction detected. Restoring session state:\n` +
-                        `=================================================================\n\n`;
-
-                    const footer =
-                        `=================================================================\n` +
-                        `[END CONTEXT HEARTBEAT] Proceed with tool result below:\n` +
-                        `=================================================================\n\n`;
-
                     const newResponse = {
                         ...response,
                         content: [...response.content],
                     };
                     const originalText = response.content[0].text;
 
-                    // 🔥 PROMPT CACHE PHYSICS (PATCH-5) 🔥
-                    // Anthropic uses Prefix Caching. Dynamic content (heartbeat) MUST go
-                    // AFTER static content to preserve the prefix hash.
-                    // Previous code put heartbeat before originalText for non-map actions,
-                    // which destroyed the cache on every injection cycle.
+                    // Prompt Cache Physics: dynamic heartbeat goes AFTER static content
                     newResponse.content[0] = {
                         type: "text" as const,
-                        text: originalText + "\n\n" + header + memoryPayload + footer,
+                        text: originalText + "\n\n<nreki_heartbeat drift=\"" + driftDelta.toLocaleString() + "\">\n" + memoryPayload + "</nreki_heartbeat>",
                     };
 
                     deps.engine.setMetadata(
@@ -323,6 +323,14 @@ export async function handleNavigate(
     params: NavigateParams,
     deps: RouterDependencies,
 ): Promise<McpToolResponse> {
+    // ─── PRESSURE VALVE (v9.0) ───────────────────────────────────
+    try {
+        const usage = deps.engine.getUsageStats();
+        deps.pressure = usage.total_output / 150_000;
+    } catch {
+        deps.pressure = 0;
+    }
+
     let response: McpToolResponse;
     switch (action) {
         case "search": response = await nav.handleSearch(params, deps); break;
@@ -351,6 +359,14 @@ export async function handleCode(
     params: CodeParams,
     deps: RouterDependencies,
 ): Promise<McpToolResponse> {
+    // ─── PRESSURE VALVE (v9.0) ───────────────────────────────────
+    try {
+        const usage = deps.engine.getUsageStats();
+        deps.pressure = usage.total_output / 150_000;
+    } catch {
+        deps.pressure = 0;
+    }
+
     // Rate limit mutating operations to prevent agent flooding
     if (RATE_LIMITED_ACTIONS.has(action) && !editBucket.tryConsume()) {
         return {
@@ -393,6 +409,14 @@ export async function handleGuard(
     params: GuardParams,
     deps: RouterDependencies,
 ): Promise<McpToolResponse> {
+    // ─── PRESSURE VALVE (v9.0) ───────────────────────────────────
+    try {
+        const usage = deps.engine.getUsageStats();
+        deps.pressure = usage.total_output / 150_000;
+    } catch {
+        deps.pressure = 0;
+    }
+
     let response: McpToolResponse;
     switch (action) {
         case "pin": response = await guard.handlePin(params, deps); break;
