@@ -715,5 +715,52 @@ export class TsCompilerWrapper {
         return results;
     }
 
+    public getTypeShape(posixPath: string, symbolName: string): string | null {
+        if (!this.builderProgram) return null;
+        const program = this.builderProgram.getProgram();
+        const checker = program.getTypeChecker();
+        const sourceFile = program.getSourceFile(posixPath);
+        if (!sourceFile) return null;
 
+        // Try exports first
+        const fileSymbol = checker.getSymbolAtLocation(sourceFile);
+        if (fileSymbol?.exports) {
+            const exported = fileSymbol.exports.get(ts.escapeLeadingUnderscores(symbolName));
+            if (exported) {
+                const resolved = exported.flags & ts.SymbolFlags.Alias
+                    ? checker.getAliasedSymbol(exported) : exported;
+                const type = checker.getDeclaredTypeOfSymbol(resolved);
+                return checker.typeToString(type, undefined,
+                    ts.TypeFormatFlags.NoTruncation | ts.TypeFormatFlags.InTypeAlias);
+            }
+        }
+
+        // Fallback: walk AST for top-level declarations matching name
+        for (const node of sourceFile.statements) {
+            let name: string | undefined;
+            if (
+                (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) ||
+                 ts.isClassDeclaration(node) || ts.isFunctionDeclaration(node) ||
+                 ts.isVariableStatement(node)) &&
+                !ts.isVariableStatement(node)
+            ) {
+                name = (node as ts.DeclarationStatement).name?.getText(sourceFile);
+            } else if (ts.isVariableStatement(node)) {
+                name = node.declarationList.declarations[0]?.name.getText(sourceFile);
+            }
+            if (name !== symbolName) continue;
+            const sym = checker.getSymbolAtLocation(
+                ts.isVariableStatement(node)
+                    ? node.declarationList.declarations[0].name
+                    : (node as ts.DeclarationStatement).name!
+            );
+            if (!sym) continue;
+            const resolved = sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
+            const type = checker.getDeclaredTypeOfSymbol(resolved);
+            return checker.typeToString(type, undefined,
+                ts.TypeFormatFlags.NoTruncation | ts.TypeFormatFlags.InTypeAlias);
+        }
+
+        return null;
+    }
 }

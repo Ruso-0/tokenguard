@@ -97,6 +97,8 @@ export interface GuardParams {
     text?: string;
     index?: number;
     id?: string;
+    path?: string;
+    symbol?: string;
 }
 
 // ─── Context Heartbeat Middleware ────────────────────────────────────
@@ -338,11 +340,12 @@ export async function handleNavigate(
         case "map": response = await nav.handleMap(params, deps); break;
         case "prepare_refactor": response = await nav.handlePrepareRefactor(params, deps); break;
         case "orphan_oracle": response = await nav.handleOrphanOracle(params, deps); break;
+        case "type_shape": response = await nav.handleTypeShape(params, deps); break;
         default:
             return {
                 content: [{
                     type: "text" as const,
-                    text: `Unknown nreki_navigate action: "${action}". Valid actions: search, definition, references, outline, map, prepare_refactor, orphan_oracle.`,
+                    text: `Unknown nreki_navigate action: "${action}". Valid actions: search, definition, references, outline, map, prepare_refactor, orphan_oracle, type_shape.`,
                 }],
                 isError: true,
             };
@@ -451,11 +454,12 @@ export async function handleGuard(
         case "set_plan": response = await guard.handleSetPlan(params, deps); break;
         case "memorize": response = await guard.handleMemorize(params, deps); break;
         case "audit": response = await guard.handleAudit(deps); break;
+        case "engram": response = await guard.handleEngram(params, deps); break;
         default:
             return {
                 content: [{
                     type: "text" as const,
-                    text: `Unknown nreki_guard action: "${action}". Valid actions: pin, unpin, status, report, reset, set_plan, memorize, audit.`,
+                    text: `Unknown nreki_guard action: "${action}". Valid actions: pin, unpin, status, report, reset, set_plan, memorize, audit, engram.`,
                 }],
                 isError: true,
             };

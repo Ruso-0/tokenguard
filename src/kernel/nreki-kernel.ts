@@ -1499,6 +1499,12 @@ export class NrekiKernel {
         return this.toPosix(path.resolve(this.projectRoot, filePath));
     }
 
+    public getTypeShape(targetFile: string, symbolName: string): string | null {
+        if (!this.booted) throw new Error("Kernel not booted.");
+        const posixPath = this.resolvePosixPath(targetFile);
+        return this.tsBackend.getTypeShape(posixPath, symbolName);
+    }
+
     public getStagingSize(): number { return this.vfs.size; }
     public getTrackedFiles(): number { return this.rootNames.size; }
     public getBaselineErrorCount(): number {

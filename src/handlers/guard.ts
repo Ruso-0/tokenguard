@@ -6,6 +6,7 @@
  * Heartbeat wrapping is the router's responsibility.
  */
 
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import type { McpToolResponse, GuardParams, RouterDependencies } from "../router.js";
@@ -420,6 +421,59 @@ export async function handleMemorize(
                 `NREKI has written your thoughts to the Active Scratchpad. ` +
                 `If context compaction occurs, these notes will be automatically ` +
                 `re-injected so you don't lose your train of thought.`,
+        }],
+    };
+}
+
+// ─── Engram ─────────────────────────────────────────────────────────
+
+export async function handleEngram(
+    params: GuardParams,
+    deps: RouterDependencies,
+): Promise<McpToolResponse> {
+    await deps.engine.initialize();
+
+    const file = params.path ?? "";
+    const symbol = params.symbol ?? "";
+    const insight = params.text ?? "";
+
+    if (!file || !symbol || !insight) {
+        return {
+            content: [{ type: "text" as const, text: "Error: engram requires path, symbol, and text (the insight)." }],
+            isError: true,
+        };
+    }
+
+    const root = deps.engine.getProjectRoot();
+    let resolvedPath: string;
+    try {
+        resolvedPath = safePath(root, file);
+    } catch (err) {
+        return {
+            content: [{ type: "text" as const, text: `Security error: ${(err as Error).message}` }],
+            isError: true,
+        };
+    }
+
+    const content = readSource(resolvedPath);
+    const parser = deps.engine.getParser();
+    const parseResult = await parser.parse(resolvedPath, content);
+    const chunk = parseResult.chunks.find(c => c.symbolName === symbol);
+
+    if (!chunk) {
+        return {
+            content: [{ type: "text" as const, text: `Error: symbol "${symbol}" not found in ${file}. Check spelling or run outline first.` }],
+            isError: true,
+        };
+    }
+
+    const astHash = crypto.createHash("sha256").update(chunk.rawCode).digest("hex");
+    deps.engine.upsertEngram(resolvedPath, symbol, astHash, insight);
+
+    return {
+        content: [{
+            type: "text" as const,
+            text: `[Engram Anchored] Insight saved for \`${symbol}\`. If the code changes, this memory will auto-delete to prevent hallucinations.`,
         }],
     };
 }

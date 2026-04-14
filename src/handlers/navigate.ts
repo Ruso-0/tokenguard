@@ -6,6 +6,7 @@
  * Heartbeat wrapping is the router's responsibility.
  */
 
+import crypto from "crypto";
 import path from "path";
 import type Parser from "web-tree-sitter";
 import type { McpToolResponse, NavigateParams, RouterDependencies } from "../router.js";
@@ -270,6 +271,36 @@ export async function handleReferences(
 
 // ─── Outline ────────────────────────────────────────────────────────
 
+function computeTriageRisk(name: string, rawCode: string, linesCount: number): string {
+    if (!rawCode) return "[LOW]";
+
+    let score = 0;
+    const reasons: string[] = [];
+
+    if (linesCount > 50) { score += 3; reasons.push(">50L"); }
+    else if (linesCount > 20) { score += 1; }
+
+    const branches = (rawCode.match(/\b(if|else|switch|case|catch|for|while)\b/g) || []).length +
+                     (rawCode.match(/\?/g) || []).length;
+    if (branches > 6) { score += 3; reasons.push(`${branches} branches`); }
+    else if (branches > 2) { score += 1; }
+
+    const calls = (rawCode.match(/\b[a-zA-Z_]\w*\s*\(/g) || []).length;
+    const mutations = (rawCode.match(/\+=|-=|\*=|\/=|%=|\+\+|--|\.push\(|\.pop\(|\.shift\(|\.unshift\(|\.splice\(|\.set\(|\.delete\(|\.clear\(|\.add\(/g) || []).length;
+
+    if (calls > 15) { score += 1; reasons.push("ext deps"); }
+    if (mutations > 2) { score += 2; reasons.push("state mutation"); }
+
+    if (/calculate|validate|process|compute|handle|update|sync|transform|parse|execute|mutate/i.test(name)) {
+        score += 2;
+        reasons.push("biz logic");
+    }
+
+    if (score >= 5) return `[HIGH — ${reasons.slice(0, 3).join(", ")}]`;
+    if (score >= 2) return `[MED — ${reasons.slice(0, 2).join(", ")}]`;
+    return `[LOW]`;
+}
+
 export async function handleOutline(
     params: NavigateParams,
     deps: RouterDependencies,
@@ -308,12 +339,38 @@ export async function handleOutline(
     const relPath = path.relative(root, resolvedPath).replace(/\\/g, "/");
     const lines = [`## Outline: ${relPath}`, `${symbols.length} symbol(s)`, ""];
 
+    const engrams = deps.engine.getEngramsForFile(resolvedPath);
+    let invalidatedCount = 0;
+
     for (const sym of symbols) {
         const exported = sym.exportedAs ? ` [${sym.exportedAs}]` : "";
+        const linesCount = sym.endLine - sym.startLine + 1;
+        const riskTag = computeTriageRisk(sym.name, sym.body, linesCount);
         lines.push(
-            `- **${sym.kind}** \`${sym.name}\`${exported} - L${sym.startLine}-L${sym.endLine}`,
+            `- **${sym.kind}** \`${sym.name}\`${exported} ${riskTag} - L${sym.startLine}-L${sym.endLine}`,
         );
         lines.push(`  \`${sym.signature}\``);
+
+        const memory = engrams.get(sym.name);
+        if (memory) {
+            const currentHash = crypto.createHash("sha256").update(sym.body).digest("hex");
+            if (currentHash === memory.astHash) {
+                lines.push(`  [Engram]: ${memory.insight}`);
+            } else {
+                deps.engine.deleteEngram(resolvedPath, sym.name);
+                invalidatedCount++;
+                lines.push(`  [Engram invalidated: code mutated since memory was saved]`);
+            }
+        }
+    }
+
+    if (invalidatedCount > 0) {
+        lines.push(`\nNote: ${invalidatedCount} obsolete engram(s) automatically deleted because their underlying code changed.`);
+    }
+
+    if (symbols.length > 3) {
+        lines.push("");
+        lines.push(`*Tip: Read multiple high-risk symbols in one call: nreki_code action:"compress" focus:"func1, func2, func3"*`);
     }
 
     const outlineTokens = Embedder.estimateTokens(lines.join("\n"));
@@ -650,6 +707,62 @@ export async function handleOrphanOracle(
                 `*Tip: Use \`nreki_code action:"batch_edit"\` to safely ` +
                 `tombstone them with \`new_code: null\`.*\n\n` +
                 `### Candidates:\n${formatted.join("\n")}`,
+        }],
+    };
+}
+
+// ─── Type Shape Oracle ───────────────────────────────────────────────
+
+export async function handleTypeShape(
+    params: NavigateParams,
+    deps: RouterDependencies,
+): Promise<McpToolResponse> {
+    if (!deps.kernel || deps.nrekiMode === "syntax") {
+        return {
+            content: [{ type: "text" as const, text: "Error: type_shape requires a TypeScript project with tsconfig.json." }],
+            isError: true,
+        };
+    }
+
+    if (!deps.kernel.isBooted()) {
+        return {
+            content: [{ type: "text" as const, text: "Error: TypeScript kernel not booted. Ensure tsconfig.json exists and retry." }],
+            isError: true,
+        };
+    }
+
+    const symbol = params.symbol ?? "";
+    const file = params.path ?? "";
+    if (!symbol || !file) {
+        return {
+            content: [{ type: "text" as const, text: "Error: type_shape requires both path and symbol." }],
+            isError: true,
+        };
+    }
+
+    const root = deps.engine.getProjectRoot();
+    let resolvedPath: string;
+    try {
+        resolvedPath = safePath(root, file);
+    } catch (err) {
+        return {
+            content: [{ type: "text" as const, text: `Security error: ${(err as Error).message}` }],
+            isError: true,
+        };
+    }
+
+    const shape = deps.kernel.getTypeShape(resolvedPath, symbol);
+    if (!shape) {
+        return {
+            content: [{ type: "text" as const, text: `Oracle: type shape for \`${symbol}\` not found in ${file}. Ensure the symbol is exported or declared at the top level.` }],
+            isError: true,
+        };
+    }
+
+    return {
+        content: [{
+            type: "text" as const,
+            text: `Oracle: Type Shape for \`${symbol}\`\n\n\`\`\`typescript\ntype ${symbol} = ${shape}\n\`\`\``,
         }],
     };
 }

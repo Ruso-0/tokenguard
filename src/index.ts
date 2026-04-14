@@ -249,7 +249,7 @@ server.tool(
     "AST-powered code navigation and semantic search. Use for finding code, understanding project structure, and locating symbols.",
     {
         action: z
-            .enum(["search", "definition", "references", "outline", "map", "prepare_refactor", "orphan_oracle"])
+            .enum(["search", "definition", "references", "outline", "map", "prepare_refactor", "orphan_oracle", "type_shape"])
             .describe(
                 "search: hybrid semantic+keyword search across codebase. " +
                 "definition: go-to-definition by symbol name. " +
@@ -257,7 +257,8 @@ server.tool(
                 "outline: list all symbols in a file. " +
                 "map: full repo structure map with pinned rules. " +
                 "prepare_refactor: analyze a symbol for safe renaming (classifies each occurrence as high-confidence or needs-review). " +
-                "orphan_oracle: identify files with zero static reachability (candidates for dead code review).",
+                "orphan_oracle: identify files with zero static reachability (candidates for dead code review). " +
+                "type_shape: invoke TS compiler for exact resolved type shape without reading file (requires TypeScript project with tsconfig.json).",
             ),
         query: z
             .string()
@@ -427,7 +428,7 @@ server.tool(
     "and get session reports.",
     {
         action: z
-            .enum(["pin", "unpin", "status", "report", "reset", "set_plan", "memorize", "audit"])
+            .enum(["pin", "unpin", "status", "report", "reset", "set_plan", "memorize", "audit", "engram"])
             .describe(
                 "pin: add a persistent rule (injected into every map response). " +
                 "unpin: remove a pinned rule. " +
@@ -436,12 +437,13 @@ server.tool(
                 "reset: clear circuit breaker state to resume editing. " +
                 "set_plan: anchor a master plan file to prevent Claude from forgetting it during context compaction. " +
                 "memorize: write your current progress/thoughts to NREKI's active memory. " +
-                "audit: run AHI (Automated Hardening Index) audit on the project.",
+                "audit: run AHI (Automated Hardening Index) audit on the project. " +
+                "engram: save a long-term memory note about a symbol. Auto-appears in future outlines. Auto-deletes if code changes.",
             ),
         text: z
             .string()
             .optional()
-            .describe("For pin: the rule text (max 200 chars). For set_plan: the file path to your plan. For memorize: your thoughts/progress to remember."),
+            .describe("For pin: the rule text (max 200 chars). For set_plan: the file path to your plan. For memorize: your thoughts/progress to remember. For engram: the insight to save."),
         index: z
             .number()
             .optional()
@@ -450,9 +452,17 @@ server.tool(
             .string()
             .optional()
             .describe("For unpin: the pin id to remove."),
+        path: z
+            .string()
+            .optional()
+            .describe("For engram: the file path containing the symbol."),
+        symbol: z
+            .string()
+            .optional()
+            .describe("For engram: the exact symbol name to anchor the memory to."),
     },
-    async ({ action, text, index, id }) => {
-        const params: GuardParams = { action, text, index, id };
+    async ({ action, text, index, id, path: guardPath, symbol }) => {
+        const params: GuardParams = { action, text, index, id, path: guardPath, symbol };
         return wrapWithCircuitBreaker(
             circuitBreaker,
             "nreki_guard",

@@ -7,7 +7,7 @@ If nreki_* tools fail: fall back to native Read/Write and inform user.
 - Output tokens cost 5x input. Optimize every syllable.
 
 ## 1. READING
-- NEVER use native Read File for existing files.
+- NEVER use Explore, Bash sed/cat/head, or native Read File to read code. Use nreki_navigate and nreki_code ONLY.
 - Large files (>100L): `nreki_navigate action:"outline"` → identify method → `nreki_code action:"compress" focus:"<method>"`.
 - Small files: `nreki_code action:"read"`.
 - Navigation: use `nreki_navigate` (search, definition, references, outline, map). No grep/glob.

@@ -293,6 +293,18 @@ export class NrekiEngine {
         return this.db.resolveImportSignatures(deps);
     }
 
+    upsertEngram(filePath: string, symbolName: string, astHash: string, insight: string): void {
+        this.db.upsertEngram(filePath, symbolName, astHash, insight);
+    }
+
+    getEngramsForFile(filePath: string): Map<string, { astHash: string; insight: string }> {
+        return this.db.getEngramsForFile(filePath);
+    }
+
+    deleteEngram(filePath: string, symbolName: string): void {
+        this.db.deleteEngram(filePath, symbolName);
+    }
+
     /** Increment the auto-context injection counter */
     incrementAutoContext(): void {
         this.sessionTracker.incrementAutoContext();

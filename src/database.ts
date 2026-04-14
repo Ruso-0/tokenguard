@@ -170,6 +170,16 @@ export class NrekiDB {
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+
+      -- Long-term symbol memories (Exocortex Engrams)
+      CREATE TABLE IF NOT EXISTS engrams (
+        path        TEXT NOT NULL,
+        symbol_name TEXT NOT NULL,
+        ast_hash    TEXT NOT NULL,
+        insight     TEXT NOT NULL,
+        created_at  TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (path, symbol_name)
+      );
     `);
 
         // Migration: add columns for existing DBs that lack them
@@ -272,6 +282,34 @@ export class NrekiDB {
     }
 
     // ─── Persistence ─────────────────────────────────────────────
+
+    upsertEngram(filePath: string, symbolName: string, astHash: string, insight: string): void {
+        this.db.run(
+            "INSERT OR REPLACE INTO engrams (path, symbol_name, ast_hash, insight) VALUES (?, ?, ?, ?)",
+            [filePath, symbolName, astHash, insight],
+        );
+        this.save();
+    }
+
+    getEngramsForFile(filePath: string): Map<string, { astHash: string; insight: string }> {
+        const rows = this.db.exec(
+            `SELECT symbol_name, ast_hash, insight FROM engrams WHERE path = '${filePath.replace(/'/g, "''")}'`,
+        );
+        const result = new Map<string, { astHash: string; insight: string }>();
+        if (rows.length === 0 || !rows[0].values) return result;
+        for (const row of rows[0].values) {
+            result.set(row[0] as string, { astHash: row[1] as string, insight: row[2] as string });
+        }
+        return result;
+    }
+
+    deleteEngram(filePath: string, symbolName: string): void {
+        this.db.run(
+            "DELETE FROM engrams WHERE path = ? AND symbol_name = ?",
+            [filePath, symbolName],
+        );
+        this.save();
+    }
 
     /** Persist database and vector index to disk. */
     save(): void {
