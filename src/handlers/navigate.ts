@@ -273,31 +273,44 @@ export async function handleReferences(
 
 function computeTriageRisk(name: string, rawCode: string, linesCount: number): string {
     if (!rawCode) return "[LOW]";
-
     let score = 0;
     const reasons: string[] = [];
-
     if (linesCount > 50) { score += 3; reasons.push(">50L"); }
     else if (linesCount > 20) { score += 1; }
-
-    const branches = (rawCode.match(/\b(if|else|switch|case|catch|for|while)\b/g) || []).length +
-                     (rawCode.match(/\?/g) || []).length;
+    const cleanCode = rawCode
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/[^\n]*/g, "")
+        .replace(/(["'`])(?:(?!\1)[^\\]|\\.)*\1/g, "");
+    const branches = (cleanCode.match(/\b(if|else|switch|case|catch|for|while)\b/g) || []).length +
+                     (cleanCode.match(/\?/g) || []).length;
     if (branches > 6) { score += 3; reasons.push(`${branches} branches`); }
     else if (branches > 2) { score += 1; }
-
-    const calls = (rawCode.match(/\b[a-zA-Z_]\w*\s*\(/g) || []).length;
-    const mutations = (rawCode.match(/\+=|-=|\*=|\/=|%=|\+\+|--|\.push\(|\.pop\(|\.shift\(|\.unshift\(|\.splice\(|\.set\(|\.delete\(|\.clear\(|\.add\(/g) || []).length;
-
+    const calls = (cleanCode.match(/\b[a-zA-Z_]\w*\s*\(/g) || []).length;
     if (calls > 15) { score += 1; reasons.push("ext deps"); }
+    const mutations = (cleanCode.match(/\+=|-=|\*=|\/=|%=|\+\+|--|\.push\(|\.pop\(|\.shift\(|\.unshift\(|\.splice\(|\.set\(|\.delete\(|\.clear\(|\.add\(/g) || []).length;
     if (mutations > 2) { score += 2; reasons.push("state mutation"); }
-
-    if (/calculate|validate|process|compute|handle|update|sync|transform|parse|execute|mutate/i.test(name)) {
+    else if (mutations > 0) { score += 1; reasons.push("mutates state"); }
+    if (/calculate|validate|process|compute|handle|update|sync|transform|parse|execute|mutate|match/i.test(name)) {
         score += 2;
         reasons.push("biz logic");
     }
-
-    if (score >= 5) return `[HIGH — ${reasons.slice(0, 3).join(", ")}]`;
-    if (score >= 2) return `[MED — ${reasons.slice(0, 2).join(", ")}]`;
+    if (/pnl|price|volume|amount|balance|margin|risk|vwap|liquidation|drawdown|position|order|fill|iceberg|trade/i.test(name)) {
+        score += 2;
+        reasons.push("critical domain");
+    }
+    const mathOps = (cleanCode.match(/(?:\w|\]|\))\s*(?:[-+*/%](?![=+*-]))\s*(?:\w|\(|\[)/g) || []).length;
+    if (mathOps > 3) {
+        score += 2;
+        reasons.push("math heavy");
+    } else if (mathOps > 0) {
+        score += 1;
+    }
+    if (/\bas\s+any\b|:\s*any\b/.test(cleanCode)) {
+        score += 2;
+        reasons.push("type gap");
+    }
+    if (score >= 5) return `[HIGH \u2014 ${reasons.slice(0, 3).join(", ")}]`;
+    if (score >= 3) return `[MED \u2014 ${reasons.slice(0, 2).join(", ")}]`;
     return `[LOW]`;
 }
 
