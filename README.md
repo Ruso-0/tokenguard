@@ -2,7 +2,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/npm/v/@ruso-0/nreki?style=for-the-badge&color=blue" alt="npm version">
-  <img src="https://img.shields.io/badge/Tests-713-brightgreen?style=for-the-badge" alt="713 Tests">
+  <img src="https://img.shields.io/badge/Tests-729-brightgreen?style=for-the-badge" alt="729 Tests">
   <img src="https://img.shields.io/badge/AHI-9.7%2F10-brightgreen?style=for-the-badge" alt="AHI 9.7/10">
   <img src="https://img.shields.io/badge/Languages-TS%20%7C%20JS%20%7C%20Go%20%7C%20Python-blue?style=for-the-badge" alt="Multi-language">
   <img src="https://img.shields.io/badge/Cloud-Zero-orange?style=for-the-badge" alt="Zero Cloud">
@@ -11,7 +11,7 @@
 
 **MCP plugin that validates AI agent edits in RAM before they touch disk.** When Claude Code, Cursor, or Copilot changes a function signature in one file and breaks 30 others, NREKI catches it in milliseconds — the file is never written. If the error is structural (missing import, forgotten `await`), NREKI auto-fixes it in RAM. Zero tokens wasted on fix-retry doom loops.
 
-**v8: Antigravity** — NREKI now understands your architecture. Spectral clustering partitions your repo into natural domains, detects structural bridges (load-bearing walls), shows real-time architecture diffs on every batch edit, and hunts dead code via transitive reachability analysis.
+**v10: Exocortex** — NREKI now remembers. Save long-term insights about any symbol (`engram`). They auto-surface in every future outline and auto-delete the moment the code changes — zero hallucinations. Add Oracle type introspection (`type_shape`) and a full Cognitive Heatmap in outline (risk triage per symbol). On top of v9's Phantom Scalpel (pressure-aware engine, CognitiveEnforcer, CLI Hook installer), Spectral Architecture, and TFC-Ultra compression.
 
 ```
 AI proposes edit -> NREKI intercepts in RAM -> Compiler/LSP validates
@@ -24,7 +24,7 @@ AI proposes edit -> NREKI intercepts in RAM -> Compiler/LSP validates
   |              Some remain? ------> Full rollback. Disk untouched. Errors returned to agent.
 ```
 
-3 tools. 713 tests. 4 languages. Works with any MCP-compatible agent. Apache 2.0.
+3 tools. 23 actions. 729 tests. 4 languages. Works with any MCP-compatible agent. Apache 2.0.
 
 ---
 
@@ -82,6 +82,72 @@ If you happen to have `gopls` or `pyright` in your PATH, NREKI will silently det
 *(For Staff Engineers, Tech Leads, and complex refactors)*
 
 Under the hood, NREKI doesn't just read text; it builds a mathematical graph of your repository. It computes the combinatorial Laplacian of the file-level dependency graph to unlock advanced architectural insights that act as a passive radar for your team. **You don't need to understand any of this to get the Zero-Config benefits above** — these features kick in when you opt-in to them for complex refactors.
+
+---
+
+## What's New in v10 (Exocortex)
+
+### Engrams — Persistent Symbol Memory
+
+Save a long-term insight about any symbol and it will auto-surface in every future `outline` call:
+
+```
+nreki_guard action:"engram"
+  path:"src/router.ts"
+  symbol:"applyContextHeartbeat"
+  text:"Re-injects session state every 50K tokens. Do not remove the heartbeat call."
+```
+
+The next time you outline `src/router.ts`, that function will show:
+
+```
+- **function** `applyContextHeartbeat` [MED — biz logic] - L104-L178
+  `export function applyContextHeartbeat(...)`
+  [Engram]: Re-injects session state every 50K tokens. Do not remove the heartbeat call.
+```
+
+**Auto-invalidation:** NREKI hashes the symbol's raw source at save time. If the code mutates between sessions, the engram is silently deleted and the outline shows `[Engram invalidated: code mutated since memory was saved]` — zero hallucinations from stale memory.
+
+### Cognitive Heatmap in Outline (v9.2)
+
+Every symbol in `outline` is now tagged with a risk score computed from its raw body:
+
+```
+- **function** `batchSemanticEdit` [HIGH — >50L, 12 branches, biz logic] - L347-L579
+- **function** `detectMode` [LOW] - L50-L80
+- **function** `getClaudeMdContent` [LOW] - L163-L168
+```
+
+Risk is derived from: lines of code, branch count (if/else/switch/ternary), external call count, mutation count, and business-logic naming patterns. Thresholds are fixed — no configuration.
+
+### Oracle: Type Shape (v10)
+
+Resolve the exact TypeScript type of any symbol without reading the file:
+
+```
+nreki_navigate action:"type_shape"
+  path:"src/router.ts"
+  symbol:"RouterDependencies"
+```
+
+```typescript
+type RouterDependencies = { engine: NrekiEngine; monitor: TokenMonitor; ... }
+```
+
+Uses `checker.typeToString` with `NoTruncation | InTypeAlias` flags — the same resolution VS Code uses. Requires a TypeScript project with `tsconfig.json`.
+
+### CLI Hook Installer (v9.1)
+
+`npx @ruso-0/nreki init` now installs the PreToolUse guard hook automatically:
+
+- Creates `.claude/hooks/nreki-enforcer.mjs`
+- Writes `.claude/settings.json` with 9 matchers (Read, Write, Edit, and variants)
+- Blocks native file reads/writes on >100L files at the Claude Code hooks layer
+- Idempotent — safe to run multiple times
+
+### Phantom Scalpel — Pressure-Aware Engine (v9.0)
+
+Context pressure is tracked in real time (0.0–1.0). When pressure is high, NREKI automatically tightens compression, blocks non-essential reads, and pre-empts context overflow. The `status` action now includes a pressure gauge.
 
 ---
 
@@ -302,10 +368,11 @@ NREKI has 3 validation layers with multi-language support:
 | `search` | T-RAG: Topology-Aware search that ranks results by blast radius, not just text similarity |
 | `definition` | Go-to-definition by symbol name with auto-injected dependency signatures |
 | `references` | Find all references cross-project |
-| `outline` | List all symbols in a file with signatures |
+| `outline` | List all symbols with risk triage tags (`[LOW]`/`[MED]`/`[HIGH]`) and inline Engram memories |
 | `map` | Spectral repo map: files grouped by cluster (bridge/domain A/domain B/orphan) with lambda_2 |
 | `prepare_refactor` | Predictive blast radius: shows every file that breaks if you rename a symbol |
 | `orphan_oracle` | Mark-and-Sweep dead code detection via transitive reachability from framework roots |
+| `type_shape` | Oracle: invoke TS compiler for exact resolved type shape (requires tsconfig.json) |
 
 ### `nreki_code` -- Read, write, and validate code
 
@@ -329,6 +396,7 @@ NREKI has 3 validation layers with multi-language support:
 | `set_plan` | Anchor a plan file -- survives context compaction via Context Heartbeat |
 | `memorize` | Save progress notes to NREKI's active scratchpad |
 | `audit` | Architecture Health Index: 5-signal deterministic score (1-10) with recovery plan |
+| `engram` | Anchor a long-term insight to a symbol -- auto-surfaces in outline, auto-deletes if code mutates |
 
 ---
 
@@ -450,7 +518,7 @@ Re-injects 4-layer session state every ~15 tool calls to survive context compact
 
 | Metric | Value |
 |--------|-------|
-| Tests | 713 (44 suites) |
+| Tests | 729 (45 suites) |
 | Architecture Health Index | 9.7/10 (self-scored) |
 | **Max TFC-Ultra Compression** | **98.2% (55x)** |
 | **TFC LRU Cache Speedup** | **34x avg (11.7ms latency)** |
@@ -461,7 +529,7 @@ Re-injects 4-layer session state every ~15 tool calls to survive context compact
 | Spectral benchmark | 11 projects, 55/55 correct, 0 false positives |
 | OpenDota benchmark | 6/6 correct verdicts |
 | VSCode (5,584 files) | JIT boot 1.94s, total 3.32s |
-| Router | 3 facades, 20 actions |
+| Router | 3 facades, 23 actions |
 | Tool overhead | ~660 tokens (3 tools replace 16) |
 
 ---
@@ -503,10 +571,10 @@ NrekiKernel (Orchestrator)
         +-- Union-Find beta_1 cyclomatic complexity
         +-- Architecture Diff (pre/post topology comparison)
 
-Router (3 facades, 20 actions)
-  +-- nreki_navigate -> handlers/navigate.ts (7 actions)
+Router (3 facades, 23 actions)
+  +-- nreki_navigate -> handlers/navigate.ts (8 actions)
   +-- nreki_code -> handlers/code.ts (6 actions)
-  +-- nreki_guard -> handlers/guard.ts (8 actions + Context Heartbeat)
+  +-- nreki_guard -> handlers/guard.ts (9 actions + Context Heartbeat)
 
 RepoMap (Spectral Clustering)
   +-- PageRank tier classification (core/logic/leaf)
