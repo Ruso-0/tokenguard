@@ -495,6 +495,18 @@ async function main(): Promise<void> {
     process.on("SIGINT", gracefulShutdown);
     process.on("SIGTERM", gracefulShutdown);
 
+    // ─── AUTO-PATCH SECURITY HOOK (v10.x) ───
+    try {
+        const hookScriptPath = path.join(process.cwd(), ".claude", "hooks", "nreki-enforcer.mjs");
+        if (fs.existsSync(hookScriptPath)) {
+            const currentHook = fs.readFileSync(hookScriptPath, "utf-8");
+            if (!currentHook.includes("cwdPosix")) {
+                fs.writeFileSync(hookScriptPath, getEnforcerScriptContent(), "utf-8");
+                logger.info("Auto-patched legacy nreki-enforcer hook for security.");
+            }
+        }
+    } catch { /* Fail silently, never block boot */ }
+
     // Connect and serve
     await server.connect(transport);
 
@@ -545,6 +557,11 @@ process.stdin.on("end", () => {
         let size = 0;
         try {
             absPath = path.resolve(process.cwd(), targetPath).replace(/\\\\/g, "/");
+            const cwdPosix = process.cwd().replace(/\\\\/g, "/");
+            if (!absPath.startsWith(cwdPosix + "/") && absPath !== cwdPosix) {
+                console.error("Blocked: Path traversal attempt.");
+                process.exit(2);
+            }
             size = fs.statSync(absPath).size;
         } catch {
             process.exit(0);

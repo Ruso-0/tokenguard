@@ -15,6 +15,9 @@ const SENSITIVE_PATTERNS: RegExp[] = [
     /\.env($|\.)/i,                     // .env, .env.local, .env.production
     /\.envrc($|\.)/i,                   // direnv RCE vector — executes on cd
     /[/\\]\.git[/\\]hooks[/\\]/i,       // Git hooks — CRITICAL RCE vector (pre-commit, post-merge, etc.)
+    /[/\\]\.claude[/\\]hooks[/\\]/i,    // Claude hooks — CRITICAL RCE vector (PreToolUse injection)
+    /[/\\]\.claude[/\\]settings.*?\.json$/i, // Claude settings (settings.json + settings.local.json) — RCE vector via PreToolUse
+    /(?:^|[/\\])\.mcp\.json$/i,         // MCP config — CRITICAL RCE vector via rogue server injection
     /[/\\]\.ssh[/\\]/i,                 // .ssh/*
     /[/\\]\.gnupg[/\\]/i,              // .gnupg/*
     /[/\\]\.aws[/\\]/i,                // .aws/*

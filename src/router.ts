@@ -321,6 +321,8 @@ export async function handleNavigate(
     params: NavigateParams,
     deps: RouterDependencies,
 ): Promise<McpToolResponse> {
+    await deps.engine.initialize();
+
     // ─── PRESSURE VALVE (v9.0) + Karma ────────────────────────────
     try {
         const usage = deps.engine.getUsageStats();
@@ -363,6 +365,8 @@ export async function handleCode(
     params: CodeParams,
     deps: RouterDependencies,
 ): Promise<McpToolResponse> {
+    await deps.engine.initialize();
+
     // ─── PRESSURE VALVE (v9.0) + Karma ────────────────────────────
     try {
         const usage = deps.engine.getUsageStats();
@@ -436,10 +440,14 @@ export async function handleGuard(
     params: GuardParams,
     deps: RouterDependencies,
 ): Promise<McpToolResponse> {
-    // ─── PRESSURE VALVE (v9.0) ───────────────────────────────────
+    await deps.engine.initialize();
+
+    // ─── PRESSURE VALVE (v9.0) + Karma ───────────────────────────
     try {
         const usage = deps.engine.getUsageStats();
-        deps.pressure = usage.total_output / 150_000;
+        const basePressure = usage.total_output / 150_000;
+        const karmaPenalty = parseFloat(deps.engine.getMetadata("nreki_karma_penalty") || "0");
+        deps.pressure = Math.min(1.0, basePressure + karmaPenalty);
     } catch {
         deps.pressure = 0;
     }

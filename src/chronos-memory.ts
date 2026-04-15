@@ -52,7 +52,12 @@ export class ChronosMemory {
 
     private load(): ChronosState {
         if (fs.existsSync(this.dbPath)) {
-            try { return JSON.parse(fs.readFileSync(this.dbPath, "utf-8")); } catch { /* Corrupt, start fresh */ }
+            try {
+                return JSON.parse(fs.readFileSync(this.dbPath, "utf-8"), (k, v) => {
+                    if (k === "__proto__" || k === "constructor" || k === "prototype") return undefined;
+                    return v;
+                });
+            } catch { /* Corrupt, start fresh */ }
         }
         return { version: 1, currentSessionId: 0, globalTechDebt: 0, files: {} };
     }
@@ -113,7 +118,11 @@ export class ChronosMemory {
     }
 
     private normalize(filePath: string): string {
-        return path.relative(this.projectRoot, path.resolve(this.projectRoot, filePath)).replace(/\\/g, "/");
+        const norm = path.relative(this.projectRoot, path.resolve(this.projectRoot, filePath)).replace(/\\/g, "/");
+        if (norm === "__proto__" || norm === "constructor" || norm === "prototype") {
+            throw new Error(`[NREKI] Security rejection: Invalid file path "${norm}"`);
+        }
+        return norm;
     }
 
     private getFile(filePath: string): FileFragility {

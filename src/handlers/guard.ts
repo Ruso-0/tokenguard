@@ -32,6 +32,7 @@ export async function handlePin(
                 type: "text" as const,
                 text: "Error: `text` is required for the pin action.",
             }],
+            isError: true,
         };
     }
 
@@ -42,6 +43,7 @@ export async function handlePin(
                 type: "text" as const,
                 text: `Pin failed: ${result.error}`,
             }],
+            isError: true,
         };
     }
 
@@ -78,6 +80,7 @@ export async function handleUnpin(
                 type: "text" as const,
                 text: "Error: `index` or `id` is required for the unpin action.",
             }],
+            isError: true,
         };
     }
 
@@ -88,6 +91,7 @@ export async function handleUnpin(
                 type: "text" as const,
                 text: `Pin not found: ID "${pinId}"`,
             }],
+            isError: true,
         };
     }
 
@@ -368,7 +372,7 @@ export async function handleSetPlan(
         };
     }
 
-    deps.engine.setMetadata("nreki_master_plan", resolvedPath);
+    deps.engine.setMetadata("nreki_master_plan", path.relative(process.cwd(), resolvedPath).replace(/\\/g, "/"));
     const usage = deps.engine.getUsageStats();
     deps.engine.setMetadata(
         "nreki_plan_last_drift",

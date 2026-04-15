@@ -75,6 +75,7 @@ export class NrekiDB {
     private kwIndex = new KeywordIndex();
     /** In-memory identifier index: file path → unique identifiers in that file's raw code. */
     private rawIdentsByFile = new Map<string, Set<string>>();
+    private rawIdentsLoaded = false;
     private dbPath: string;
     private vecPath: string;
     private initPromise: Promise<void> | null = null;
@@ -99,8 +100,14 @@ export class NrekiDB {
 
         // Load existing database if it exists
         if (fs.existsSync(this.dbPath)) {
-            const fileBuffer = fs.readFileSync(this.dbPath);
-            this.db = new SQL.Database(fileBuffer);
+            try {
+                const fileBuffer = fs.readFileSync(this.dbPath);
+                this.db = new SQL.Database(fileBuffer);
+            } catch (err) {
+                logger.error(`[NREKI] Database corrupted at ${this.dbPath}. Wiping to recover: ${err}`);
+                try { fs.unlinkSync(this.dbPath); if (fs.existsSync(this.vecPath)) fs.unlinkSync(this.vecPath); } catch {}
+                this.db = new SQL.Database();
+            }
         } else {
             this.db = new SQL.Database();
         }
@@ -117,7 +124,6 @@ export class NrekiDB {
 
         // Rebuild in-memory indexes from existing data
         this.rebuildKeywordIndex();
-        this.rebuildRawIdentIndex();
 
         this._ready = true;
     }
@@ -207,22 +213,28 @@ export class NrekiDB {
         }
     }
 
-    /** Rebuild the in-memory raw identifier index from all existing chunks. */
-    private rebuildRawIdentIndex(): void {
+    /** Lazy-build the in-memory raw identifier index on first searchRawCode call. */
+    private buildRawIdentsIfNeeded(): void {
+        if (this.rawIdentsLoaded) return;
         this.rawIdentsByFile.clear();
         const stmt = this.db.prepare("SELECT path, raw_code FROM chunks");
         try {
             while (stmt.step()) {
                 const row = stmt.getAsObject() as { path: string; raw_code: string };
-                this.addRawIdents(row.path, row.raw_code);
+                let idents = this.rawIdentsByFile.get(row.path);
+                if (!idents) { idents = new Set(); this.rawIdentsByFile.set(row.path, idents); }
+                const matches = row.raw_code.match(/[a-zA-Z_$][a-zA-Z0-9_$]*/g);
+                if (matches) for (const m of matches) idents.add(m);
             }
         } finally {
             stmt.free();
         }
+        this.rawIdentsLoaded = true;
     }
 
     /** Extract identifiers from raw code and add to the per-file index. */
     private addRawIdents(filePath: string, rawCode: string): void {
+        if (!this.rawIdentsLoaded && this._ready) return; // Skip if lazy cache not yet built
         let idents = this.rawIdentsByFile.get(filePath);
         if (!idents) { idents = new Set(); this.rawIdentsByFile.set(filePath, idents); }
         const matches = rawCode.match(/[a-zA-Z_$][a-zA-Z0-9_$]*/g);
@@ -270,6 +282,7 @@ export class NrekiDB {
             this.db.run("DELETE FROM files");
             this.kwIndex = new KeywordIndex();
             this.rawIdentsByFile.clear();
+            this.rawIdentsLoaded = false;
             this.setMetadata("embedding_dim", String(activeDim));
             return true;
         }
@@ -292,13 +305,16 @@ export class NrekiDB {
     }
 
     getEngramsForFile(filePath: string): Map<string, { astHash: string; insight: string }> {
-        const rows = this.db.exec(
-            `SELECT symbol_name, ast_hash, insight FROM engrams WHERE path = '${filePath.replace(/'/g, "''")}'`,
-        );
+        const stmt = this.db.prepare("SELECT symbol_name, ast_hash, insight FROM engrams WHERE path = ?");
         const result = new Map<string, { astHash: string; insight: string }>();
-        if (rows.length === 0 || !rows[0].values) return result;
-        for (const row of rows[0].values) {
-            result.set(row[0] as string, { astHash: row[1] as string, insight: row[2] as string });
+        try {
+            stmt.bind([filePath]);
+            while (stmt.step()) {
+                const row = stmt.getAsObject() as { symbol_name: string; ast_hash: string; insight: string };
+                result.set(row.symbol_name, { astHash: row.ast_hash, insight: row.insight });
+            }
+        } finally {
+            stmt.free();
         }
         return result;
     }
@@ -381,7 +397,7 @@ export class NrekiDB {
         if (ids.length > 0) {
             this.vecIndex.deleteBulk(ids);
             this.kwIndex.deleteBulk(ids);
-            this.rawIdentsByFile.delete(filePath);
+            if (this.rawIdentsLoaded) this.rawIdentsByFile.delete(filePath);
             this.db.run("DELETE FROM chunks WHERE path = ?", [filePath]);
         }
         // PATCH-6: Also remove from files table so fileNeedsUpdate() doesn't
@@ -848,17 +864,16 @@ export class NrekiDB {
      * Find all files whose raw code contains the given symbol name.
      * Returns distinct file paths. Used by prepare_refactor for 100% coverage.
      *
-     * Uses the in-memory rawIdentsByFile index (built during insertChunk and
-     * rebuildRawIdentIndex at startup). Substring match on identifiers — same
+     * Uses the in-memory rawIdentsByFile index (lazy-built on first call via
+     * buildRawIdentsIfNeeded). Substring match on identifiers — same
      * semantics as the previous LIKE %term% scan but O(unique_idents) instead
      * of O(total_raw_code_bytes).
      */
     searchRawCode(symbolName: string): string[] {
         if (!this._ready) return [];
+        this.buildRawIdentsIfNeeded();
         const results: string[] = [];
         for (const [filePath, idents] of this.rawIdentsByFile) {
-            // PATCH-2: O(1) Set lookup instead of O(N) iteration with .includes().
-            // Exact match eliminates false positives (e.g. "id" no longer matches "width").
             if (idents.has(symbolName)) { results.push(filePath); }
         }
         return results;

@@ -844,7 +844,8 @@ export async function getOrGenerateRepoMap(
     if (!forceRefresh && fs.existsSync(cachePath)) {
         try {
             const cached: CachedRepoMap = JSON.parse(
-                fs.readFileSync(cachePath, "utf-8")
+                fs.readFileSync(cachePath, "utf-8"),
+                (k, v) => (k === "__proto__" || k === "constructor" || k === "prototype" ? undefined : v),
             );
             if (cached.digest === currentDigest && (cached.formatVersion ?? 0) === CACHE_FORMAT_VERSION) {
                 // Restore graph from cached serialized form

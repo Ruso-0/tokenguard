@@ -282,7 +282,7 @@ function computeTriageRisk(name: string, rawCode: string, linesCount: number): s
         .replace(/\/\/[^\n]*/g, "")
         .replace(/(["'`])(?:(?!\1)[^\\]|\\.)*\1/g, "");
     const branches = (cleanCode.match(/\b(if|else|switch|case|catch|for|while)\b/g) || []).length +
-                     (cleanCode.match(/\?/g) || []).length;
+                     (cleanCode.match(/(?<!\?)\?(?!\.|:|\?)/g) || []).length;
     if (branches > 6) { score += 3; reasons.push(`${branches} branches`); }
     else if (branches > 2) { score += 1; }
     const calls = (cleanCode.match(/\b[a-zA-Z_]\w*\s*\(/g) || []).length;

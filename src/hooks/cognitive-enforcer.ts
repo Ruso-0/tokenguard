@@ -31,7 +31,10 @@ export class CognitiveEnforcer {
     private loadState() {
         try {
             if (fs.existsSync(this.stateFile)) {
-                const data = JSON.parse(fs.readFileSync(this.stateFile, "utf-8")) as EnforcerState;
+                const data = JSON.parse(fs.readFileSync(this.stateFile, "utf-8"), (k, v) => {
+                    if (k === "__proto__" || k === "constructor" || k === "prototype") return undefined;
+                    return v;
+                }) as EnforcerState;
                 if (data.files) {
                     for (const [filePath, p] of Object.entries(data.files)) {
                         this.passports.set(filePath, {

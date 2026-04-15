@@ -212,12 +212,17 @@ export function applySemanticSplice(
 
         const symbolContent = content.substring(startIdx, endIdx);
 
+        // Adapt search text to target file's line endings (CRLF vs LF) to prevent indexOf mismatch
+        const isCRLF = symbolContent.includes('\r\n');
+        const normSearchText = isCRLF ? searchText.replace(/(?<!\r)\n/g, '\r\n') : searchText.replace(/\r\n/g, '\n');
+        const normReplaceText = replaceText ? (isCRLF ? replaceText.replace(/(?<!\r)\n/g, '\r\n') : replaceText.replace(/\r\n/g, '\n')) : "";
+
         // Strict occurrence counting (no regex, no injection risk)
-        let pos = symbolContent.indexOf(searchText);
+        let pos = symbolContent.indexOf(normSearchText);
         let occurrences = 0;
         while (pos !== -1) {
             occurrences++;
-            pos = symbolContent.indexOf(searchText, pos + searchText.length);
+            pos = symbolContent.indexOf(normSearchText, pos + normSearchText.length);
         }
 
         if (occurrences === 0) {
@@ -238,7 +243,7 @@ export function applySemanticSplice(
             );
         }
 
-        const patchedRawCode = symbolContent.replace(searchText, replaceText ?? "");
+        const patchedRawCode = symbolContent.replace(normSearchText, normReplaceText);
 
         return {
             newContent: content.slice(0, startIdx) + patchedRawCode + content.slice(endIdx),
@@ -251,6 +256,9 @@ export function applySemanticSplice(
         throw new Error(`[NREKI] "new_code" is required for mode "${mode}".`);
     }
 
+    // Normalize newCode line endings to LF before splitting (prevents \r residue from CRLF payloads)
+    const cleanNewCode = newCode.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
     // Extract exact original indentation
     let lineStart = startIdx;
     while (lineStart > 0 && content[lineStart - 1] !== "\n") lineStart--;
@@ -259,7 +267,7 @@ export function applySemanticSplice(
     const baseIndent = indentMatch ? indentMatch[0] : "";
 
     // Calculate minimum indentation in the new code (SKIP first line)
-    const newLines = newCode.split("\n");
+    const newLines = cleanNewCode.split("\n");
     const nonBlankInterior = newLines.filter((l, i) => i > 0 && l.trim().length > 0);
     let minClaudeIndent = Infinity;
     for (const line of nonBlankInterior) {
@@ -755,7 +763,7 @@ export async function semanticEdit(
     const payloadLines = (newCode ?? replaceText ?? "").split("\n").length;
 
     // Filo 1: Bloquea payloads monstruosos
-    if (payloadLines > 80 && !dryRun) {
+    if (payloadLines > 80) {
         return {
             success: false, filePath, symbolName, oldLines,
             newLines: payloadLines, tokensAvoided: 0, syntaxValid: false,
@@ -763,7 +771,7 @@ export async function semanticEdit(
         };
     }
     // Filo 2: Bloquea rewrite de símbolos grandes
-    if ((mode === "replace" || !mode) && oldLines > 40 && !dryRun) {
+    if ((mode === "replace" || !mode) && oldLines > 40) {
         return {
             success: false, filePath, symbolName, oldLines,
             newLines: 0, tokensAvoided: 0, syntaxValid: false,
