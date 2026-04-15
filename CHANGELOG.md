@@ -2,6 +2,22 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## 10.5.1 (2026-04-15) — Dynamic Risk Expansion
+
+### Changed
+- **`handleOutline` auto-expand es ahora dinámico (knapsack):** en lugar de los 3 símbolos HIGH-risk más grandes fijos, expande todos los que quepan en un presupuesto de 6,000 tokens. Nuevo umbral de tamaño por símbolo sube de 100 a 150 líneas.
+- **Warning `[BUDGET LIMIT REACHED]`** con lista de los primeros 8 símbolos omitidos y comando `nreki_code action:"compress" focus:"..."` listo para copiar.
+- **Orden de expansión** dentro del outline: una vez seleccionados por presupuesto, se re-ordenan por `startLine` ascendente para que el lector recorra el archivo linealmente.
+
+### Fixed
+- **`computeTriageRisk` filtro anti-trivialidad:** símbolos de ≤3 líneas ahora restan 2 al score. Evita marcar getters/constantes/exports triviales como HIGH-risk.
+
+### Docs
+- `templates/CLAUDE.md` y `skills/SKILL.md` actualizados con la nueva política de presupuesto y la instrucción crítica de usar `compress` cuando aparece `[BUDGET LIMIT REACHED]`.
+
+### Tests
+- 729/729 pasan (45 archivos, ~142s).
+
 ## 10.5.0 (2026-04-15) — Pre-Launch Security Hardening
 
 ### Security (Critical)

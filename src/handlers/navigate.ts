@@ -275,7 +275,8 @@ function computeTriageRisk(name: string, rawCode: string, linesCount: number): s
     if (!rawCode) return "[LOW]";
     let score = 0;
     const reasons: string[] = [];
-    if (linesCount > 50) { score += 3; reasons.push(">50L"); }
+    if (linesCount <= 3) { score -= 2; }
+    else if (linesCount > 50) { score += 3; reasons.push(">50L"); }
     else if (linesCount > 20) { score += 1; }
     const cleanCode = rawCode
         .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -410,21 +411,46 @@ export async function handleOutline(
         return tag.startsWith("[HIGH");
     });
 
-    const top3 = highRiskSymbols
-        .filter((sym) => (sym.endLine - sym.startLine + 1) <= 100)
-        .sort((a, b) => (b.endLine - b.startLine) - (a.endLine - a.startLine))
-        .slice(0, 3);
+    // ─── DYNAMIC RISK EXPANSION (v10.x) ───
+    const MAX_EXPAND_TOKENS = 6000;
 
-    if (top3.length > 0) {
+    const expandable = highRiskSymbols
+        .filter((sym) => (sym.endLine - sym.startLine + 1) <= 150)
+        .sort((a, b) => (b.endLine - b.startLine) - (a.endLine - a.startLine));
+
+    const autoExpanded: typeof expandable = [];
+    const omittedHighRisk: string[] = [];
+    let expandedTokens = 0;
+
+    for (const sym of expandable) {
+        const symTokens = Embedder.estimateTokens(sym.body);
+        if (expandedTokens + symTokens > MAX_EXPAND_TOKENS) {
+            omittedHighRisk.push(sym.name);
+            continue;
+        }
+        autoExpanded.push(sym);
+        expandedTokens += symTokens;
+    }
+
+    if (autoExpanded.length > 0) {
         lines.push("");
-        lines.push("--- AUTO-EXPANDED HIGH-RISK CODE (read these, then batch_edit all fixes) ---");
-        for (const sym of top3) {
+        lines.push(`--- AUTO-EXPANDED HIGH-RISK CODE (${autoExpanded.length} symbols, ~${expandedTokens.toLocaleString()} tokens) ---`);
+
+        autoExpanded.sort((a, b) => a.startLine - b.startLine);
+
+        for (const sym of autoExpanded) {
             lines.push("");
             lines.push(`### ${sym.name} (L${sym.startLine}-L${sym.endLine})`);
             lines.push("```typescript");
             lines.push(sym.body);
             lines.push("```");
         }
+    }
+
+    if (omittedHighRisk.length > 0) {
+        lines.push("");
+        lines.push(`[BUDGET LIMIT REACHED] ${omittedHighRisk.length} HIGH-risk symbols were not expanded to save context.`);
+        lines.push(`If auditing, you MUST run: nreki_code action:"compress" focus:"${omittedHighRisk.slice(0, 8).join(", ")}"`);
     }
 
     const outlineTokens = Embedder.estimateTokens(lines.join("\n"));

@@ -25,6 +25,8 @@ Guard context budget and prevent code corruption. Minimize token consumption whi
 1. **ALWAYS** prefer `nreki_code action:"read"` over native Read — it auto-compresses.
 2. Use `nreki_code action:"read" compress:false` only when you need to debug function internals.
 3. Use `nreki_code action:"compress"` for explicit compression control.
+4. The outline auto-expands HIGH-risk functions up to a 6,000 token budget. Read them directly from the outline.
+5. **CRITICAL FOR AUDITS:** If the outline says [BUDGET LIMIT REACHED], you MUST use `nreki_code action:"compress" focus:"<omitted_symbols>"` to read the remaining high-risk functions before concluding your audit. Do not guess their logic.
 
 ### Edit Protocol
 1. For single edits, use `nreki_code action:"edit"` — it validates AST before writing.
