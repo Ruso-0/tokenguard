@@ -571,7 +571,8 @@ export class NrekiKernel {
                     }
                     const ext = path.extname(posixPath).toLowerCase();
                     if (ext === ".py" || ext === ".go") {
-                        const oldContent = this.vfs.get(posixPath) ?? this.tsBackend.host.readFile(posixPath) ?? "";
+                        const vfsEntry = this.vfs.has(posixPath) ? this.vfs.get(posixPath) : undefined;
+                        const oldContent = vfsEntry !== undefined ? (vfsEntry ?? "") : (this.tsBackend.host.readFile(posixPath) ?? "");
                         preRawSignatures.set(posixPath, extractRawSignatures(oldContent, ext));
                     }
                 }
