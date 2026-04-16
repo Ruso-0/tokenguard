@@ -969,7 +969,16 @@ export class NrekiKernel {
         if (tsOnlyErrors.length > 0) {
             const tsContext: TsHealingContext = {
                 mode: this.mode,
-                readContent: (p) => this.vfs.get(p) ?? this.tsBackend.host.readFile(p) ?? "",
+                readContent: (p) => {
+                    // v10.5.2: distinguish tombstone (null) from absent (undefined).
+                    // Tombstone = file deleted in pending tx → return "" (no zombie disk read).
+                    // Absent = file not in VFS → fall through to disk.
+                    if (this.vfs.has(p)) {
+                        const v = this.vfs.get(p);
+                        return v ?? "";
+                    }
+                    return this.tsBackend.host.readFile(p) ?? "";
+                },
                 getAutoFixes: (f, e) => this.tsBackend.getAutoFixes(f, e),
                 createSavepoint: (p) => ({
                     content: this.vfs.has(p) ? this.vfs.get(p) : undefined,
