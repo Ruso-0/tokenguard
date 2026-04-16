@@ -15,6 +15,7 @@ import { safePath } from "../utils/path-jail.js";
 import { readSource } from "../utils/read-source.js";
 import { addPin, removePin, listPins } from "../pin-memory.js";
 import { latencyTracker } from "../utils/latency-tracker.js";
+import { logger } from "../utils/logger.js";
 import { computeAudit, formatAuditReport } from "../audit.js";
 
 // ─── Pin ────────────────────────────────────────────────────────────
@@ -216,9 +217,9 @@ export async function handleReport(
     }
 
     const modelName = burnRate.estimatedCostUsd > 0
-        // v10.5.2 #79: Opus = $15/MTok = $0.000015/tok. Old threshold 0.01 never triggered.
-        // Midpoint between Sonnet (~$0.000003) and Opus (~$0.000015).
-        ? (burnRate.estimatedCostUsd / Math.max(1, burnRate.totalConsumed) > 0.000005
+        // v10.5.2 #79: Opus 4.6 = $5/MTok = $0.000005/tok input.
+        // Sonnet 4.6 = $3/MTok = $0.000003/tok. Midpoint = $0.000004.
+        ? (burnRate.estimatedCostUsd / Math.max(1, burnRate.totalConsumed) >= 0.000004
             ? "Opus" : "Sonnet")
         : "Unknown";
 
@@ -310,6 +311,7 @@ export async function handleAudit(
 
     const stats = engine.getStats();
     if (stats.filesIndexed === 0) {
+        logger.info("First-time project indexing — this may take a moment for large repos.");
         await engine.indexDirectory(engine.getProjectRoot());
     }
 

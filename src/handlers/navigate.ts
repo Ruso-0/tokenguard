@@ -38,6 +38,7 @@ export async function handleSearch(
 
     const stats = engine.getStats();
     if (stats.filesIndexed === 0) {
+        logger.info("First-time project indexing — this may take a moment for large repos.");
         await engine.indexDirectory(engine.getProjectRoot());
     }
 
@@ -482,6 +483,7 @@ export async function handleMap(
 
     const stats = engine.getStats();
     if (stats.filesIndexed === 0) {
+        logger.info("First-time project indexing — this may take a moment for large repos.");
         await engine.indexDirectory(engine.getProjectRoot());
     }
 
@@ -684,7 +686,10 @@ export async function handleOrphanOracle(
     await engine.initialize();
 
     const stats = engine.getStats();
-    if (stats.filesIndexed === 0) await engine.indexDirectory(engine.getProjectRoot());
+    if (stats.filesIndexed === 0) {
+        logger.info("First-time project indexing — this may take a moment for large repos.");
+        await engine.indexDirectory(engine.getProjectRoot());
+    }
 
     const { map } = await engine.getRepoMap();
     const graph = await engine.getDependencyGraph();

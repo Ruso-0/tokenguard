@@ -85,8 +85,11 @@ export interface MonitorConfig {
 
 /** Default Claude pricing (per 1M tokens). Approximate - update if Anthropic changes pricing. */
 const DEFAULT_PRICING = {
-    input: 3.0, // $3.00 per 1M input tokens
-    output: 15.0, // $15.00 per 1M output tokens
+    input: 3.0,   // $3.00 per 1M input tokens (Claude Sonnet 4.6, Apr 2026)
+    output: 15.0,  // $15.00 per 1M output tokens (Claude Sonnet 4.6, Apr 2026)
+    // Opus 4.6: $5/$25 per MTok. Haiku 4.5: $1/$5 per MTok.
+    // Detection threshold in guard.ts (#79) uses per-token cost.
+    // Update these values if Anthropic changes tier pricing.
     cacheRead: 0.3, // $0.30 per 1M cache read tokens
     cacheWrite: 3.75, // $3.75 per 1M cache write tokens
 };
@@ -129,7 +132,6 @@ export class TokenMonitor {
             // Claude Code on Windows
             path.join(home, "AppData", "Roaming", "claude", "usage.jsonl"),
             // Alternative: local project usage
-            path.join(process.cwd(), ".claude", "usage.jsonl"),
         ];
 
         for (const candidate of candidates) {
@@ -238,10 +240,11 @@ export class TokenMonitor {
         const totalConsumed = inputTokens + outputTokens;
 
         // Calculate time span
-        const firstTime = new Date(this.entries[0].timestamp).getTime();
-        const lastTime = new Date(
-            this.entries[this.entries.length - 1].timestamp
-        ).getTime();
+        // v10.5.2 #90: derive time span from actual min/max, not array order.
+        // Async log entries can arrive out of order — subtraction gave negative.
+        const timestamps = this.entries.map(e => new Date(e.timestamp).getTime());
+        const firstTime = Math.min(...timestamps);
+        const lastTime = Math.max(...timestamps);
         const durationMs = Math.max(lastTime - firstTime, 60_000); // At least 1 minute
         const durationMinutes = durationMs / 60_000;
 

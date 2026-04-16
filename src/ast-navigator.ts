@@ -89,7 +89,9 @@ function walkFiles(dirPath: string): string[] {
     };
 
     walk(dirPath);
-    return files.sort();
+    // v10.5.2 #94: locale-independent sort preserves Anthropic Prompt Cache.
+    // Default .sort() uses OS locale — Linux/macOS order differently → cache miss.
+    return files.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 // ─── Signature Extraction ───────────────────────────────────────────
