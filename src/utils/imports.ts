@@ -143,7 +143,7 @@ export function extractDependencies(code: string, ext: string): ImportDependency
                 while ((m = lineRe.exec(inner)) !== null) {
                     const alias = m[1];
                     const fullPath = m[2];
-                    // v10.5.2 #73: Go stdlib uses slashes (encoding/json, crypto/sha256).
+                    // Go stdlib uses slashes (encoding/json, crypto/sha256).
                     // Third-party packages always have a dot in first segment (github.com).
                     const firstSegment = fullPath.split('/')[0];
                     if (!firstSegment.includes('.')) continue;

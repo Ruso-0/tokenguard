@@ -70,7 +70,7 @@ export class DtsHarvester {
         const BATCH_SIZE = 3;
 
         try {
-            // v10.5.2 #70: while loop drains queue until empty. The old
+            // While loop drains queue until empty. The old
             // snapshot+clear pattern orphaned files enqueued during awaits.
             while (this.queue.size > 0) {
                 // Abort check: stop if abort() was called or a new edit arrived

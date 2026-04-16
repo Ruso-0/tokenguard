@@ -240,7 +240,7 @@ export class TokenMonitor {
         const totalConsumed = inputTokens + outputTokens;
 
         // Calculate time span
-        // v10.5.2 #90: derive time span from actual min/max, not array order.
+        // Derive time span from actual min/max, not array order.
         // Async log entries can arrive out of order — subtraction gave negative.
         const timestamps = this.entries.map(e => new Date(e.timestamp).getTime());
         const firstTime = Math.min(...timestamps);

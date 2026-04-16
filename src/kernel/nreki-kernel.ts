@@ -523,11 +523,11 @@ export class NrekiKernel {
             // A-02: Snapshot vfsDirectories for rollback
             const savedDirectories = new Set(this.vfsDirectories);
 
-            // PATCH-1: Track which files THIS transaction adds to mutatedFiles.
+            // Track which files THIS transaction adds to mutatedFiles.
             // On rollback, only these are removed — preserving prior valid mutations.
             const transactionMutated = new Set<string>();
 
-            // v10.5.2 #4 (refactor): Pre-populate rollback state BEFORE
+            // Pre-populate rollback state BEFORE
             // the hologram block modifies rootNames. This captures the TRUE
             // wasInRoot value (false for new files). phase1_injectVfs has a
             // guard (!rollbackState.has) so it won't overwrite this snapshot.
@@ -669,7 +669,7 @@ export class NrekiKernel {
             };
 
             // A-01: Wrap Phase 1-4 so partial VFS mutations are rolled back on throw
-            // Sidecar edits hoisted for catch-path compensatory rollback (Bomba 1)
+            // Sidecar edits hoisted for catch-path compensatory rollback
             let sidecarEdits = new Map<LspSidecarBase, Array<{filePath: string; content: string | null}>>();
             try {
 
@@ -791,12 +791,12 @@ export class NrekiKernel {
                     if (state.wasInRoot) this.rootNames.add(posixPath);
                     else this.rootNames.delete(posixPath);
                 }
-                // BOMBA 1 FIX: Compensatory Rollback — heal sidecar VFS
+                // Compensatory rollback: restore sidecar VFS to pre-transaction state
                 // Without this, the LSP's internal VFS retains the rejected
                 // edit and future validations run against a phantom state.
                 await this.rollbackSidecars(sidecarEdits, rollbackState);
 
-                // PATCH-1: Remove this transaction's files from mutatedFiles
+                // Remove this transaction's files from mutatedFiles
                 // to prevent ghost deletion in the next commitToDisk().
                 for (const file of transactionMutated) this.mutatedFiles.delete(file);
 
@@ -863,10 +863,10 @@ export class NrekiKernel {
                     if (state.wasInRoot) this.rootNames.add(posixPath);
                     else this.rootNames.delete(posixPath);
                 }
-                // BOMBA 1 FIX: Compensatory Rollback on crash path
+                // Compensatory rollback on crash path: restore sidecar VFS
                 await this.rollbackSidecars(sidecarEdits, rollbackState);
 
-                // PATCH-1: Remove this transaction's files from mutatedFiles (crash path)
+                // Remove this transaction's files from mutatedFiles (crash path)
                 for (const file of transactionMutated) this.mutatedFiles.delete(file);
 
                 // A-02: Restore vfsDirectories

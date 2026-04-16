@@ -131,7 +131,7 @@ export async function handleEdit(
                     if (allDependents.length <= 50) {
                         dependentsToInject = allDependents;
                     } else {
-                        // v10.5.2 #20: O(1) AST-based signature diff. The old split("\n")
+                        // O(1) AST-based signature diff. The old split("\n")
                         // approach missed multiline exports (Prettier formatting) entirely.
                         // detectSignatureChange (already used at L206) + oldRawCode/newRawCode
                         // (already in semanticEdit result) = zero extra I/O, zero parser.

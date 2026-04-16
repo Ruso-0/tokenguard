@@ -340,7 +340,7 @@ export class NrekiDB {
         if (dir && !fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true });
         }
-        // v10.5.2 #21: random suffix prevents collision between concurrent
+        // Random suffix prevents collision between concurrent
         // MCP processes (Cursor + Claude Code terminal) writing the same DB.
         const tmpDb = `${this.dbPath}.${crypto.randomBytes(4).toString("hex")}.tmp`;
         fs.writeFileSync(tmpDb, buffer);
@@ -349,7 +349,7 @@ export class NrekiDB {
         // Save vector index (skip if unchanged since last persist)
         if (this.vecIndex.dirty) {
             const vecData = this.vecIndex.serialize();
-            // v10.5.2 #21: random suffix prevents cross-process collision.
+            // Random suffix prevents cross-process collision.
             const tmpVec = `${this.vecPath}.${crypto.randomBytes(4).toString("hex")}.tmp`;
             fs.writeFileSync(tmpVec, vecData);
             fs.renameSync(tmpVec, this.vecPath);

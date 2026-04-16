@@ -217,7 +217,7 @@ export async function handleReport(
     }
 
     const modelName = burnRate.estimatedCostUsd > 0
-        // v10.5.2 #79: Opus 4.6 = $5/MTok = $0.000005/tok input.
+        // Opus 4.6 = $5/MTok = $0.000005/tok input.
         // Sonnet 4.6 = $3/MTok = $0.000003/tok. Midpoint = $0.000004.
         ? (burnRate.estimatedCostUsd / Math.max(1, burnRate.totalConsumed) >= 0.000004
             ? "Opus" : "Sonnet")

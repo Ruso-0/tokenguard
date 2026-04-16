@@ -168,7 +168,7 @@ export class CognitiveEnforcer {
                 return { blocked: false };
             }
             if (params.mode === "insert_before" || params.mode === "insert_after") {
-                // v10.5.2 #71: blind insert blocked. Require at least outline knowledge.
+                // Blind insert blocked. Require at least outline knowledge.
                 if (!passport.outlined && !passport.rawRead) {
                     return { blocked: true, errorText: `Blocked: Blind insert. Run outline or compress focus:"${params.symbol}" first.` };
                 }

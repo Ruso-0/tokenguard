@@ -263,7 +263,7 @@ export class ChronosMemory {
                 return false;
             }
 
-            // v10.5.2 #46: Only exact restoration clears debt. The previous
+            // Only exact restoration clears debt. The previous
             // `!isToxicType` branch allowed gaming: UserConfig → any → string
             // cleared the debt because isToxicType("string") = false.
             // The agent must restore the ORIGINAL type to clear the penalty.

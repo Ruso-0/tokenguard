@@ -134,7 +134,7 @@ export function safePath(workspaceRoot: string, inputPath: string): string {
     try {
         realTarget = fs.realpathSync(resolved);
     } catch (err: unknown) {
-        // v10.5.2 #40: Only tolerate ENOENT (new file, no symlink to resolve).
+        // Only tolerate ENOENT (new file, no symlink to resolve).
         // Any other error (EACCES, EPERM, EIO) = fail-closed — block access.
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
             throw new Error(`[NREKI] Path validation failed for "${resolved}": ${(err as NodeJS.ErrnoException).code}`);

@@ -126,7 +126,7 @@ function fileHasTest(filePath: string, _projectRoot: string, testFiles: Set<stri
                 testHeadCache.set(testFile, head);
             }
 
-            // FIX BUG #25: Strip comments to prevent LLM gaming via `// import Foo`.
+            // Strip comments to prevent LLM gaming via `// import Foo`.
             const cleanHead = head
                 .replace(/\/\*[\s\S]*?\*\//g, "") // Block comments
                 .replace(/\/\/.*/g, "");          // Line comments
