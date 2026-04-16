@@ -527,6 +527,11 @@ export class NrekiKernel {
             // On rollback, only these are removed — preserving prior valid mutations.
             const transactionMutated = new Set<string>();
 
+            // v10.5.2 #4: tracks paths added to rootNames for the FIRST time in this tx.
+            // On rollback, force-removed regardless of the wasInRoot snapshot (which is
+            // captured AFTER the add and therefore lies for brand-new files).
+            const hologramTxNewRoots = new Set<string>();
+
             // HOLOGRAM: set currentEditTargets so VFS hooks show them as real .ts
             if (this.mode === "hologram") {
                 for (const edit of edits) {
@@ -536,6 +541,7 @@ export class NrekiKernel {
                         // Ensure edited file is in rootNames for hologram lazy subgraph
                         if (this.isTypeScriptFile(posixPath) && !this.rootNames.has(posixPath)) {
                             this.rootNames.add(posixPath);
+                            hologramTxNewRoots.add(posixPath); // <-- TRACKEAR AQUÍ
                         }
                     }
                 }
@@ -774,6 +780,10 @@ export class NrekiKernel {
                     if (state.wasInRoot) this.rootNames.add(posixPath);
                     else this.rootNames.delete(posixPath);
                 }
+                // FIX BUG #4: Revert newly injected roots for hologram mode
+                for (const newRoot of hologramTxNewRoots) {
+                    this.rootNames.delete(newRoot);
+                }
 
                 // BOMBA 1 FIX: Compensatory Rollback — heal sidecar VFS
                 // Without this, the LSP's internal VFS retains the rejected
@@ -846,6 +856,10 @@ export class NrekiKernel {
                     else this.vfsClock.delete(posixPath);
                     if (state.wasInRoot) this.rootNames.add(posixPath);
                     else this.rootNames.delete(posixPath);
+                }
+                // FIX BUG #4: Revert newly injected roots for hologram mode
+                for (const newRoot of hologramTxNewRoots) {
+                    this.rootNames.delete(newRoot);
                 }
                 // BOMBA 1 FIX: Compensatory Rollback on crash path
                 await this.rollbackSidecars(sidecarEdits, rollbackState);
@@ -1546,6 +1560,13 @@ export class NrekiKernel {
 
     public getStagingSize(): number { return this.vfs.size; }
     public getTrackedFiles(): number { return this.rootNames.size; }
+    /**
+     * @internal
+     * For test assertions only. Checks if a file is currently tracked in rootNames.
+     */
+    public hasRootName(filePath: string): boolean {
+        return this.rootNames.has(this.resolvePosixPath(filePath));
+    }
     public getBaselineErrorCount(): number {
         return this.tsBackend.getBaselineErrorCount();
     }

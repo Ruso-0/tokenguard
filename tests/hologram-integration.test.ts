@@ -191,4 +191,39 @@ describe("hologram integration", () => {
         }]);
         expect(result.safe).toBe(true);
     }, 30_000);
+
+    it("45. prevents rootNames leak on failed transaction (Bug #4)", async () => {
+        // Setup: new_file.ts existe en disco con contenido VÁLIDO (baseline limpio).
+        // api.ts lo importa → TypeScript lo compilará cuando sea agregado a rootNames.
+        dir = createTempProject({
+            "api.ts": `import { newFn } from "./new_file";\nexport function init() { return newFn(); }`,
+            "new_file.ts": `export function newFn(): string { return "ok"; }`,
+        });
+
+        const kernel = new NrekiKernel();
+        kernel.setShadows(new Map(), new Set(), ["api.ts"]);
+        kernel.boot(dir, "hologram");
+
+        const newFilePath = path.join(dir, "new_file.ts");
+
+        // INVARIANT DE DISEÑO: new_file.ts NO está en rootNames antes de la tx
+        // (hologram mode lo mantiene fuera del root hasta que sea editado).
+        // Si este assert falla, el escenario del bug #4 no aplica a este setup —
+        // hay que cambiar la estrategia del test.
+        expect(kernel.hasRootName(newFilePath)).toBe(false);
+
+        // Intentar sobreescribir new_file.ts con syntax error.
+        // Como api.ts ya lo importa válidamente (baseline clean), el nuevo error
+        // SÍ se dispara como diff respecto al baseline → batch debe fallar.
+        const result = await kernel.interceptAtomicBatch([{
+            targetFile: newFilePath,
+            proposedContent: `export const BROKEN syntax error here =`,
+        }]);
+
+        // Batch debe fallar (syntax error es unambiguo)
+        expect(result.safe).toBe(false);
+
+        // INVARIANT CRÍTICO Bug #4: new_file.ts NO debe leak en rootNames
+        expect(kernel.hasRootName(newFilePath)).toBe(false);
+    }, 30_000);
 });
