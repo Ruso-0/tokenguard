@@ -119,14 +119,27 @@ function fileHasTest(filePath: string, _projectRoot: string, testFiles: Set<stri
         if (testBase.startsWith(baseName + ".test.") || testBase.startsWith(baseName + ".spec.")) {
             return true;
         }
-        // Check if test file imports the target (first 50 lines, cached)
         try {
             let head = testHeadCache.get(testFile);
             if (head === undefined) {
                 head = fs.readFileSync(testFile, "utf-8").split("\n").slice(0, 50).join("\n");
                 testHeadCache.set(testFile, head);
             }
-            if (head.includes(baseName) && (head.includes("import") || head.includes("require"))) {
+
+            // FIX BUG #25: Strip comments to prevent LLM gaming via `// import Foo`.
+            const cleanHead = head
+                .replace(/\/\*[\s\S]*?\*\//g, "") // Block comments
+                .replace(/\/\/.*/g, "");          // Line comments
+
+            const safeBase = baseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+            // Match from/require(/import(/import declarations — survives
+            // multiline Prettier formatting because it targets the clause tail.
+            const importPattern = new RegExp(
+                `(?:from|require\\s*\\(|import\\s*\\(|import\\s+)['"\`][^'"\`]*\\b${safeBase}\\b[^'"\`]*['"\`]`
+            );
+
+            if (importPattern.test(cleanHead)) {
                 return true;
             }
         } catch { /* skip */ }
