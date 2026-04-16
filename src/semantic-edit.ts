@@ -617,6 +617,7 @@ export async function semanticEdit(
     newCode: string | undefined,
     parser: ASTParser,
     sandbox: AstSandbox,
+    projectRoot: string,
     mode: EditMode = "replace",
     dryRun: boolean = false,
     searchText?: string,
@@ -854,7 +855,7 @@ export async function semanticEdit(
     // Save backup and write to disk ONLY if not dry run
     if (!dryRun) {
         try {
-            saveBackup(process.cwd(), filePath);
+            saveBackup(projectRoot, filePath);
         } catch {
             // Non-fatal: don't block the edit if backup fails
         }

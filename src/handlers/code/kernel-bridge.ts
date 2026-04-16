@@ -13,7 +13,7 @@ import { logger } from "../../utils/logger.js";
 
 // ─── Domain-specific helper (NOT shared) ────────────────────────────
 
-export async function ensureHologramReady(kernel: NrekiKernel, nrekiMode: string): Promise<void> {
+export async function ensureHologramReady(kernel: NrekiKernel, nrekiMode: string, projectRoot: string): Promise<void> {
     if (nrekiMode !== "hologram" || kernel.hasShadows() || kernel.hasJitHologram()) return;
     try {
         const Parser = (await import("web-tree-sitter")).default;
@@ -35,7 +35,7 @@ export async function ensureHologramReady(kernel: NrekiKernel, nrekiMode: string
         const { ParserPool } = await import("../../parser-pool.js");
         const { scanProject } = await import("../../hologram/shadow-generator.js");
         const pool = new ParserPool(4);
-        const scanResult = await scanProject(process.cwd(), pool);
+        const scanResult = await scanProject(projectRoot, pool);
         kernel.setShadows(scanResult.prunable, scanResult.unprunable, scanResult.ambientFiles);
     }
 }
@@ -48,7 +48,7 @@ export async function ensureKernelBooted(deps: RouterDependencies): Promise<bool
             `Booting kernel (${deps.nrekiMode} mode). First edit will be slower.`
         );
         try {
-            await ensureHologramReady(deps.kernel, deps.nrekiMode ?? "");
+            await ensureHologramReady(deps.kernel, deps.nrekiMode ?? "", deps.engine.getProjectRoot());
             deps.kernel.boot(
                 deps.engine.getProjectRoot(),
                 deps.nrekiMode as "file" | "project" | "hologram",

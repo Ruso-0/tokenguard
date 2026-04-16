@@ -99,6 +99,7 @@ export async function handleEdit(
             new_code || undefined,
             parser,
             sandbox,
+            engine.getProjectRoot(),
             mode,
             useKernel,
             search_text,

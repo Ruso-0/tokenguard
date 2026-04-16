@@ -58,7 +58,7 @@ describe("NREKI Integration - Full Zero-Disk-Touch Path", () => {
         const result = await semanticEdit(
             filePath, "getUserId",
             'export function getUserId(): number { return 42; }',
-            parser, sandbox, "replace",
+            parser, sandbox, dir, "replace",
             true // dryRun
         );
 

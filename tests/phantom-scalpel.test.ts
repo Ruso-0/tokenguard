@@ -188,7 +188,7 @@ describe("Phantom Scalpel: Patch Mode", () => {
 
         const result = await semanticEdit(
             filePath, "add", undefined, parser, sandbox,
-            "patch" as EditMode, false,
+            tmpDir, "patch" as EditMode, false,
             "a: number, b: number", "a: number, b: number, c: number",
         );
 

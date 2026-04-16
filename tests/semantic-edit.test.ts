@@ -71,6 +71,7 @@ describe("edit function", () => {
             'function greet(name: string): string {\n    return `Hi, ${name}!`;\n}',
             parser,
             sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(true);
@@ -98,6 +99,7 @@ describe("edit function", () => {
             "function calculate(x: number): number {\n    return x * 3;\n}",
             parser,
             sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(true);
@@ -139,6 +141,7 @@ describe("edit class", () => {
             ].join("\n"),
             parser,
             sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(true);
@@ -170,6 +173,7 @@ describe("edit interface", () => {
             "interface Config {\n    host: string;\n    port: number;\n    ssl: boolean;\n}",
             parser,
             sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(true);
@@ -195,6 +199,7 @@ describe("symbol not found", () => {
             "function gamma(): void {}",
             parser,
             sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(false);
@@ -214,6 +219,7 @@ describe("symbol not found", () => {
             "function myfunction(): void {}",
             parser,
             sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(false);
@@ -241,6 +247,7 @@ describe("syntax error rejection", () => {
             "function valid(): number {\n    return 42\n",  // missing closing brace
             parser,
             sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(false);
@@ -264,6 +271,7 @@ describe("syntax error rejection", () => {
             "function foo(): void {\n    console.log('hello'\n}",  // missing closing paren
             parser,
             sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(false);
@@ -290,6 +298,7 @@ describe("nested function", () => {
             "function inner(): number {\n        return 999;\n    }",
             parser,
             sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(true);
@@ -325,6 +334,7 @@ describe("tokens avoided", () => {
             'function target(): string {\n    return "new";\n}',
             parser,
             sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(true);
@@ -357,6 +367,7 @@ describe("multiple symbols", () => {
             "function process(): void {}",
             parser,
             sandbox,
+            tmpDir,
         );
 
         // Either succeeds (if parser deduplicates) or fails with disambiguation
@@ -376,6 +387,7 @@ describe("edge cases", () => {
             "function foo(): void {}",
             parser,
             sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(false);
@@ -391,6 +403,7 @@ describe("edge cases", () => {
             "function foo(): void {}",
             parser,
             sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(false);
@@ -413,6 +426,7 @@ describe("edge cases", () => {
             "type Point = {\n    x: number;\n    y: number;\n    z: number;\n}",
             parser,
             sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(true);
@@ -437,7 +451,7 @@ describe("topological edits (insert_before / insert_after)", () => {
 
         const result = await semanticEdit(
             file, "process", "function process_v2() {\n    return 2;\n}",
-            parser, sandbox, "insert_after"
+            parser, sandbox, tmpDir, "insert_after"
         );
 
         expect(result.success).toBe(true);
@@ -459,7 +473,7 @@ describe("topological edits (insert_before / insert_after)", () => {
 
         const result = await semanticEdit(
             file, "end", "function start() {\n    return 0;\n}",
-            parser, sandbox, "insert_before"
+            parser, sandbox, tmpDir, "insert_before"
         );
 
         expect(result.success).toBe(true);
@@ -482,7 +496,7 @@ describe("topological edits (insert_before / insert_after)", () => {
         const rawNewCode = "async validateData() {\n    return false;\n}";
 
         const result = await semanticEdit(
-            file, "getData", rawNewCode, parser, sandbox, "insert_before"
+            file, "getData", rawNewCode, parser, sandbox, tmpDir, "insert_before"
         );
 
         expect(result.success).toBe(true);
@@ -496,7 +510,7 @@ describe("topological edits (insert_before / insert_after)", () => {
 
         const result = await semanticEdit(
             file, "valid", "function broken() { return 1",
-            parser, sandbox, "insert_after"
+            parser, sandbox, tmpDir, "insert_after"
         );
 
         expect(result.success).toBe(false);
@@ -509,7 +523,7 @@ describe("topological edits (insert_before / insert_after)", () => {
         const file = writeTmp("insert-last.ts", "function foo() { return 1; }");
 
         const result = await semanticEdit(
-            file, "foo", "function bar() { return 2; }", parser, sandbox, "insert_after"
+            file, "foo", "function bar() { return 2; }", parser, sandbox, tmpDir, "insert_after"
         );
 
         expect(result.success).toBe(true);
@@ -551,6 +565,7 @@ describe("performance", () => {
             "function func50(x: number): number {\n    return x * 50;\n}",
             parser,
             sandbox,
+            tmpDir,
         );
         const elapsed = performance.now() - start;
 
@@ -626,6 +641,7 @@ describe("symbolName extraction from AST", () => {
             file, "processTransaction",
             'export async function processTransaction(\n  userId: string,\n  amount: number\n): Promise<void> {\n  console.log("new");\n}',
             parser, sandbox,
+            tmpDir,
         );
 
         expect(result.success).toBe(true);
@@ -652,6 +668,7 @@ describe("memory safety", () => {
                 `function target(): number {\n    return ${i + 100};\n}`,
                 parser,
                 sandbox,
+                tmpDir,
             );
 
             expect(result.success).toBe(true);
