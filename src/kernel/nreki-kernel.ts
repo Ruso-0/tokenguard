@@ -1313,6 +1313,7 @@ export class NrekiKernel {
             this.vfsDirectories.clear();
             // CRITICAL FIX: Prevent stale mutatedFiles from deleting real files
             // in the next commitToDisk() call.
+            this.tsBackend.releaseMutatedDocuments(new Set(this.mutatedFiles));
             this.mutatedFiles.clear();
             this.initConfig(); // Re-sync rootNames from disk
             // BUG 1: In hologram mode, re-filter rootNames
