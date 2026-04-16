@@ -567,7 +567,14 @@ export async function batchSemanticEdit(
             for (const donePath of renamedFiles) {
                 const backupPath = getBackupPath(projectRoot, donePath);
                 if (fs.existsSync(backupPath)) {
-                    try { fs.copyFileSync(backupPath, donePath); } catch {}
+                    try {
+                        // v10.5.2 #23: atomic restore — copyFileSync is NOT atomic.
+                        // If the process dies mid-copy (OOM, Ctrl+C), the user's
+                        // file is left truncated. Write to tmp then rename.
+                        const tmpRollback = donePath + ".rollback-" + crypto.randomBytes(4).toString("hex");
+                        fs.copyFileSync(backupPath, tmpRollback);
+                        fs.renameSync(tmpRollback, donePath);
+                    } catch {}
                 }
             }
             // Clean remaining temp files
