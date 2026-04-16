@@ -56,6 +56,48 @@ export function extractRawSignatures(content: string, ext: string): Map<string, 
     return signatures;
 }
 
+
+function extractGoReturnType(sig: string): string {
+    const s = sig.replace(/\s*\{?\s*$/, '').trim();
+    let i = 0;
+    // Skip `func` keyword
+    while (i < s.length && s[i] !== ' ' && s[i] !== '(') i++;
+    while (i < s.length && s[i] === ' ') i++;
+    // Consume optional method receiver `(r *R)` if first non-space is `(`
+    if (i < s.length && s[i] === '(') {
+        let d = 0;
+        while (i < s.length) {
+            if (s[i] === '(') d++;
+            else if (s[i] === ')') { d--; if (d === 0) { i++; break; } }
+            i++;
+        }
+        while (i < s.length && s[i] === ' ') i++;
+    }
+    // Skip function name
+    while (i < s.length && /[a-zA-Z0-9_]/.test(s[i])) i++;
+    while (i < s.length && s[i] === ' ') i++;
+    // Skip optional generics `[T any]`
+    if (i < s.length && s[i] === '[') {
+        let d = 0;
+        while (i < s.length) {
+            if (s[i] === '[') d++;
+            else if (s[i] === ']') { d--; if (d === 0) { i++; break; } }
+            i++;
+        }
+        while (i < s.length && s[i] === ' ') i++;
+    }
+    // Consume parameter list `(...)`
+    if (i >= s.length || s[i] !== '(') return '';
+    let d = 0;
+    while (i < s.length) {
+        if (s[i] === '(') d++;
+        else if (s[i] === ')') { d--; if (d === 0) { i++; break; } }
+        i++;
+    }
+    return s.substring(i).trim();
+}
+
+
 export function detectSignatureRegression(
     oldSig: string,
     newSig: string,
@@ -82,8 +124,8 @@ export function detectSignatureRegression(
             return { isRegression: true, reason: "Stripped all parameter type annotations" };
         }
     } else if (ext === ".go") {
-        const oldReturn = oldSig.substring(oldSig.lastIndexOf(')') + 1).replace('{', '').trim();
-        const newReturn = newSig.substring(newSig.lastIndexOf(')') + 1).replace('{', '').trim();
+        const oldReturn = extractGoReturnType(oldSig);
+        const newReturn = extractGoReturnType(newSig);
         if (oldReturn.length > 0 && newReturn.length === 0) {
             return { isRegression: true, reason: "Lost return type annotation" };
         }
