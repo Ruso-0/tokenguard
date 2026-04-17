@@ -7,7 +7,29 @@
 import fs from "fs";
 import path from "path";
 
-import type { BatchEditOp } from "../semantic-edit.js";
+/**
+ * Patch 7 (v10.6.1): superset of params the enforcer inspects across
+ * tools/actions. All fields optional because different tools populate
+ * different subsets; the enforcer reads permissively and shortcircuits
+ * on anything it doesn't recognize. The per-edit shape is wider than
+ * semantic-edit's BatchEditOp (mode is plain string, not EditMode) so
+ * the enforcer can consume raw router-layer input without casts.
+ */
+interface EnforcerInput {
+    path?: string;
+    symbol?: string;
+    mode?: string;
+    focus?: string;
+    edits?: Array<{
+        path?: string;
+        symbol?: string;
+        mode?: string;
+        search_text?: string;
+        replace_text?: string;
+        new_code?: string;
+    }>;
+    _nreki_bypass?: string;
+}
 
 interface FilePassport {
     outlined: boolean;
@@ -91,10 +113,9 @@ export class CognitiveEnforcer {
     }
 
 
-    // AUDIT FIX (v10.5.8): `any` retirado. Partial<BatchEditOp> refleja que el
-    // enforcer ve input posiblemente malformado pre-validación. Reusa el tipo
-    // canónico de semantic-edit.ts en vez de duplicar la shape.
-    private validateSingleBatchEdit(edit: Partial<BatchEditOp>): { blocked: boolean; errorText?: string } {
+    // Patch 7 (v10.6.1): edit shape pulled from EnforcerInput so the enforcer
+    // stays internally self-consistent without importing semantic-edit types.
+    private validateSingleBatchEdit(edit: NonNullable<EnforcerInput["edits"]>[number]): { blocked: boolean; errorText?: string } {
         // Patch mode has its own anti-ambiguity (occurrences === 1). Safe to pass through.
         if (edit.mode === "patch") return { blocked: false };
 
@@ -130,7 +151,7 @@ export class CognitiveEnforcer {
         return { blocked: false };
     }
 
-    public evaluate(tool: string, action: string, params: any): { blocked: boolean; errorText?: string; penalty?: number } {
+    public evaluate(tool: string, action: string, params: EnforcerInput): { blocked: boolean; errorText?: string; penalty?: number } {
         if (tool !== "nreki_code") return { blocked: false };
         if (!["read", "compress", "edit", "batch_edit"].includes(action)) return { blocked: false };
 
@@ -206,7 +227,7 @@ export class CognitiveEnforcer {
     }
 
     // LEY 5: Amnesia Quirúrgica
-    public registerSuccess(tool: string, action: string, params: any) {
+    public registerSuccess(tool: string, action: string, params: EnforcerInput) {
         let changed = false;
         try {
             if (tool === "nreki_navigate" && action === "outline" && params.path) {
