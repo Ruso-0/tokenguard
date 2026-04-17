@@ -24,6 +24,7 @@ import { getPinnedText } from "../pin-memory.js";
 import { repoMapToText } from "../repo-map.js";
 import { extractDependencies, cleanSignature, isSensitiveSignature, escapeRegExp } from "../utils/imports.js";
 import { logger } from "../utils/logger.js";
+import { runDefectRadar } from "../utils/defect-radar.js";
 
 // ─── Search ─────────────────────────────────────────────────────────
 
@@ -359,6 +360,25 @@ export async function handleOutline(
 
     const lowRiskSymbols: string[] = [];
 
+    // v10.7.0 (NREKI Way): Ghost Oracle pre-fetch. Entry files are exempt —
+    // they're referenced by the runtime/test-runner, not by the import graph,
+    // so a 0-ref result would be a false positive on them.
+    const isEntryFile = /^(index|main|app|setup|server|cli|vite-env)\./i.test(path.basename(resolvedPath)) ||
+                        /^(.*\.)?config\./i.test(path.basename(resolvedPath)) ||
+                        /\.(test|spec)\./i.test(resolvedPath);
+
+    const ghostCache = new Map<string, boolean>();
+    const symbolsToGhostCheck = Array.from(new Set(
+        symbols
+            .filter(s => s.exportedAs && s.kind !== "type" && s.kind !== "interface" && !s.name.startsWith("_") && !isEntryFile)
+            .map(s => s.name)
+    ));
+    await Promise.all(symbolsToGhostCheck.map(async (name) => {
+        const candidateFiles = await deps.engine.searchFilesBySymbol(name);
+        const hasExt = candidateFiles.some((f: string) => path.relative(root, f).replace(/\\/g, "/") !== relPath);
+        ghostCache.set(name, hasExt);
+    }));
+
     for (const sym of symbols) {
         const exported = sym.exportedAs ? ` [${sym.exportedAs}]` : "";
         const linesCount = sym.endLine - sym.startLine + 1;
@@ -369,7 +389,11 @@ export async function handleOutline(
         let hasValidEngram = false;
         if (memory) {
             const currentHash = crypto.createHash("sha256").update(sym.body).digest("hex");
-            if (currentHash === memory.astHash) {
+            // v10.7.0: engrams whose insight starts with "ASSERT" (case-insensitive)
+            // are immortal — they survive AST hash mutation. Ideal for pinning
+            // invariants that apply to the role of the symbol, not its body.
+            const isImmortal = memory.insight.toUpperCase().startsWith("ASSERT");
+            if (currentHash === memory.astHash || isImmortal) {
                 engramLine = `  [Engram]: ${memory.insight}`;
                 hasValidEngram = true;
             } else {
@@ -379,13 +403,22 @@ export async function handleOutline(
             }
         }
 
-        if (riskTag === "[LOW]" && !hasValidEngram && !params.signatures) {
+        // v10.7.0: parasitic defect radar + ghost tag rendered inline.
+        const defects = runDefectRadar(sym.body);
+        const defectTag = defects.length > 0
+            ? ` ⚠️ [${defects.map(d => d.label).join(", ")}]`
+            : "";
+        const ghostTag = ghostCache.get(sym.name) === false
+            ? " 👻 [0 ext refs]"
+            : "";
+
+        if (riskTag === "[LOW]" && !hasValidEngram && !params.signatures && defects.length === 0 && !ghostTag) {
             lowRiskSymbols.push(sym.name);
             continue;
         }
 
         lines.push(
-            `- **${sym.kind}** \`${sym.name}\`${exported} ${riskTag} - L${sym.startLine}-L${sym.endLine}`,
+            `- **${sym.kind}** \`${sym.name}\`${exported} ${riskTag}${defectTag}${ghostTag} - L${sym.startLine}-L${sym.endLine}`,
         );
         lines.push(`  \`${sym.signature}\``);
         if (engramLine) lines.push(engramLine);
