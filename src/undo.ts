@@ -41,16 +41,44 @@ export function saveBackup(projectRoot: string, filePath: string): void {
     // AUDIT FIX: Always resolve against projectRoot (consistent with getBackupPath)
     const resolved = path.resolve(projectRoot, filePath);
 
-    // AUDIT FIX: Skip binary files — readFileSync("utf-8") silently corrupts non-text
+    // AUDIT FIX (Patch 3): Binary check + size cap BEFORE full-file load (OOM guard).
+    // Pre-fix: readFileSync(..., "utf-8") of a 2GB misdirected file crashed MCP
+    // with OOM before the null-byte check fired.
+    let fd: number;
+    try {
+        fd = fs.openSync(resolved, "r");
+    } catch {
+        return; // File doesn't exist or permission denied
+    }
+
+    try {
+        const stats = fs.fstatSync(fd);
+
+        // Hard cap: refuse to backup files > 100MB. No code file is ever this big;
+        // hitting this means the agent pointed at a log/dump/db by mistake.
+        if (stats.size > 100 * 1024 * 1024) return;
+
+        const probeSize = Math.min(8192, stats.size);
+        if (probeSize > 0) {
+            const probe = new Uint8Array(probeSize);
+            const bytesRead = fs.readSync(fd, probe, 0, probeSize, 0);
+            for (let i = 0; i < bytesRead; i++) {
+                if (probe[i] === 0) return; // Binary file — skip backup
+            }
+        }
+    } catch {
+        return;
+    } finally {
+        try { fs.closeSync(fd); } catch { /* already closed or invalid fd */ }
+    }
+
+    // Safe to load: non-binary, under size cap.
     let content: string;
     try {
         content = fs.readFileSync(resolved, "utf-8");
     } catch {
-        return; // File doesn't exist or read error — nothing to backup
+        return;
     }
-
-    // Heuristic binary check: null bytes in first 8KB indicate binary
-    if (content.slice(0, 8192).includes("\0")) return;
 
     const dir = getBackupsDir(projectRoot);
     if (!fs.existsSync(dir)) {
