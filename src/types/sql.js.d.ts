@@ -5,6 +5,9 @@
  */
 
 declare module "sql.js" {
+    /** SQLite's canonical value types (per SQLite type affinity spec). */
+    export type SqlValue = string | number | boolean | Uint8Array | null;
+
     export interface SqlJsStatic {
         Database: {
             new(): Database;
@@ -14,22 +17,22 @@ declare module "sql.js" {
 
     export interface QueryExecResult {
         columns: string[];
-        values: any[][];
+        values: SqlValue[][];
     }
 
     export interface Statement {
-        bind(params?: any[]): boolean;
+        bind(params?: SqlValue[]): boolean;
         step(): boolean;
-        getAsObject(params?: any): Record<string, any>;
-        get(params?: any[]): any[];
+        getAsObject(params?: SqlValue[]): Record<string, SqlValue>;
+        get(params?: SqlValue[]): SqlValue[];
         free(): boolean;
         reset(): void;
-        run(params?: any[]): void;
+        run(params?: SqlValue[]): void;
     }
 
     export interface Database {
-        run(sql: string, params?: any[]): Database;
-        exec(sql: string, params?: any[]): QueryExecResult[];
+        run(sql: string, params?: SqlValue[]): Database;
+        exec(sql: string, params?: SqlValue[]): QueryExecResult[];
         prepare(sql: string): Statement;
         export(): Uint8Array;
         close(): void;
