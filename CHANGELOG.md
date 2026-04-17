@@ -2,6 +2,25 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## 10.5.7 (2026-04-16) — Round-5 Audit Hot-Patches (Wave 1)
+
+Three localized security/correctness fixes shipped as separate bisectable commits before the 2026-05-21 Show HN launch.
+
+### Security (Critical)
+- **Cognitive Enforcer batch_edit bypass closed (Patch 1).** Pre-fix, `evaluate()` only validated `batch_edit` payloads when `params.edits.length === 1`. Any batch of 2+ edits fell through to an unconditional `{ blocked: false }`, allowing a "disguise batch" attack (1 real blind edit + 1 dummy comment edit) to smuggle blind edits past the cognitive firewall. The enforcer now iterates every edit in the batch and validates each independently via a new `validateSingleBatchEdit` helper. Any single blind edit blocks the whole batch. This was a real enforcement gap — acknowledged plainly rather than spun.
+
+### Correctness
+- **Phantom Scalpel patch mode literal replacement (Patch 2).** `applySemanticSplice` patch mode used `String.prototype.replace(string, string)`, which still interprets V8 substitution tokens (`$&`, `$'`, `` $` ``, `$$`) in the replacement string. An LLM patching a shell template with `$'quoted'` or a regex literal with `$&` saw silent substitution. Switched to `split(search).join(replace)` — always literal, and semantically identical under the existing `occurrences === 1` guard.
+
+### Reliability
+- **`saveBackup` OOM guard (Patch 3).** Pre-fix, `saveBackup` called `fs.readFileSync(path, "utf-8")` before checking for binary content. A 2GB misdirected file (log, dump, db accidentally passed by the agent) was loaded into the V8 heap as a UTF-8 string before the null-byte check fired, crashing the MCP server with `Allocation failed - JavaScript heap out of memory`. The function now opens an FD, rejects files > 100MB (no code file is ever this big), probes the first 8KB for null bytes via `Uint8Array`, and only then calls `readFileSync`.
+
+### Tests
+- 749/749 pass (48 files): 730 baseline + 7 new (cognitive-enforcer) + 6 new (phantom-scalpel patch-2) + 6 new (undo OOM).
+
+### Internal
+- Baseline test infrastructure note: vitest 4.1.1 parallel mode (`pool: "forks"` + `fileParallelism: true`) emits "Vitest failed to find the runner" on all 45 test files. Workaround: `npx vitest run --no-file-parallelism` (serial, ~5 min). Root cause out of scope for this release; tracked separately.
+
 ## 10.5.1 (2026-04-15) — Dynamic Risk Expansion
 
 ### Changed
