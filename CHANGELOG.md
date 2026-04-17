@@ -2,6 +2,24 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## 10.5.8 (2026-04-16) — Round-5 Audit Retrofits + Tolerant Patch
+
+Follow-up to v10.5.7 that closes two gaps found during type review and adds the Tolerant Patch ergonomics improvement. Shipped as three bisectable commits.
+
+### Correctness
+- **`validateSingleBatchEdit` typed via `Partial<BatchEditOp>` (retrofit).** The helper introduced in v10.5.7 Patch 1 took `edit: any`. Replaced with the canonical `BatchEditOp` shape from `semantic-edit.ts` (under `Partial<>` to model pre-validation input that may be missing fields). Zero behavior change; removes an `any` footgun.
+- **`normalizeEditModes` in `router.ts` (Patch 2).** Agents that send a well-formed `{search_text, replace_text}` payload to `edit`/`batch_edit` without the `mode` field were blocked by the Cognitive Enforcer's blind-edit rule, because the enforcer only short-circuits when it sees `mode:"patch"` explicitly. `handleCode` now infers the mode from payload shape (`{search_text, replace_text}` → `"patch"`, `{new_code}` alone → `"replace"`, explicit `mode` preserved) before the enforcer evaluates. In-place mutation; downstream handlers are idempotent to the re-check.
+
+### Ergonomics
+- **Tolerant Patch: fuzzy indentation matching in Phantom Scalpel (Patch 3 extension).** When exact-match patch mode yields 0 occurrences, `applySemanticSplice` now retries with an indent-flexible regex (each line trim-start, `[ \t]*` prefix). On exactly one fuzzy match, the replacement is rebased onto the original's indentation and the patch proceeds. On 2+ fuzzy matches, throws "ambiguous" with the count. The literal-`$` guarantee from v10.5.7 Patch 2 is preserved end-to-end (the escape routine uses the callback form `m => "\\" + m` instead of the `$&` backreference).
+
+### Tests
+- 760/760 pass (50 files): 730 baseline + 19 from v10.5.7 + 11 new (5 router normalize, 6 phantom-scalpel tolerant).
+
+### Not in scope
+- Wave 2 (Patch 5, LSP auto-healer atomic multi-TextEdit) targeted for v10.5.9.
+- Wave 3 (Patch 6, shadow-generator escape-loop + harvester drain) targeted for v10.6.
+
 ## 10.5.7 (2026-04-16) — Round-5 Audit Hot-Patches (Wave 1)
 
 Three localized security/correctness fixes shipped as separate bisectable commits before the 2026-05-21 Show HN launch.
