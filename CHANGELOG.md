@@ -2,6 +2,23 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## 10.6.0 (2026-04-17) — Wave 3 Polish (Patch 6)
+
+Two bundled fixes in the hologram subsystem. Low-severity but long-overdue.
+
+### Correctness
+- **shadow-generator escape-loop fixed in 3 functions** (`stripParameterDefaults`, `splitAndCleanParams`, `cleanSingleParam`). The heuristic `sig[i-1] !== "\\"` misread strings ending in an escaped backslash pair (e.g. `"C:\\"`): the final `\` was read as escaping the closing quote, so the parser kept running INSIDE the string past its actual terminator. Windows paths, escape sequences, and any string literal ending in `\\` silently corrupted the generated `.d.ts` — parameter lists bled into return types. Replaced with the canonical skip-next-char pattern that the peer `splitParams` already used.
+
+### Performance
+- **harvester drain loop uses native iterator** instead of `Array.from(this.queue).slice(0, BATCH_SIZE)`. Pre-fix allocated a full copy of the queue Set on every drain cycle: O(N) per batch, O(N²/BATCH_SIZE) total across a drain. At 5k queued files that adds up to millions of wasted allocations. Post-fix: native iterator that stops after `BATCH_SIZE`, no Set copy. Two-phase collect-then-delete preserves original semantics.
+
+### Tests
+- 771/771 pass (52 files): 765 from v10.5.9 + 6 new in `tests/hologram-shadow-escape.test.ts` covering Windows-path defaults, backslash-terminated strings followed by more params, cleanSingleParam `=` seek, backtick templates, return-type preservation, and a no-default regression guard.
+- Existing 6/6 harvester tests still green (drain behavior unchanged externally; only the inner loop pattern differs).
+
+### End of Round-5 audit execution
+With v10.6.0 shipped, all 6 patches from the round-5 audit of v10.5.1 are now in master: Patch 1 (enforcer bypass, v10.5.7), Patch 2 (`$` substitution, v10.5.7), Patch 3 (saveBackup OOM, v10.5.7), Patch 2 auto-infer + Patch 3 tolerant-patch (v10.5.8), Patch 5 (LSP healer atomic, v10.5.9), Patch 6 (shadow-gen + harvester, v10.6.0). Each shipped in its own bisectable commit.
+
 ## 10.5.9 (2026-04-17) — LSP Auto-Healer Atomic Multi-TextEdit (Wave 2, Patch 5)
 
 Single-patch release. Fixes the doom-loop that occurred whenever an LSP quickfix required coupled edits (e.g., gopls "organize imports" that inserts the import block AND updates a usage, or pyright `from X import Y` plus a reference fix). The healer previously applied only one TextEdit per CodeAction; the other error stayed live, validation rolled back, and the agent retried forever.
