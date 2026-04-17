@@ -182,13 +182,21 @@ export async function processKernelResult(
                 `This technical debt has been logged. Restore strict typing instead of using any/unknown.`;
         }
 
-        // Debt payment tracking
+        // Debt payment tracking — v10.7.0: quantify CFI discount for the
+        // LLM so the reinforcement loop carries a measurable reward, not a
+        // vague "debt paid" message.
         const allPaid: string[] = [];
+        let totalCfiDiscount = 0;
         for (const fp of committedFiles) {
             const posixPath = kernel.resolvePosixPath(fp);
             const fileContracts = kernelResult.postContracts.get(posixPath);
+
+            const cfiBefore = deps.chronos.getFileCFI(fp);
             const paid = deps.chronos.assessDebtPayments(fp, fileContracts);
+            const cfiAfter = deps.chronos.getFileCFI(fp);
+
             if (paid.length > 0) {
+                totalCfiDiscount += (cfiBefore - cfiAfter);
                 allPaid.push(`\`${path.basename(fp)}\`: ${paid.join(", ")}`);
             }
 
@@ -201,9 +209,9 @@ export async function processKernelResult(
         }
 
         if (allPaid.length > 0) {
-            ttrdFeedback += `\n\n**TYPE DEBT PAID**\n` +
-                `Strict typing restored for: ${allPaid.map(s => s).join(", ")}.\n` +
-                `Friction score reduced.`;
+            ttrdFeedback += `\n\n**[TTRD BOUNTY] TYPE DEBT PAID** 🏆\n` +
+                `Strict typing restored for: ${allPaid.join(" | ")}.\n` +
+                `Technical debt resolved. File friction score (CFI) reduced by ${totalCfiDiscount.toFixed(1)} points. Excellent engineering.`;
         }
 
         deps.chronos.syncTechDebt(
