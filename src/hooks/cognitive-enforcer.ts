@@ -88,41 +88,53 @@ export class CognitiveEnforcer {
         } catch { return 0; }
     }
 
+
+    private validateSingleBatchEdit(edit: any): { blocked: boolean; errorText?: string } {
+        // Patch mode has its own anti-ambiguity (occurrences === 1). Safe to pass through.
+        if (edit.mode === "patch") return { blocked: false };
+
+        if (edit.mode === "insert_before" || edit.mode === "insert_after") {
+            if (!edit.path) return { blocked: false };
+            try {
+                const insertSize = fs.statSync(path.resolve(this.projectRoot, edit.path)).size;
+                if (insertSize < 50000) return { blocked: false };
+            } catch { return { blocked: false }; }
+            const ip = path.resolve(this.projectRoot, edit.path).replace(/\\/g, "/");
+            const ipass = this.getPassport(ip);
+            if (!ipass.outlined && !ipass.rawRead) {
+                return {
+                    blocked: true,
+                    errorText: `Blocked: Blind insert on large file (${edit.path}). Run outline or compress focus:"..." first.`,
+                };
+            }
+            return { blocked: false };
+        }
+
+        if (edit.symbol && edit.path) {
+            try {
+                const p = path.resolve(this.projectRoot, edit.path).replace(/\\/g, "/");
+                const pass = this.getPassport(p);
+                if (!pass.focusedSymbols.has(edit.symbol) && !pass.rawRead) {
+                    return {
+                        blocked: true,
+                        errorText: `Blocked: Blind batch_edit on "${edit.symbol}" in ${edit.path}. Run compress focus:"${edit.symbol}" first.`,
+                    };
+                }
+            } catch { /* stat/path errors fall through as permissive */ }
+        }
+        return { blocked: false };
+    }
+
     public evaluate(tool: string, action: string, params: any): { blocked: boolean; errorText?: string; penalty?: number } {
         if (tool !== "nreki_code") return { blocked: false };
         if (!["read", "compress", "edit", "batch_edit"].includes(action)) return { blocked: false };
 
-        // LEY 3.5: Anti-Contrabando. batch_edit[1] = single edit disfrazado.
+        // LEY 3.5: Anti-Contrabando. Valida TODO edit del batch, no solo length===1.
+        // Fix round-5: antes, un batch de 2+ eludía el cortafuegos (1 real blind + 1 dummy).
         if (action === "batch_edit" && params.edits) {
-            if (params.edits.length === 1) {
-                const single = params.edits[0];
-                if (single.mode === "patch") {
-                    return { blocked: false };
-                }
-                if (single.mode === "insert_before" || single.mode === "insert_after") {
-                    // Small files: agent can see everything, skip enforcer for speed.
-                    // Large files: require outline/rawRead to prevent blind inserts.
-                    if (!single.path) return { blocked: false };
-                    try {
-                        const insertSize = fs.statSync(path.resolve(this.projectRoot, single.path)).size;
-                        if (insertSize < 50000) return { blocked: false };
-                    } catch { return { blocked: false }; }
-                    const ip = path.resolve(this.projectRoot, single.path).replace(/\\/g, "/");
-                    const ipass = this.getPassport(ip);
-                    if (!ipass.outlined && !ipass.rawRead) {
-                        return { blocked: true, errorText: `Blocked: Blind insert on large file. Run outline or compress first.` };
-                    }
-                    return { blocked: false };
-                }
-                if (single.symbol && single.path) {
-                    try {
-                        const p = path.resolve(this.projectRoot, single.path).replace(/\\/g, "/");
-                        const pass = this.getPassport(p);
-                        if (!pass.focusedSymbols.has(single.symbol) && !pass.rawRead) {
-                            return { blocked: true, errorText: `Blocked: Blind single batch_edit. Run compress focus:"${single.symbol}" first.` };
-                        }
-                    } catch {}
-                }
+            for (const edit of params.edits) {
+                const result = this.validateSingleBatchEdit(edit);
+                if (result.blocked) return result;
             }
             return { blocked: false };
         }
