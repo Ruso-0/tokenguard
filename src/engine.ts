@@ -135,6 +135,9 @@ export class NrekiEngine {
     /** Lazy-loaded topology cache (invalidated on file changes). */
     private cachedGraph: DependencyGraph | null = null;
 
+    /** Cryptographic tickets for in-flight internal edits (expected disk hash). */
+    private expectedInternalHashes = new Map<string, string>();
+
     constructor(config: EngineConfig = {}) {
         this.config = {
             dbPath: config.dbPath ?? ".nreki.db",
@@ -356,7 +359,11 @@ export class NrekiEngine {
 
     async getRepoMap(forceRefresh: boolean = false): Promise<{ map: RepoMap; text: string; fromCache: boolean }> {
         await this.initialize();
-        return getOrGenerateRepoMap(this.getProjectRoot(), this.parser, forceRefresh);
+        const result = await getOrGenerateRepoMap(this.getProjectRoot(), this.parser, forceRefresh);
+        if (result.map.graph && !this.cachedGraph && !forceRefresh) {
+            this.cachedGraph = result.map.graph;
+        }
+        return result;
     }
 
     /**
@@ -372,12 +379,33 @@ export class NrekiEngine {
             this.cachedGraph = map.graph;
             return map.graph;
         }
-        const emptyGraph: DependencyGraph = {
-            importedBy: new Map(),
-            inDegree: new Map(),
-            tiers: new Map(),
-        };
-        return emptyGraph;
+        return { importedBy: new Map(), inDegree: new Map(), tiers: new Map() };
+    }
+
+    // ─── Cryptographic ticket API (internal-edit detection) ────────
+
+    private normalizeInternalPath(filePath: string): string {
+        return path.resolve(this.getProjectRoot(), filePath).replace(/\\/g, "/");
+    }
+
+    public expectInternalEdit(filePath: string, content: string): void {
+        const posixPath = this.normalizeInternalPath(filePath);
+        this.expectedInternalHashes.set(posixPath, this.db.hashContent(content));
+        if (this.expectedInternalHashes.size > 100) {
+            const firstKey = this.expectedInternalHashes.keys().next().value;
+            if (firstKey !== undefined) {
+                this.expectedInternalHashes.delete(firstKey);
+            }
+        }
+    }
+
+    public cancelInternalEdit(filePath: string): void {
+        this.expectedInternalHashes.delete(this.normalizeInternalPath(filePath));
+    }
+
+    public invalidateCachedGraph(): void {
+        this.cachedGraph = null;
+        logger.info("Topology cache invalidated due to structural changes.");
     }
 
     /**
@@ -433,15 +461,37 @@ export class NrekiEngine {
         if (this.isIndexing) return;
         this.isIndexing = true;
         let madeChanges = false;
+        let externalTopologyChange = false;
 
         try {
             while (this.indexingQueue.size > 0) {
                 const [filePath] = this.indexingQueue;
                 this.indexingQueue.delete(filePath);
 
+                const posixPath = this.normalizeInternalPath(filePath);
+                const expectedHash = this.expectedInternalHashes.get(posixPath);
+
+                let diskContent: string | null = null;
+                try {
+                    diskContent = readSource(filePath);
+                } catch { /* file deleted or read error */ }
+
+                if (diskContent !== null) {
+                    const currentHash = this.db.hashContent(diskContent);
+                    if (expectedHash && expectedHash === currentHash) {
+                        this.expectedInternalHashes.delete(posixPath);
+                    } else {
+                        externalTopologyChange = true;
+                        this.expectedInternalHashes.delete(posixPath);
+                    }
+                } else {
+                    externalTopologyChange = true;
+                    this.expectedInternalHashes.delete(posixPath);
+                }
+
                 try {
                     const res = await this.indexFile(filePath);
-                    if (res) madeChanges = true;
+                    if (res || diskContent === null) madeChanges = true;
                 } catch (err) {
                     logger.error(
                         `Queue error for ${filePath}: ${(err as Error).message}`
@@ -450,11 +500,13 @@ export class NrekiEngine {
             }
         } finally {
             if (madeChanges) {
-                this.scheduleSave(); // Persist SQLite to disk after watcher changes
-                // Invalidate topology cache — edits may have changed import graph.
-                this.cachedGraph = null;
+                this.scheduleSave();
+                if (externalTopologyChange) {
+                    this.cachedGraph = null;
+                    logger.info("Topology cache invalidated by Watcher (external modification).");
+                }
             }
-            this.isIndexing = false; // Always reset to prevent deadlocks
+            this.isIndexing = false;
         }
     }
 

@@ -19,7 +19,7 @@ import { AstSandbox } from "./ast-sandbox.js";
 import { Embedder } from "./embedder.js";
 import { readSource } from "./utils/read-source.js";
 import { saveBackup, getBackupPath } from "./undo.js";
-import { extractSignature, cleanSignature } from "./repo-map.js";
+import { extractSignature, cleanSignature, extractImports, extractExports } from "./repo-map.js";
 import crypto from "crypto";
 
 // ─── Types ───────────────────────────────────────────────────────────
@@ -38,6 +38,7 @@ export interface EditResult {
     oldRawCode?: string;
     newRawCode?: string;
     newContent?: string;
+    topologyChanged?: boolean;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
@@ -376,6 +377,7 @@ export interface BatchEditResult {
     oldRawCodes?: Map<string, string>;
     newRawCodes?: Map<string, string>;
     vfs?: Map<string, string>;
+    topologyChanged?: boolean;
 }
 
 /**
@@ -417,11 +419,14 @@ export async function batchSemanticEdit(
         editsByFile.set(resolved, arr);
     }
 
-    // 2. Build VFS in RAM
+    // 2. Build VFS in RAM (capture original content once, share reference)
     const vfs = new Map<string, string>();
+    const originalVfs = new Map<string, string>();
     for (const filePath of editsByFile.keys()) {
         try {
-            vfs.set(filePath, readSource(filePath));
+            const code = readSource(filePath);
+            vfs.set(filePath, code);
+            originalVfs.set(filePath, code);
         } catch (err) {
             return {
                 success: false, editCount: edits.length, fileCount: editsByFile.size, files: [],
@@ -625,6 +630,30 @@ export async function batchSemanticEdit(
         }
     }
 
+    let topologyChanged = false;
+    for (const [filePath, virtualContent] of vfs.entries()) {
+        const oldContent = originalVfs.get(filePath);
+        if (!oldContent) continue;
+        const ext = path.extname(filePath).toLowerCase();
+        if (extractImports(oldContent, ext).join(",") !== extractImports(virtualContent, ext).join(",") ||
+            extractExports(oldContent, ext).join(",") !== extractExports(virtualContent, ext).join(",")) {
+            topologyChanged = true;
+            break;
+        }
+    }
+    if (!topologyChanged) {
+        for (const edit of edits) {
+            if (edit.mode && edit.mode !== "replace" && edit.mode !== "patch") continue;
+            const key = `${edit.path}::${edit.symbol}`;
+            const oldRaw = oldRawCodes.get(key);
+            const newRaw = newRawCodes.get(key);
+            if (oldRaw && newRaw && detectSignatureChange(oldRaw, newRaw)) {
+                topologyChanged = true;
+                break;
+            }
+        }
+    }
+
     return {
         success: true,
         editCount: edits.length,
@@ -633,6 +662,7 @@ export async function batchSemanticEdit(
         oldRawCodes,
         newRawCodes,
         vfs,
+        topologyChanged,
     };
 }
 
@@ -910,6 +940,22 @@ export async function semanticEdit(
     const newCodeTokens = Embedder.estimateTokens(newCode ?? spliceRes.newRawCode);
     const tokensAvoided = Math.max(0, fullFileTokens + symbolTokens - newCodeTokens);
 
+    const ext = path.extname(filePath).toLowerCase();
+    let topologyChanged = false;
+    if (rawCode && spliceRes.newRawCode && detectSignatureChange(rawCode, spliceRes.newRawCode)) {
+        topologyChanged = true;
+    }
+    if (!topologyChanged) {
+        const oldImports = extractImports(content, ext);
+        const newImports = extractImports(newContent, ext);
+        if (oldImports.join(",") !== newImports.join(",")) topologyChanged = true;
+        if (!topologyChanged) {
+            const oldExports = extractExports(content, ext);
+            const newExports = extractExports(newContent, ext);
+            if (oldExports.join(",") !== newExports.join(",")) topologyChanged = true;
+        }
+    }
+
     return {
         success: true,
         filePath,
@@ -921,5 +967,6 @@ export async function semanticEdit(
         oldRawCode: rawCode,
         newRawCode: spliceRes.newRawCode,
         newContent,
+        topologyChanged,
     };
 }

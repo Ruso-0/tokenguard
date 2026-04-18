@@ -119,6 +119,10 @@ export async function handleEdit(
             };
         }
 
+        if (result.newContent) {
+            engine.expectInternalEdit(resolvedPath, result.newContent);
+        }
+
         // ─── NREKI Layer 2: Cross-file semantic verification ─────────
         let kernelResult: NrekiInterceptResult | undefined;
         let ttrdFeedback = "";
@@ -180,10 +184,14 @@ export async function handleEdit(
                     `**Symbol:** ${symbol}\n` +
                     `**File:** ${file}\n\n`,
                 );
-                if (verifyResult.response) return verifyResult.response;
+                if (verifyResult.response) {
+                    engine.cancelInternalEdit(resolvedPath);
+                    return verifyResult.response;
+                }
                 ttrdFeedback = verifyResult.ttrdFeedback;
 
             } catch (kernelError) {
+                engine.cancelInternalEdit(resolvedPath);
                 logger.error(`Kernel error during edit verification: ${kernelError}`);
                 try { await deps.kernel.rollbackAll(); } catch (e) {
                     logger.error(`Rollback after kernel crash also failed: ${e}`);
@@ -204,6 +212,13 @@ export async function handleEdit(
             }
         }
         // ─── End NREKI Layer 2 ───────────────────────────────────────
+
+        {
+            const healerActed = useKernel && kernelResult?.healedFiles && kernelResult.healedFiles.length > 0;
+            if (result.topologyChanged || healerActed) {
+                engine.invalidateCachedGraph();
+            }
+        }
 
         engine.logUsage(
             "nreki_code:edit",
@@ -395,7 +410,14 @@ export async function handleBatchEdit(
             };
         }
 
+        if (result.vfs) {
+            for (const [vfsPath, virtualContent] of result.vfs.entries()) {
+                engine.expectInternalEdit(vfsPath, virtualContent);
+            }
+        }
+
         // ─── NREKI Layer 2: Cross-file semantic verification ─────────
+        let batchKernelResult: NrekiInterceptResult | undefined;
         let batchTtrdFeedback = "";
         if (useKernel && deps.kernel) {
             try {
@@ -436,21 +458,33 @@ export async function handleBatchEdit(
                 }
 
                 if (kernelEdits.length > 0) {
-                    const kernelResult = await deps.kernel.interceptAtomicBatch(kernelEdits, batchDependents, params.compute_diff === true);
+                    batchKernelResult = await deps.kernel.interceptAtomicBatch(kernelEdits, batchDependents, params.compute_diff === true);
                     const committedFiles = Array.from(result.vfs!.keys());
 
                     const verifyResult = await processKernelResult(
-                        kernelResult,
+                        batchKernelResult,
                         committedFiles,
                         deps,
                         `## Batch Edit: BLOCKED BY NREKI (Layer 2)\n\n` +
                         `**Edits attempted:** ${result.editCount}\n` +
                         `**Files involved:** ${result.fileCount}\n\n`,
                     );
-                    if (verifyResult.response) return verifyResult.response;
+                    if (verifyResult.response) {
+                        if (result.vfs) {
+                            for (const vfsPath of result.vfs.keys()) {
+                                engine.cancelInternalEdit(vfsPath);
+                            }
+                        }
+                        return verifyResult.response;
+                    }
                     batchTtrdFeedback = verifyResult.ttrdFeedback;
                 }
             } catch (kernelError) {
+                if (result.vfs) {
+                    for (const vfsPath of result.vfs.keys()) {
+                        engine.cancelInternalEdit(vfsPath);
+                    }
+                }
                 logger.error(`Kernel error during batch verification: ${kernelError}`);
                 try { await deps.kernel.rollbackAll(); } catch (e) {
                     logger.error(`Rollback after kernel crash also failed: ${e}`);
@@ -472,6 +506,13 @@ export async function handleBatchEdit(
             }
         }
         // ─── End NREKI Layer 2 ───────────────────────────────────────
+
+        {
+            const healerActed = useKernel && batchKernelResult?.healedFiles && batchKernelResult.healedFiles.length > 0;
+            if (result.topologyChanged || healerActed) {
+                engine.invalidateCachedGraph();
+            }
+        }
 
         let blastRadiusWarning = "";
         if (result.oldRawCodes && result.newRawCodes) {

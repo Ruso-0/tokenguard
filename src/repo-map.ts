@@ -166,7 +166,7 @@ export function cleanSignature(rawSig: string): string {
 }
 
 /** Extract exported symbol names from file content using regex. */
-function extractExports(content: string, ext: string): string[] {
+export function extractExports(content: string, ext: string): string[] {
     const exports = new Set<string>();
 
     if ([".ts", ".tsx", ".js", ".jsx"].includes(ext)) {
@@ -204,7 +204,7 @@ function extractExports(content: string, ext: string): string[] {
 }
 
 /** Extract import module names from file content. */
-function extractImports(content: string, ext: string): string[] {
+export function extractImports(content: string, ext: string): string[] {
     const imports = new Set<string>();
 
     if ([".ts", ".tsx", ".js", ".jsx"].includes(ext)) {
@@ -217,6 +217,10 @@ function extractImports(content: string, ext: string): string[] {
         while ((m = reqRe.exec(content)) !== null) {
             imports.add(m[1]);
         }
+        const dynRe = /import\s*\(\s*["']([^"']+)["']\s*\)/g;
+        while ((m = dynRe.exec(content)) !== null) imports.add(m[1]);
+        const sideRe = /^\s*import\s+["']([^"']+)["']/gm;
+        while ((m = sideRe.exec(content)) !== null) imports.add(m[1]);
     } else if (ext === ".py") {
         const pyFromRe = /^from\s+(\S+)\s+import/gm;
         let m;

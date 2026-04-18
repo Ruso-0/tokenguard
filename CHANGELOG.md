@@ -2,6 +2,36 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## [10.7.1] - 2026-04-18
+
+### Fixed
+- **Critical cache miss bug in edit validation warm path**: `engine.cachedGraph` was never populated during warmup (`getRepoMap` did not set it, only `getDependencyGraph` did). Additionally, the FSWatcher invalidated the cache indiscriminately after any internal edit, forcing a full repo reparse (~70s on VSCode-scale codebases, 5,584 files).
+
+### Added
+- Cryptographic edit tickets (SHA-256) in `NrekiEngine` to distinguish internal edits (NREKI writes) from external changes (human, git, linter, auto-healer). Only external changes invalidate the topology cache.
+- `topologyChanged` detection in `semanticEdit` and `batchSemanticEdit` using AST signature change + import/export diff. Selective cache invalidation only when the edit actually changes topology.
+- Dynamic imports (`import("...")`) and side-effect imports (`import "module";`) now detected by `extractImports`.
+- OOM guard on ticket map (max 100 entries, FIFO eviction).
+- `engine.invalidateCachedGraph()` public method for explicit invalidation.
+- 6 new tests in `tests/cache-tickets.test.ts` covering cache persistence, invalidation on import changes, ticket rollback cleanup, external modification detection, OOM guard, and SQLite index freshness.
+
+### Changed
+- `engine.getRepoMap()` now populates `cachedGraph` as side effect on warmup (fix for cold-boot cache miss).
+- `processQueue` always calls `indexFile` to keep SQLite/BM25 search index synchronized, even for internal edits.
+
+### Performance
+Warm edits on VSCode-scale codebase (5,584 files):
+- Before: ~39-74s per edit (full repo reparse on every edit)
+- After: ~17ms median for edits without import changes (2,254x improvement)
+- Edits that change imports/exports trigger legitimate regeneration (~56-70s, one-time)
+
+Benchmark methodology: 5 edits on microsoft/vscode with cold warmup. Results reproducible via the instrumented benchmark wrapper. See `D:\bench\results\nreki-v10.7.1-fix-benchmark-2026-04-18.json`.
+
+### Tests
+- 789 tests passing (783 pre-existing + 6 new cache-tickets tests)
+- Zero-any discipline preserved
+- No regressions
+
 ## 10.7.0 (2026-04-17) — The NREKI Way
 
 NREKI stops acting like a passive guard and starts acting like an immune system. The LLM is now surrounded by parasitic signals that cost nothing per call but continuously shape its behavior toward discipline. Four features ship in one minor bump.
