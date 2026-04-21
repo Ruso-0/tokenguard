@@ -55,6 +55,10 @@ const EXT_TO_LANGUAGE: Record<string, string> = {
     ".tsx": "typescript",
     ".js": "javascript",
     ".jsx": "javascript",
+    ".mjs": "javascript",  // v10.12.0 — align with parser SUPPORTED_EXTENSIONS
+    ".cjs": "javascript",  // v10.12.0
+    ".mts": "typescript",  // v10.12.0
+    ".cts": "typescript",  // v10.12.0
     ".py": "python",
     ".go": "go",
     ".css": "css",
