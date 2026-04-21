@@ -59,3 +59,6 @@ prisma-test/
 .tokenguard/
 # Local Claude Code settings (per-machine)
 .claude/settings.local.json
+
+# Claude Code local settings (per-developer)
+.claude/settings.local.json
