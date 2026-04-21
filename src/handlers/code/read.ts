@@ -264,10 +264,24 @@ export async function handleCompress(
                     }],
                 };
             } else {
+                // C4: Honest diagnosis — distinguish unsupported language from genuine miss.
+                const ext = path.extname(resolvedPath).toLowerCase();
+                const parser = engine.getParser();
+
+                if (!parser.isSupported(ext)) {
+                    return {
+                        content: [{
+                            type: "text" as const,
+                            text: `TFC-Pro failed: Language AST not supported for '${ext}'. Raw read is permitted for this file type via nreki_code action:"read".`
+                        }],
+                        isError: true,
+                    };
+                }
+
                 return {
                     content: [{
                         type: "text" as const,
-                        text: `TFC-Pro failed: "${focus}" was NOT FOUND or is TOO LARGE (Density Shield). Verify name via outline, or focus on a smaller inner method.`
+                        text: `TFC-Pro failed: "${focus}" was NOT FOUND or is TOO LARGE (Density Shield). Verify exact name via outline, or focus on a smaller inner method.`
                     }],
                     isError: true,
                 };
