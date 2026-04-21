@@ -189,8 +189,21 @@ export class CognitiveEnforcer {
             return { blocked: false, penalty: 0.3 };
         }
 
-        // LEY 1: Raw read BLOQUEADO SIEMPRE. Sin excepciones post-outline.
+        // LEY 1: Raw read BLOQUEADO SIEMPRE (para lenguajes con AST).
+        // LEY 0.5 (v10.11.1): Exención quirúrgica para prosa/configs sin AST.
         if (action === "read") {
+            const ext = path.extname(absPath).toLowerCase();
+            const SUPPORTED_AST = new Set([
+                ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts",
+                ".py", ".go",
+                ".css", ".json", ".html"
+            ]);
+
+            if (!SUPPORTED_AST.has(ext)) {
+                // No hay AST (MD/YAML/TOML/SQL/Dockerfile/etc.). Forzar compress
+                // causaría deadlock ineludible. TokenMonitor es guillotina secundaria.
+                return { blocked: false };
+            }
             return { blocked: true, errorText: `Blocked: >100L file. Raw read destroys context. Use compress focus:"<symbol>".` };
         }
 
