@@ -60,3 +60,6 @@ prisma-test/
 
 # Claude Code local settings (per-developer)
 .claude/settings.local.json
+
+# Claude Code scheduled task locks
+.claude/scheduled_tasks.lock
