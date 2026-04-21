@@ -207,7 +207,20 @@ export async function attemptLspAutoHealing(
 
             const safeActions = actions.filter((a) => {
                 const title = (a.title || "").toLowerCase();
+
+                // Ice Wall: reject destructive actions
                 if (title.includes("remove") || title.includes("delete")) return false;
+
+                // Anti-Sweep Shield: reject suppression actions disguised as fixes.
+                // basedpyright offers "Add `# pyright: ignore[...]`" which would
+                // silence errors rather than fix them. Same for noqa, disable,
+                // suppress patterns across other linters.
+                if (title.includes("ignore") || title.includes("disable") ||
+                    title.includes("suppress") || title.includes("noqa")) {
+                    return false;
+                }
+
+                // Accept structural additions (real imports)
                 return title.includes("import") || title.includes("add ");
             });
             if (safeActions.length === 0) continue;

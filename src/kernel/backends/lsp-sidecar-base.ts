@@ -211,11 +211,23 @@ export abstract class LspSidecarBase {
                 }
                 const finalEnv = this.spawnEnv ? { ...safeEnv, ...this.spawnEnv } : safeEnv;
 
+                // Windows: npm installs LSP binaries as .cmd shims, and Node
+                // 18+ refuses direct .cmd spawn under CVE-2024-27980. shell:true
+                // routes through cmd.exe which resolves PATHEXT. BUT shell:true
+                // concatenates args without escaping, so absolute paths
+                // containing spaces (e.g. `C:\Program Files\nodejs\node.exe`)
+                // would break. Enable shell only when command[0] is a bare
+                // binary name — that's the exact case needing PATH/.cmd
+                // resolution. Absolute paths go direct (no shell needed).
+                const needsShell =
+                    process.platform === "win32" && !/[\\/]/.test(this.command[0]);
+
                 this.proc = spawn(this.command[0], this.command.slice(1), {
                     cwd: this.realProjectRoot,
                     env: finalEnv,
                     stdio: ["pipe", "pipe", "pipe"],
                     detached: process.platform !== "win32",
+                    shell: needsShell,
                 });
 
                 // Attach anti-zombie listeners now that proc exists

@@ -2,6 +2,70 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## v10.11.0 — Python Auto-Healing via basedpyright
+
+### Added
+- **Python auto-healing now works** by switching the LSP engine to 
+  basedpyright (fork of pyright that exposes auto-import quickfix 
+  codeActions via standard LSP). When a user writes 
+  `result = datetime.now()` without importing datetime, NREKI now 
+  applies `from datetime import datetime` atomically in RAM before 
+  the edit commits. Matches TypeScript auto-healing experience 
+  ("feels like TS" — resolving reported user feedback).
+- **Graceful fallback to pyright**: If basedpyright is not installed, 
+  the sidecar falls back to pyright-langserver (validation only, no 
+  healing) and emits a warning with install instructions. Zero 
+  regression for users who have only pyright.
+- **Anti-Sweep Shield in LSP healer**: The codeAction filter now 
+  explicitly rejects suppression-style actions (`# pyright: ignore`, 
+  `# noqa`, disable/suppress patterns) that would silence errors 
+  rather than fix them. Previously "Add `# pyright: ignore[...]`" 
+  would pass the filter because its title contains "add " — critical 
+  architectural risk closed.
+
+### Changed
+- `python-sidecar.ts` now detects basedpyright availability at boot 
+  (synchronous check with 3s timeout) and chooses the appropriate 
+  LSP server.
+- Log output now shows which LSP engine was activated: 
+  `"Python project detected. basedpyright-langserver sidecar registered."`
+- Detection of basedpyright now passes a single-string command 
+  (`"basedpyright --version"`) with `shell: true` to `spawnSync`. 
+  This resolves the Windows `.cmd` shim (npm installs basedpyright 
+  as `basedpyright.cmd`, and Node 18+ blocks direct `.cmd` spawn 
+  under CVE-2024-27980) while avoiding the `DEP0190` deprecation 
+  warning that fires when combining `shell: true` with an args 
+  array. Without this, Windows users (majority of NREKI user base) 
+  would silently fall back to pyright without auto-healing.
+- `LspSidecarBase.boot()` now conditionally enables `shell: true` 
+  on Windows when `command[0]` is a bare binary name (no path 
+  separator). Required because the langserver spawn — not just 
+  detection — hits the same CVE-2024-27980 block when launching 
+  `.cmd` shims. Scoped to bare names so absolute paths with spaces 
+  (e.g. `C:\Program Files\nodejs\node.exe` in mock sidecars) still 
+  spawn directly without shell-concat breakage. Empirical verification 
+  via `scripts/verify-basedpyright-spawn.ts` confirms 
+  basedpyright-langserver now boots successfully on Windows (was 
+  failing with ENOENT pre-fix).
+
+### Tests
+- New test: `Anti-Sweep shield rejects suppression CodeActions 
+  (ignore/noqa)` in tests/healer-atomic.test.ts. Total: 797 pass.
+
+### Installation
+For Python auto-healing, install basedpyright globally:
+
+    npm install -g basedpyright
+
+If already installed with pyright and conflicts occur:
+
+    npm install -g basedpyright --force
+
+### Version numbering note
+Version 10.9.0 was reserved earlier for this release but skipped 
+during the v10.10.0 (multi-language parser) sprint. Jumping directly 
+to 10.11.0 to keep monotonic versioning.
+
 ## v10.10.0 — Multi-language parser extensions + Python namespace inference
 
 ### Added

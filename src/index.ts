@@ -351,8 +351,9 @@ if (kernel) {
     if (hasPyProject) {
         try {
             const { PythonLspSidecar } = await import("./kernel/backends/python-sidecar.js");
-            kernel.registerSidecar(".py", new PythonLspSidecar(cwd));
-            logger.info("Python project detected. pyright sidecar registered.");
+            const pySidecar = new PythonLspSidecar(cwd);
+            kernel.registerSidecar(".py", pySidecar);
+            logger.info(`Python project detected. ${pySidecar.command[0]} sidecar registered.`);
         } catch (err) {
             logger.error(`Failed to load Python sidecar: ${(err as Error).message}`);
         }

@@ -276,4 +276,32 @@ describe("attemptLspAutoHealing — atomic multi-TextEdit (Patch 5 / v10.5.9)", 
         expect(result.healed).toBe(false);
         expect(files.get("x.ts")!.content).toBe("keep\n"); // untouched
     });
+
+    it("Anti-Sweep shield rejects suppression CodeActions (ignore/noqa)", async () => {
+        const files = new Map<string, StubFileState>([
+            ["x.py", { content: "import os\n", savepointCount: 0 }],
+        ]);
+        const codeActions: LspCodeAction[] = [{
+            title: "Add `# pyright: ignore[reportMissingImports]`",
+            edits: [{
+                filePath: "x.py",
+                range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+                newText: "# pyright: ignore[reportMissingImports]\n",
+            }],
+        }];
+        const errors: NrekiStructuredError[] = [{
+            file: "x.py", line: 1, column: 1, code: "test", message: "missing",
+        }];
+        const stub = makeStubContext({
+            files, codeActions,
+            validate: () => [],
+        });
+
+        const result = await attemptLspAutoHealing(errors, new Set(), stub.ctx);
+
+        // The only action was a suppression — filter rejects it,
+        // healer returns not healed, file untouched.
+        expect(result.healed).toBe(false);
+        expect(files.get("x.py")!.content).toBe("import os\n");
+    });
 });
