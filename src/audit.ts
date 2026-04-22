@@ -16,7 +16,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { SpectralMath, type SparseEdge } from "./kernel/spectral-topology.js";
+import { SpectralMath, SpectralTopologist, type SparseEdge, type TopologicalEdge } from "./kernel/spectral-topology.js";
 import { computePageRank, type DependencyGraph } from "./repo-map.js";
 import type { NrekiKernel } from "./kernel/nreki-kernel.js";
 import type { ChronosMemory } from "./chronos-memory.js";
@@ -207,26 +207,37 @@ export async function computeAudit(
         }
     }
 
+    // Dual Laplacian: L_comb for historical Spectral Integrity (29k users'
+    // AHI stability); L_sym for new Eigengap + vonNeumann (require [0,2]
+    // eigenvalue range and density-normalized gap).
+    // Cost: ~2x Lanczos per audit (explicit command only, not hot path).
+    const spectralComb = N > 2 && sparseEdges.length > 0
+        ? SpectralMath.analyzeTopology(N, sparseEdges, false)
+        : undefined;
+    const spectralSym = N > 2 && sparseEdges.length > 0
+        ? SpectralMath.analyzeTopology(N, sparseEdges, true)
+        : undefined;
+
     let spectralScore = 0.5;
+    let eigengapScore = 0.5;
+    let entropyScore = 0.5;
+    let couplingRatio = 0;
     let fiedlerValue = 0;
     let avgDegree = 0;
-    let couplingRatio = 0;
     let topologyAvailable = false;
+    let eigengapAvailable = false;
+    let entropyAvailable = false;
 
-    if (N > 2 && sparseEdges.length > 0) {
-        const spectral = SpectralMath.analyzeTopology(N, sparseEdges);
+    if (spectralComb?.fiedler !== undefined) {
+        topologyAvailable = true;
+        fiedlerValue = spectralComb.fiedler;
+        avgDegree = N > 0 ? (2 * sparseEdges.length) / N : 0;
+        couplingRatio = avgDegree > 0 ? fiedlerValue / avgDegree : 0;
 
-        if (spectral.fiedler !== undefined) {
-            topologyAvailable = true;
-            fiedlerValue = spectral.fiedler;
-            avgDegree = (2 * sparseEdges.length) / N;
-            couplingRatio = avgDegree > 0 ? fiedlerValue / avgDegree : 0;
-
-            if (fiedlerValue === 0) {
-                spectralScore = 0.1;
-            } else {
-                spectralScore = bucketScoreInverse(couplingRatio, [0.05, 0.15, 0.50]);
-            }
+        if (fiedlerValue === 0) {
+            spectralScore = 0.1;
+        } else {
+            spectralScore = bucketScoreInverse(couplingRatio, [0.05, 0.15, 0.50]);
         }
     } else if (N <= 2) {
         // Too small to measure — neutral
@@ -234,15 +245,73 @@ export async function computeAudit(
         spectralScore = 0.7;
     }
 
+    // New spectral components use L_sym (normalized=true).
+    if (spectralSym?.fiedler !== undefined && spectralSym.eigenvalues) {
+        const density = Math.max(sparseEdges.length / (N * (N - 1)), 1e-9);
+
+        // Eigengap Integrity: requires lambda3 (non-degenerate variant).
+        if (spectralSym.lambda3 !== undefined) {
+            eigengapAvailable = true;
+            const gap = spectralSym.lambda3 - spectralSym.fiedler;
+            const normalizedGap = Math.sign(gap) * Math.log1p(Math.abs(gap / density));
+
+            // TENTATIVE thresholds [5.0, 2.0, 0.5]: heuristic.
+            // Recalibrate via CDF on Django JSONL in v10.14.x.
+            eigengapScore = bucketScore(normalizedGap, [5.0, 2.0, 0.5]);
+        }
+
+        // Spectral Entropy: works with any number of positive eigenvalues.
+        const posEvals = spectralSym.eigenvalues.filter(e => e > 1e-12);
+        if (posEvals.length > 1) {
+            entropyAvailable = true;
+            const sumEvals = posEvals.reduce((x, y) => x + y, 0);
+            let vnEntropy = 0;
+            for (const v of posEvals) {
+                const p = v / sumEvals;
+                if (p > 0) vnEntropy -= p * Math.log(p);
+            }
+            const maxEntropy = Math.log(posEvals.length);
+            const normalizedEntropy = maxEntropy > 0 ? vnEntropy / maxEntropy : 0;
+
+            // TENTATIVE thresholds [0.3, 0.6, 0.8]: heuristic.
+            // Lower normalized entropy = concentration = less chaos.
+            entropyScore = bucketScoreInverse(normalizedEntropy, [0.3, 0.6, 0.8]);
+        }
+    }
+
     components.push({
         name: "Spectral Integrity",
         score: spectralScore,
-        weight: topologyAvailable ? 0.25 : 0.0,
+        weight: topologyAvailable ? 0.15 : 0.0,
         label: topologyAvailable ? scoreToLabel(spectralScore) : "N/A (graph skipped for mega-repo)",
         detail: topologyAvailable
-            ? `λ₂ = ${fiedlerValue.toFixed(4)}, avgDegree = ${avgDegree.toFixed(2)}, coupling ratio = ${couplingRatio.toFixed(4)} (${N} files, ${sparseEdges.length} edges)`
+            ? `Coupling Ratio: ${couplingRatio.toFixed(3)} (λ₂: ${fiedlerValue.toFixed(4)})`
             : `Repository too large (N>25000), spectral analysis skipped`,
         available: topologyAvailable,
+    });
+
+    // New component: Eigengap Integrity (deep mode only)
+    components.push({
+        name: "Eigengap Integrity",
+        score: eigengapScore,
+        weight: isDeep && eigengapAvailable ? 0.05 : 0.0,
+        label: eigengapAvailable ? scoreToLabel(eigengapScore) : "N/A",
+        detail: eigengapAvailable
+            ? `Normalized gap indicates cluster partition risk`
+            : `Insufficient spectral dimensionality (< 2 eigenvalues)`,
+        available: eigengapAvailable && isDeep,
+    });
+
+    // New component: Spectral Entropy (deep mode only)
+    components.push({
+        name: "Spectral Entropy",
+        score: entropyScore,
+        weight: isDeep && entropyAvailable ? 0.05 : 0.0,
+        label: entropyAvailable ? scoreToLabel(entropyScore) : "N/A",
+        detail: entropyAvailable
+            ? `Von Neumann entropy measures architectural information distribution`
+            : `Insufficient positive eigenvalues for entropy calculation`,
+        available: entropyAvailable && isDeep,
     });
 
     if (fiedlerValue === 0 && N > 2 && sparseEdges.length > 0) {
@@ -317,6 +386,68 @@ export async function computeAudit(
                 });
             }
         }
+    }
+
+    // ═════════════════════════════════════════════════════════
+    // Markov Blanket differentiated issue localization (v10.13.0)
+    //
+    // Eigengap bajo → localize structural bridge via 1-hop Ego-Graph
+    // around top-PageRank nodes.
+    // Entropy bajo → global chaos, no local blanket (guide to Repo Map).
+    // Hub super-nodes → deferred to v10.14+ (asymmetric filter needed).
+    // ═════════════════════════════════════════════════════════
+
+    if (eigengapAvailable && eigengapScore < 0.4) {
+        // Build TopologicalEdge[] from graph.importedBy for blanket computation.
+        const blanketEdges: TopologicalEdge[] = [];
+        for (const [tgt, consumers] of graph.importedBy.entries()) {
+            for (const consumer of consumers) {
+                blanketEdges.push({
+                    sourceId: consumer + "::*",
+                    targetId: tgt + "::*",
+                    sourceFile: consumer,
+                    targetFile: tgt,
+                    weight: 1.0,
+                });
+            }
+        }
+
+        const blanketFiles: string[] = [];
+        for (const [file] of sortedPR.slice(0, 3)) {
+            try {
+                const blanket = SpectralTopologist.getMarkovBlanket(file, blanketEdges);
+                if (blanket && blanket.size > 0 && blanket.size < allFiles.length / 2) {
+                    blanketFiles.push(`${file} (blanket: ${blanket.size} files)`);
+                }
+            } catch {
+                // Skip if blanket computation fails for this file
+            }
+        }
+
+        if (blanketFiles.length > 0) {
+            issues.push({
+                file: "project-wide",
+                severity: "high",
+                type: "eigengap_collapse",
+                detail: `Eigengap critically low (${eigengapScore.toFixed(2)}). ` +
+                    `Structural bridge risk around high-coupling nodes:\n` +
+                    blanketFiles.map(f => `  - ${f}`).join("\n"),
+                action: "Review these nodes and extract interfaces between emerging clusters.",
+                impactOnScore: 0,
+            });
+        }
+    }
+
+    if (entropyAvailable && entropyScore < 0.4) {
+        issues.push({
+            file: "project-wide",
+            severity: "medium",
+            type: "spectral_chaos",
+            detail: `Spectral entropy indicates architectural information disorder (score: ${entropyScore.toFixed(2)}). ` +
+                `Global issue: Markov Blanket localization not applicable. Review full Repo Map for orphaned modules.`,
+            action: "Consolidate orphaned micro-services or isolated file clusters.",
+            impactOnScore: 0,
+        });
     }
 
     // ═════════════════════════════════════════════════════════
