@@ -254,23 +254,20 @@ export class CognitiveEnforcer {
                     changed = true;
                 } else if (action === "compress" && params.focus && params.path) {
                     const p = path.resolve(this.projectRoot, params.path).replace(/\\/g, "/");
-                    this.getPassport(p).focusedSymbols.add(params.focus);
+                    // v10.13.1: parse CSV — "A, B, C" registra los tres símbolos separados.
+                    for (const raw of params.focus.split(",")) {
+                        const clean = raw.trim();
+                        if (clean) this.getPassport(p).focusedSymbols.add(clean);
+                    }
                     this.getPassport(p).outlined = true;
                     changed = true;
                 } else if (action === "edit" && params.symbol && params.path) {
-                    const p = path.resolve(this.projectRoot, params.path).replace(/\\/g, "/");
-                    this.getPassport(p).focusedSymbols.delete(params.symbol);
-                    this.getPassport(p).rawRead = false;
-                    changed = true;
+                    // v10.13.1: passport persiste post-edit. El LLM tiene el símbolo fresco
+                    // en su ventana de contexto tras haberlo escrito. Forzar recompress
+                    // generaba deadlocks en refactors multi-paso. Capas AST + TS-RAM +
+                    // Cache Tickets cubren correctitud e invalidación por edits externos.
                 } else if (action === "batch_edit" && params.edits) {
-                    for (const edit of params.edits) {
-                        if (edit.path && edit.symbol) {
-                            const p = path.resolve(this.projectRoot, edit.path).replace(/\\/g, "/");
-                            this.getPassport(p).focusedSymbols.delete(edit.symbol);
-                            this.getPassport(p).rawRead = false;
-                            changed = true;
-                        }
-                    }
+                    // v10.13.1: idem — ver F2 arriba.
                 }
             }
         } catch {}

@@ -2,6 +2,28 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## [10.13.1] — 2026-04-22
+
+### Enforcer Hotfix: CSV Parse + Passport Persistence
+
+Hotfix addressing two deadlock sources in the Cognitive Enforcer identified during the v10.13.0 sprint retrospective. Cross-audit methodology: Claude + Pipipi Furia.
+
+### Fixed
+
+- **F1 — CSV parse in `compress focus`**: `focus:"A, B, C"` was being stored as the literal string `"A, B, C"` in the passport's `focusedSymbols` Set, causing subsequent `.has("A")` lookups to fail. Split on comma and register each symbol individually. Affects only multi-symbol compress calls.
+- **F2 — Passport persists post-edit**: removed aggressive decay (`focusedSymbols.delete` + `rawRead = false`) after successful `edit`/`batch_edit`. The agent retains in-context knowledge of symbols it just mutated; Layer 1 (AST sandbox), Layer 2 (TypeScript in RAM), and Cache Tickets already cover correctness and external-edit invalidation. Eliminates the recompress-after-every-edit loop that forced node-script bypasses during the v10.13.0 refactor sprint.
+
+### Notes
+
+- Both fixes are strictly more permissive than prior behavior. No regression surface for existing users.
+- Release test suite: 827/827 passing.
+- An additional hotfix (F3 — `win32` path case-insensitive comparison) was applied to `.claude/hooks/nreki-enforcer.mjs` in the working tree. That file is currently outside git tracking; a follow-up in v10.14.x will address tracking of `.claude/` enforcer assets.
+
+### Acknowledgments
+
+Cross-audit triangular: Claude sourced code-level diagnostics from the v10.13.0 sprint trace; Pipipi Furia confirmed root causes against the enforcer source and vetoed `mtime`-based invalidation in favor of passport persistence resting on the existing Cache Tickets infrastructure; Antigravity executed the protocol with hardened rollback discipline.
+
+
 ## [10.13.0] — 2026-04-22
 
 ### AHI Engine: Lanczos-PRO Transplant + Empirical Calibration
