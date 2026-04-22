@@ -51,22 +51,29 @@ export interface AuditReport {
     filesAnalyzed: number;
     coreFiles: string[];
     timestamp: string;
+    engine_version: string;
 }
 
 // ─── Score Helpers ──────────────────────────────────────────────────
 
 function bucketScore(value: number, thresholds: [number, number, number]): number {
-    if (value >= thresholds[0]) return 1.0;
-    if (value >= thresholds[1]) return 0.7;
-    if (value >= thresholds[2]) return 0.4;
-    return 0.1;
+    const [t0, t1, t2] = thresholds;
+    // thresholds descending: t0 > t1 > t2 (e.g., [0.90, 0.70, 0.40])
+    if (value >= t0) return 1.0;
+    if (value >= t1) return 0.7 + 0.3 * ((value - t1) / (t0 - t1));
+    if (value >= t2) return 0.4 + 0.3 * ((value - t2) / (t1 - t2));
+    // Below t2: linear decay toward 0.1 clamp
+    return Math.max(0.1, 0.4 - 0.3 * ((t2 - value) / (t1 - t2)));
 }
 
 function bucketScoreInverse(value: number, thresholds: [number, number, number]): number {
-    if (value <= thresholds[0]) return 1.0;
-    if (value <= thresholds[1]) return 0.7;
-    if (value <= thresholds[2]) return 0.4;
-    return 0.1;
+    const [t0, t1, t2] = thresholds;
+    // thresholds ascending: t0 < t1 < t2 (e.g., [0.05, 0.15, 0.50])
+    if (value <= t0) return 1.0;
+    if (value <= t1) return 1.0 - 0.3 * ((value - t0) / (t1 - t0));
+    if (value <= t2) return 0.7 - 0.3 * ((value - t1) / (t2 - t1));
+    // Above t2: linear decay toward 0.1 clamp
+    return Math.max(0.1, 0.4 - 0.3 * ((value - t2) / (t2 - t1)));
 }
 
 function scoreToLabel(score: number): string {
@@ -204,39 +211,38 @@ export async function computeAudit(
     let fiedlerValue = 0;
     let avgDegree = 0;
     let couplingRatio = 0;
+    let topologyAvailable = false;
 
     if (N > 2 && sparseEdges.length > 0) {
         const spectral = SpectralMath.analyzeTopology(N, sparseEdges);
-        fiedlerValue = spectral.fiedler ?? 0;
 
-        avgDegree = (2 * sparseEdges.length) / N;
-        couplingRatio = avgDegree > 0 ? fiedlerValue / avgDegree : 0;
+        if (spectral.fiedler !== undefined) {
+            topologyAvailable = true;
+            fiedlerValue = spectral.fiedler;
+            avgDegree = (2 * sparseEdges.length) / N;
+            couplingRatio = avgDegree > 0 ? fiedlerValue / avgDegree : 0;
 
-        if (fiedlerValue === 0) {
-            // Disconnected islands, dead code, or total fragmentation
-            spectralScore = 0.1;
-        } else if (couplingRatio >= 0.5) {
-            // Toxic monolith: everything imports everything. Spaghetti.
-            spectralScore = 0.2;
-        } else if (couplingRatio >= 0.15) {
-            // Acceptable: moderate coupling
-            spectralScore = 0.6;
-        } else {
-            // Ideal zone: high internal cohesion, low global coupling (healthy modularity)
-            spectralScore = 1.0;
+            if (fiedlerValue === 0) {
+                spectralScore = 0.1;
+            } else {
+                spectralScore = bucketScoreInverse(couplingRatio, [0.05, 0.15, 0.50]);
+            }
         }
     } else if (N <= 2) {
         // Too small to measure — neutral
+        topologyAvailable = true;
         spectralScore = 0.7;
     }
 
     components.push({
         name: "Spectral Integrity",
         score: spectralScore,
-        weight: 0.25,
-        label: scoreToLabel(spectralScore),
-        detail: `λ₂ = ${fiedlerValue.toFixed(4)}, avgDegree = ${avgDegree.toFixed(2)}, coupling ratio = ${couplingRatio.toFixed(4)} (${N} files, ${sparseEdges.length} edges)`,
-        available: true,
+        weight: topologyAvailable ? 0.25 : 0.0,
+        label: topologyAvailable ? scoreToLabel(spectralScore) : "N/A (graph skipped for mega-repo)",
+        detail: topologyAvailable
+            ? `λ₂ = ${fiedlerValue.toFixed(4)}, avgDegree = ${avgDegree.toFixed(2)}, coupling ratio = ${couplingRatio.toFixed(4)} (${N} files, ${sparseEdges.length} edges)`
+            : `Repository too large (N>25000), spectral analysis skipped`,
+        available: topologyAvailable,
     });
 
     if (fiedlerValue === 0 && N > 2 && sparseEdges.length > 0) {
@@ -398,10 +404,23 @@ export async function computeAudit(
 
     let stabilityScore = 0.7;
     let stabilityAvailable = false;
+    let sessionCount = 0;
+    const fragileCore: Array<{ file: string; cfi: number }> = [];
 
-    if (chronos) {
+    // B.4 Fix: Chronos Honeymoon check.
+    // Require minimum 5 sessions of history before trusting Stability metric.
+    try {
+        const dbPath = path.join(projectRoot, ".nreki", "chronos-history.json");
+        if (fs.existsSync(dbPath)) {
+            const data = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
+            sessionCount = data.currentSessionId || 0;
+        }
+    } catch {
+        // Chronos history unavailable, stability stays unavailable
+    }
+
+    if (chronos && sessionCount >= 5) {
         stabilityAvailable = true;
-        const fragileCore: Array<{ file: string; cfi: number }> = [];
 
         for (const coreFile of coreFiles) {
             const cfi = chronos.getFileCFI(coreFile);
@@ -430,12 +449,12 @@ export async function computeAudit(
     components.push({
         name: "Stability",
         score: stabilityScore,
-        weight: isDeep ? 0.10 : 0.0,
-        label: stabilityAvailable ? scoreToLabel(stabilityScore) : "N/A (no session history)",
+        weight: isDeep && stabilityAvailable ? 0.10 : 0.0,
+        label: stabilityAvailable ? scoreToLabel(stabilityScore) : "N/A (insufficient history)",
         detail: stabilityAvailable
-            ? `Chronos tracking active. ${coreFiles.length} core files monitored.`
-            : "No session history yet. Stability improves with usage.",
-        available: stabilityAvailable,
+            ? `Chronos sessions: ${sessionCount}, fragile core files: ${fragileCore.length}`
+            : `Requires 5+ sessions. Current: ${sessionCount}.`,
+        available: stabilityAvailable && isDeep,
     });
 
     // ═════════════════════════════════════════════════════════
@@ -530,6 +549,7 @@ export async function computeAudit(
         filesAnalyzed: allFiles.length,
         coreFiles,
         timestamp: new Date().toISOString(),
+        engine_version: "v10.13-spectral-enriched",
     };
 }
 

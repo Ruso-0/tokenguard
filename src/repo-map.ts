@@ -501,8 +501,18 @@ export async function buildDependencyGraph(
     // PageRank classification (recursive importance, not naive inDegree)
     const prScores = computePageRank(allFiles, importedBy);
     const prScoresArray = Array.from(prScores.values()).sort((a, b) => a - b);
-    const p85 = prScoresArray[Math.floor(allFiles.length * 0.85)] || 0;
-    const p50 = prScoresArray[Math.floor(allFiles.length * 0.50)] || 0;
+
+    // B.3 Fix: Symmetric Ecosystem Percentile.
+    // Scale percentile logarithmically with repo size so core tier
+    // represents comparable architectural importance across scales.
+    // Formula from chronos-miner v15.4 empirical calibration.
+    const safe_N = Math.max(10, allFiles.length);
+    const scale_factor = Math.log10(safe_N / 300.0);
+    const target_core = Math.max(0.85, Math.min(0.995, 0.91 + 0.05 * scale_factor));
+    const target_logic = Math.max(0.50, Math.min(0.80, 0.60 + 0.10 * scale_factor));
+
+    const p85 = prScoresArray[Math.floor(allFiles.length * target_core)] || 0;
+    const p50 = prScoresArray[Math.floor(allFiles.length * target_logic)] || 0;
 
     const tiers = new Map<string, "core" | "logic" | "leaf">();
     for (const [file, score] of prScores.entries()) {
