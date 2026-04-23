@@ -206,3 +206,210 @@ describe("Batch Edit ACID", () => {
         expect(result.error).toContain("No edits");
     });
 });
+
+// ─── v10.14.0 Block 3: Multi-Patch Transactional ───
+
+describe("Batch Edit ACID: Intra-Symbol Multi-Patching (Block 3)", () => {
+    it("should accept multiple patches to the same symbol when all mode:\"patch\" and search_texts disjoint", async () => {
+        const file = writeTmp("multipatch-happy.ts", [
+            "export function processConfig(data: any) {",
+            "    const host = 'localhost';",
+            "    const port = 8080;",
+            "    return { host, port };",
+            "}"
+        ].join("\n"));
+
+        const edits: BatchEditOp[] = [
+            {
+                path: file, symbol: "processConfig", mode: "patch",
+                search_text: "    const host = 'localhost';",
+                replace_text: "    const host = '0.0.0.0';"
+            },
+            {
+                path: file, symbol: "processConfig", mode: "patch",
+                search_text: "    const port = 8080;",
+                replace_text: "    const port = 443;"
+            }
+        ];
+
+        const result = await batchSemanticEdit(edits, parser, sandbox, tmpDir);
+
+        expect(result.success).toBe(true);
+        expect(result.editCount).toBe(2);
+
+        const content = fs.readFileSync(file, "utf-8");
+        expect(content).toContain("const host = '0.0.0.0';");
+        expect(content).toContain("const port = 443;");
+    });
+
+    it("should reject cross-patch corruption via ACID pre-check", async () => {
+        const file = writeTmp("acid-precheck.ts", [
+            "function secure() {",
+            "    return true;",
+            "}"
+        ].join("\n"));
+
+        const edits: BatchEditOp[] = [
+            // P1 injects new content
+            {
+                path: file, symbol: "secure", mode: "patch",
+                search_text: "return true;",
+                replace_text: "return true;\n    // injected"
+            },
+            // P2 attempts to anchor to P1's injection — ACID pre-check rejects
+            // because "// injected" does not exist in the ORIGINAL source
+            {
+                path: file, symbol: "secure", mode: "patch",
+                search_text: "// injected",
+                replace_text: "// compromised"
+            }
+        ];
+
+        const result = await batchSemanticEdit(edits, parser, sandbox, tmpDir);
+
+        expect(result.success).toBe(false);
+        expect(result.error).toMatch(/ACID violation/i);
+        expect(result.error).toMatch(/ORIGINAL source/i);
+
+        // ACID: disk untouched
+        const content = fs.readFileSync(file, "utf-8");
+        expect(content).not.toContain("injected");
+        expect(content).not.toContain("compromised");
+    });
+
+    it("should reject multi-edit with mixed modes (patch + replace)", async () => {
+        const file = writeTmp("mixed-modes.ts", [
+            "function mixed() {",
+            "    console.log('A');",
+            "}"
+        ].join("\n"));
+
+        const edits: BatchEditOp[] = [
+            {
+                path: file, symbol: "mixed", mode: "patch",
+                search_text: "    console.log('A');",
+                replace_text: "    console.log('X');"
+            },
+            {
+                path: file, symbol: "mixed", mode: "replace",
+                new_code: "function mixed() { console.log('OVERWRITE'); }"
+            }
+        ];
+
+        const result = await batchSemanticEdit(edits, parser, sandbox, tmpDir);
+
+        expect(result.success).toBe(false);
+        expect(result.error).toMatch(/ALL edits to the same symbol must use mode:"patch"/i);
+    });
+
+    // STRESS — validates causal sequencing: P2 inherits P1's structural mutations.
+    // Mechanism:
+    //   1. ACID pre-check on P2 passes because "doB();" exists as substring in ORIGINAL chunk.
+    //   2. In Phase C Limbo, P1 wraps doA/doB in try/catch (indent pushed from 4 to 8 spaces).
+    //   3. P2 Tier 1 exact match finds "doB();" within "        doB();" — split/join preserves
+    //      the 8-space prefix because it lives OUTSIDE the matched pattern.
+    //   4. Result: "        doBetterB();" — causally consistent with the new nesting.
+    // Regression signal: if test shows 4 spaces, either ACID or Phase C splice changed behavior.
+    it("STRESS: should inherit structural mutations from preceding patches (causal sequencing)", async () => {
+        const file = writeTmp("fuzzy-inherit.ts", [
+            "function wrapMe() {",
+            "    doA();",
+            "    doB();",
+            "}"
+        ].join("\n"));
+
+        const edits: BatchEditOp[] = [
+            {
+                path: file, symbol: "wrapMe", mode: "patch",
+                search_text: "    doA();\n    doB();",
+                replace_text: "    try {\n        doA();\n        doB();\n    } catch (e) {}"
+            },
+            {
+                path: file, symbol: "wrapMe", mode: "patch",
+                search_text: "doB();",
+                replace_text: "doBetterB();"
+            }
+        ];
+
+        const result = await batchSemanticEdit(edits, parser, sandbox, tmpDir);
+
+        expect(result.success).toBe(true);
+        const content = fs.readFileSync(file, "utf-8");
+        expect(content).toContain("        doBetterB();");
+        expect(content).not.toMatch(/    doB\(\);/);
+    });
+
+    // STRESS — verifies Block 3 moved the 80L guillotine INSIDE the Phase C micro-splice loop.
+    // Setup: 2 patches at the same symbol. First is 1L (valid). Second is 85L (exceeds cap).
+    // Total payload 86L (well below 500L global cap of LEY 4.5, so this isolates Phase C enforcement).
+    // If the cap only fired on first iteration, this test would succeed with content mutated.
+    it("STRESS: should enforce 80L payload cap on every patch in Phase C loop (per-iteration)", async () => {
+        const lines = Array.from({ length: 60 }, (_, i) => "    const v" + i + " = " + i + ";").join("\n");
+        const file = writeTmp("cap-per-patch.ts", "export function big() {\n" + lines + "\n}");
+
+        const bigPayload = Array.from({ length: 85 }, () => "    // noise").join("\n");
+
+        const edits: BatchEditOp[] = [
+            {
+                path: file, symbol: "big", mode: "patch",
+                search_text: "    const v0 = 0;", replace_text: "    const v0 = 999;"
+            },
+            {
+                path: file, symbol: "big", mode: "patch",
+                search_text: "    const v1 = 1;", replace_text: bigPayload
+            }
+        ];
+
+        const result = await batchSemanticEdit(edits, parser, sandbox, tmpDir);
+
+        expect(result.success).toBe(false);
+        expect(result.error).toMatch(/limit: 80L/i);
+
+        // ACID: first patch was valid but transaction aborted — disk untouched
+        const content = fs.readFileSync(file, "utf-8");
+        expect(content).not.toContain("const v0 = 999;");
+    });
+
+    // STRESS — multi-patch + multi-chunk with reverse-offset ordering.
+    // Top (earlier in file) has 2 patches clustered. Bottom (later) has 1 replace.
+    // Reverse sort puts Bottom first. After Bottom is spliced, Top's original offsets
+    // remain valid because Bottom is spatially AFTER Top.
+    // If reverse sort regressed (ascending instead of descending), Top would splice first,
+    // shifting virtualCode, then Bottom's stale endIndex would corrupt the result.
+    it("STRESS: should correctly resolve offsets when mixing multi-patch and multi-chunk bottom-up", async () => {
+        const file = writeTmp("complex-topology.ts", [
+            "export class Top {",
+            "    a() { return 1; }",
+            "    b() { return 2; }",
+            "}",
+            "",
+            "export class Bottom {",
+            "    c() { return 3; }",
+            "}"
+        ].join("\n"));
+
+        const edits: BatchEditOp[] = [
+            {
+                path: file, symbol: "Top", mode: "patch",
+                search_text: "return 1;", replace_text: "return 10;"
+            },
+            {
+                path: file, symbol: "Top", mode: "patch",
+                search_text: "return 2;", replace_text: "return 20;"
+            },
+            {
+                path: file, symbol: "Bottom", mode: "replace",
+                new_code: "export class Bottom {\n    c() { return 300; }\n}"
+            }
+        ];
+
+        const result = await batchSemanticEdit(edits, parser, sandbox, tmpDir);
+
+        expect(result.success).toBe(true);
+        const content = fs.readFileSync(file, "utf-8");
+        expect(content).toContain("return 10;");
+        expect(content).toContain("return 20;");
+        expect(content).toContain("return 300;");
+    });
+});
+
