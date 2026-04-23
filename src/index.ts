@@ -695,7 +695,9 @@ process.stdin.on("end", () => {
         try {
             absPath = path.resolve(process.cwd(), targetPath).replace(/\\\\/g, "/");
             const cwdPosix = process.cwd().replace(/\\\\/g, "/");
-            if (!absPath.startsWith(cwdPosix + "/") && absPath !== cwdPosix) {
+            const a = process.platform === "win32" ? absPath.toLowerCase() : absPath;
+            const c = process.platform === "win32" ? cwdPosix.toLowerCase() : cwdPosix;
+            if (!a.startsWith(c + "/") && a !== c) {
                 console.error("Blocked: Path traversal attempt.");
                 process.exit(2);
             }
