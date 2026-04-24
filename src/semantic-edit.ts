@@ -783,7 +783,7 @@ export async function batchSemanticEdit(
     if (!topologyChanged) {
         for (const edit of edits) {
             if (edit.mode && edit.mode !== "replace" && edit.mode !== "patch") continue;
-            const key = `${edit.path}::${edit.symbol}`;
+            const key = `${safePath(projectRoot, edit.path)}::${edit.symbol}`;
             const oldRaw = oldRawCodes.get(key);
             const newRaw = newRawCodes.get(key);
             if (oldRaw && newRaw && detectSignatureChange(oldRaw, newRaw)) {

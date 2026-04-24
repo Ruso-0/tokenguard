@@ -520,7 +520,7 @@ export async function handleBatchEdit(
                 const changedSymbols: string[] = [];
                 for (const edit of batchOps) {
                     if (edit.mode && edit.mode !== "replace" && edit.mode !== "patch") continue;
-                    const key = `${edit.path}::${edit.symbol}`;
+                    const key = `${safePath(engine.getProjectRoot(), edit.path)}::${edit.symbol}`;
                     const oldRaw = result.oldRawCodes.get(key);
                     const newRaw = result.newRawCodes.get(key);
                     if (oldRaw && newRaw && detectSignatureChange(oldRaw, newRaw)) {

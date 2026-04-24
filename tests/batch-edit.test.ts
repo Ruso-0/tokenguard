@@ -34,11 +34,63 @@ afterAll(() => {
 
 function writeTmp(name: string, content: string): string {
     const filePath = path.join(tmpDir, name);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, content, "utf-8");
     return filePath;
 }
 
 describe("Batch Edit ACID", () => {
+    it("should detect topology changes for relative paths", async () => {
+        writeTmp("src/foo.ts", [
+            "export function foo(a: string): string {",
+            "    return a;",
+            "}",
+        ].join("\n"));
+
+        const result = await batchSemanticEdit([{
+            path: "src/foo.ts",
+            symbol: "foo",
+            new_code: "export function foo(a: number): number {\n    return a;\n}",
+        }], parser, sandbox, tmpDir);
+
+        expect(result.success).toBe(true);
+        expect(result.topologyChanged).toBe(true);
+    });
+
+    it("should detect topology changes for absolute paths", async () => {
+        const file = writeTmp("src/foo-absolute.ts", [
+            "export function foo(a: string): string {",
+            "    return a;",
+            "}",
+        ].join("\n"));
+
+        const result = await batchSemanticEdit([{
+            path: file,
+            symbol: "foo",
+            new_code: "export function foo(a: number): number {\n    return a;\n}",
+        }], parser, sandbox, tmpDir);
+
+        expect(result.success).toBe(true);
+        expect(result.topologyChanged).toBe(true);
+    });
+
+    it("should not report topology changes for relative body-only edits", async () => {
+        writeTmp("src/foo-body.ts", [
+            "export function foo(a: string): string {",
+            "    return a;",
+            "}",
+        ].join("\n"));
+
+        const result = await batchSemanticEdit([{
+            path: "src/foo-body.ts",
+            symbol: "foo",
+            new_code: "export function foo(a: string): string {\n    return a.toUpperCase();\n}",
+        }], parser, sandbox, tmpDir);
+
+        expect(result.success).toBe(true);
+        expect(result.topologyChanged).toBe(false);
+    });
+
     it("should apply multiple edits across multiple files atomically", async () => {
         const file1 = writeTmp("batch1.ts", [
             "function greet(name: string): string {",
