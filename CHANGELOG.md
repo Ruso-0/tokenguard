@@ -2,6 +2,38 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## [10.15.0] — 2026-04-24
+
+### Fast Path Navigator + Semantic Grep
+
+Major navigation upgrade: findDefinition and findReferences now have a SQLite fast path that replaces the O(N) full-disk walk. New fast_grep action provides AST-aware substring search that returns topological coordinates (file + symbol + line + context) instead of raw grep output.
+
+### Added
+
+- **fast_grep action** (`nreki_navigate action:"fast_grep"`): exact substring search over AST chunks using SQLite INSTR. Returns each hit with the file path, containing AST symbol, exact line number, and line context. Multi-line queries supported — preview shows first line of the query, not the chunk. Designed to replace native grep for agent workflows where topological awareness matters.
+- **NrekiDB.getChunksBySymbolExact()**: SQLite lookup by symbol_name with optional COLLATE NOCASE fallback. Backed by new `idx_chunks_symbol_name` index.
+- **NrekiDB.fastGrep()**: SQLite INSTR-based substring search. Unlike LIKE, INSTR does not interpret wildcards (% and _), making it safe for arbitrary query text.
+- **stripCommentsAndStringsPreservingGeometry() helper**: neutralizes string/comment content in source files while preserving line/column geometry. Strings are zeroed FIRST, then comments — order matters to avoid "//" inside URL strings breaking the string regex.
+
+### Changed
+
+- **ast-navigator findDefinition and findReferences** gain an optional `engine` parameter. When provided, SQLite fast path resolves candidate chunks/files in O(log N) instead of walking the project. When omitted, original slow-path behavior is preserved exactly — all existing tests pass unchanged.
+- **findReferences regex**: replaced fragile inline character class with `escapeRegExp()` from utils/imports.js. The old pattern had ambiguous behavior for `[` characters.
+- **findReferences AST-light filter**: string literals and comments are now zeroed (preserving geometry) before the symbol regex runs. Eliminates false positives from matches inside strings or comments — e.g., a URL containing the symbol name no longer produces a reference hit.
+
+### Notes
+
+- Backward compatibility: 833/833 tests from v10.14.x baseline pass unchanged. 845/845 total with 12 new tests covering the fast path and fast_grep.
+- Performance (measured on NREKI codebase, `src/` only, 19 iterations per symbol, warm-up discarded):
+  - **findDefinition**: slow path re-reads and re-parses all project files per call (~660ms on NREKI). Fast path hits the SQLite index directly (~0.2ms). Speedup: 2000–5000x. The large factor reflects that the slow path was I/O + parse-dominated; the fast path eliminates both.
+  - **findReferences**: slow path walks all project files (~90ms on NREKI). Fast path restricts reads to SQLite-indicated candidates but still reads + regex-scans those files. Speedup: 6–19x depending on symbol commonality. Less dramatic because I/O is still proportional to matches.
+  - Raw data: `scripts/benchmark-v10-15-0.json`. Reproducible with `npx tsx scripts/benchmark-v10-15-0.ts`.
+- fast_grep limit: minimum 3 chars per query, default 50 results, max 100.
+
+### Acknowledgments
+
+Cross-audit triangular: Claude verified the dormant NrekiDB infrastructure and designed the backward-compatible signature preservation; Pipipi Furia identified the O(N) disk walk, proposed the SQLite fast-path architecture, and caught the UX failure for multi-line fast_grep output; Antigravity executed the four-phase protocol with one abort-and-retry cycle (test fix) and rollback discipline throughout.
+
 ## [10.14.0] — 2026-04-22
 
 ### Multi-Patch Transactional batch_edit + Enforcer Hotfixes
