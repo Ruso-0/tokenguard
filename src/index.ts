@@ -382,7 +382,7 @@ server.tool(
     "AST-powered code navigation and semantic search. Use for finding code, understanding project structure, and locating symbols.",
     {
         action: z
-            .enum(["search", "definition", "references", "outline", "map", "prepare_refactor", "orphan_oracle", "type_shape"])
+            .enum(["search", "definition", "references", "outline", "map", "prepare_refactor", "orphan_oracle", "type_shape", "fast_grep"])
             .describe(
                 "search: hybrid semantic+keyword search across codebase. " +
                 "definition: go-to-definition by symbol name. " +
@@ -391,12 +391,13 @@ server.tool(
                 "map: full repo structure map with pinned rules. " +
                 "prepare_refactor: analyze a symbol for safe renaming (classifies each occurrence as high-confidence or needs-review). " +
                 "orphan_oracle: identify files with zero static reachability (candidates for dead code review). " +
-                "type_shape: invoke TS compiler for exact resolved type shape without reading file (requires TypeScript project with tsconfig.json).",
+                "type_shape: invoke TS compiler for exact resolved type shape without reading file (requires TypeScript project with tsconfig.json). " +
+                "fast_grep: ultra-fast exact substring match returning AST-aware topological coordinates (replaces native grep). Best for finding hardcoded strings or exact syntax.",
             ),
         query: z
             .string()
             .optional()
-            .describe("For search: the query string."),
+            .describe("For search and fast_grep: the query string."),
         symbol: z
             .string()
             .optional()

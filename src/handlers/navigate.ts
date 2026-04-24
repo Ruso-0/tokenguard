@@ -884,3 +884,93 @@ export async function handleTypeShape(
         }],
     };
 }
+
+/**
+ * fast_grep: Ultra-fast exact substring match returning AST-aware coordinates.
+ * Uses SQLite INSTR over the chunks.raw_code column. Each hit is reported with
+ * the file path + AST symbol containing it + exact line number + context.
+ *
+ * Handles multi-line queries: for a query with "\n", the reported snippet is the
+ * first line of the QUERY (not the chunk), since printing the first line of a large
+ * chunk would be misleading when the match is deep inside.
+ */
+export async function handleFastGrep(
+    params: NavigateParams,
+    deps: RouterDependencies,
+): Promise<McpToolResponse> {
+    const { engine } = deps;
+    await engine.initialize();
+
+    const query = params.query ?? "";
+    if (query.length < 3) {
+        return {
+            content: [{ type: "text" as const, text: "Error: fast_grep query must be at least 3 characters." }],
+            isError: true,
+        };
+    }
+
+    const limit = typeof params.limit === "number" ? Math.min(100, Math.max(1, params.limit)) : 50;
+    const chunks = await engine.fastGrep(query, limit);
+
+    if (chunks.length === 0) {
+        return {
+            content: [{ type: "text" as const, text: `No matches found for exact substring: "${query}".` }],
+        };
+    }
+
+    const root = engine.getProjectRoot();
+    const byFile = new Map<string, typeof chunks>();
+    for (const c of chunks) {
+        const arr = byFile.get(c.path) || [];
+        arr.push(c);
+        byFile.set(c.path, arr);
+    }
+
+    const isMultiLine = query.includes("\n");
+    const lines: string[] = [`## Semantic Fast Grep: "${query}"`, ""];
+    let matchCount = 0;
+
+    const sortedFiles = [...byFile.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    for (const [file, fileChunks] of sortedFiles) {
+        const relPath = path.relative(root, file).replace(/\\/g, "/");
+        for (const chunk of fileChunks) {
+            const symName = chunk.symbol_name || "anonymous";
+            const reportedLines = new Set<number>();
+
+            let scanPos = chunk.raw_code.indexOf(query);
+            while (scanPos !== -1) {
+                const prefix = chunk.raw_code.substring(0, scanPos);
+                const lineOffset = prefix.split("\n").length - 1;
+                const exactLine = chunk.start_line + lineOffset;
+
+                if (!reportedLines.has(exactLine)) {
+                    reportedLines.add(exactLine);
+                    matchCount++;
+
+                    if (isMultiLine) {
+                        const preview = query.split("\n")[0].trim();
+                        const snippet = preview.length > 80 ? preview.substring(0, 80) + "..." : preview;
+                        lines.push(`${relPath} :: ${symName} (L${exactLine}) [match spans multiple lines]`);
+                        lines.push(`  ${snippet}`);
+                    } else {
+                        const chunkLines = chunk.raw_code.split("\n");
+                        const context = (chunkLines[lineOffset] || "").trim();
+                        lines.push(`${relPath} :: ${symName} (L${exactLine})`);
+                        lines.push(`  ${context}`);
+                    }
+                }
+                scanPos = chunk.raw_code.indexOf(query, scanPos + query.length);
+            }
+        }
+    }
+
+    lines.splice(1, 0, `Found ${matchCount} match(es) within ${chunks.length} AST symbol(s).`);
+
+    const resultText = lines.join("\n");
+    const tokens = Embedder.estimateTokens(resultText);
+    engine.logUsage("nreki_navigate:fast_grep", tokens, tokens, 0);
+
+    return {
+        content: [{ type: "text" as const, text: resultText }],
+    };
+}

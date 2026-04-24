@@ -434,6 +434,15 @@ export class NrekiEngine {
         return this.db.searchRawCodeLike(queryText, limit);
     }
 
+    /**
+     * Fast substring search via SQLite INSTR. Used by nreki_navigate fast_grep.
+     * INSTR does not interpret wildcards — safer than LIKE for arbitrary queries.
+     */
+    async fastGrep(queryText: string, limit: number = 50): Promise<ChunkRecord[]> {
+        await this.initialize();
+        return this.db.fastGrep(queryText, limit);
+    }
+
     /** Find all files that import the given file path (relative). */
     async findDependents(filePath: string): Promise<string[]> {
         const graph = await this.getDependencyGraph();

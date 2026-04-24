@@ -350,11 +350,12 @@ export async function handleNavigate(
         case "prepare_refactor": response = await nav.handlePrepareRefactor(params, deps); break;
         case "orphan_oracle": response = await nav.handleOrphanOracle(params, deps); break;
         case "type_shape": response = await nav.handleTypeShape(params, deps); break;
+        case "fast_grep": response = await nav.handleFastGrep(params, deps); break;
         default:
             return {
                 content: [{
                     type: "text" as const,
-                    text: `Unknown nreki_navigate action: "${action}". Valid actions: search, definition, references, outline, map, prepare_refactor, orphan_oracle, type_shape.`,
+                    text: `Unknown nreki_navigate action: "${action}". Valid actions: search, definition, references, outline, map, prepare_refactor, orphan_oracle, type_shape, fast_grep.`,
                 }],
                 isError: true,
             };

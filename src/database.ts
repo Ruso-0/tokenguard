@@ -950,6 +950,40 @@ export class NrekiDB {
         return results;
     }
 
+    /**
+     * Fast Substring Search for fast_grep action.
+     * Uses SQLite INSTR for exact substring match. Unlike LIKE, INSTR does NOT
+     * interpret wildcards (% and _) so any query text is safe without escaping.
+     */
+    fastGrep(queryText: string, limit: number = 50): ChunkRecord[] {
+        if (!this._ready) return [];
+        const stmt = this.db.prepare(
+            "SELECT id, path, shorthand, raw_code, node_type, start_line, end_line, start_index, end_index, symbol_name FROM chunks WHERE INSTR(raw_code, ?) > 0 LIMIT ?"
+        );
+        const results: ChunkRecord[] = [];
+        try {
+            stmt.bind([queryText, limit]);
+            while (stmt.step()) {
+                const row = stmt.getAsObject() as Record<string, unknown>;
+                results.push({
+                    id: row.id as number,
+                    path: row.path as string,
+                    shorthand: row.shorthand as string,
+                    raw_code: row.raw_code as string,
+                    node_type: row.node_type as string,
+                    start_line: row.start_line as number,
+                    end_line: row.end_line as number,
+                    start_index: (row.start_index as number) ?? 0,
+                    end_index: (row.end_index as number) ?? 0,
+                    symbol_name: (row.symbol_name as string) ?? "",
+                });
+            }
+        } finally {
+            stmt.free();
+        }
+        return results;
+    }
+
     close(): void {
         if (!this.db) return;
         this.save();
