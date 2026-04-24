@@ -89,7 +89,7 @@ const LANGUAGE_CONFIGS: Record<string, LanguageConfig> = {
     `,
     },
     ".tsx": {
-        wasmFile: "tree-sitter-typescript.wasm",
+        wasmFile: "tree-sitter-tsx.wasm",
         query: `
       (class_declaration name: (type_identifier) @class_name) @class
       (function_declaration name: (identifier) @func_name) @func
@@ -97,6 +97,7 @@ const LANGUAGE_CONFIGS: Record<string, LanguageConfig> = {
       (interface_declaration name: (type_identifier) @iface_name) @interface
       (type_alias_declaration name: (type_identifier) @type_name) @type_alias
       (export_statement declaration: (function_declaration name: (identifier) @exp_func_name)) @export_func
+      (export_statement declaration: (class_declaration name: (type_identifier) @exp_class_name)) @export_class
       (lexical_declaration (variable_declarator name: (identifier) @var_name value: [(arrow_function) (function_expression)])) @arrow_func
       (export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @exp_var_name value: [(arrow_function) (function_expression)]))) @export_arrow_func
       (lexical_declaration (variable_declarator name: (identifier) @var_name)) @var_decl

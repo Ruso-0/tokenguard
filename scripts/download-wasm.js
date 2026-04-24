@@ -13,6 +13,7 @@ const WASMS_PKG = join(__dirname, "..", "node_modules", "tree-sitter-wasms", "ou
 
 const NEEDED = [
     "tree-sitter-typescript.wasm",
+    "tree-sitter-tsx.wasm",
     "tree-sitter-javascript.wasm",
     "tree-sitter-python.wasm",
     "tree-sitter-go.wasm",

@@ -41,6 +41,7 @@ export interface ValidationResult {
 
 const LANGUAGE_MAP: Record<string, string> = {
     typescript: "tree-sitter-typescript.wasm",
+    tsx: "tree-sitter-tsx.wasm",
     javascript: "tree-sitter-javascript.wasm",
     python: "tree-sitter-python.wasm",
     go: "tree-sitter-go.wasm",
@@ -52,7 +53,7 @@ const LANGUAGE_MAP: Record<string, string> = {
 /** Map file extensions to language names. */
 const EXT_TO_LANGUAGE: Record<string, string> = {
     ".ts": "typescript",
-    ".tsx": "typescript",
+    ".tsx": "tsx",
     ".js": "javascript",
     ".jsx": "javascript",
     ".mjs": "javascript",  // v10.12.0 — align with parser SUPPORTED_EXTENSIONS
