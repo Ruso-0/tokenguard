@@ -16,7 +16,7 @@ import fs from "fs";
 import path from "path";
 import chokidar, { type FSWatcher } from "chokidar";
 
-import { NrekiDB, type ChunkRecord } from "./database.js";
+import { NrekiDB, type ChunkRecord, type FastGrepHit } from "./database.js";
 import { Embedder, getEmbedder } from "./embedder.js";
 import { ASTParser, type ParseResult } from "./parser.js";
 import { Compressor, type CompressionResult } from "./compressor.js";
@@ -435,10 +435,10 @@ export class NrekiEngine {
     }
 
     /**
-     * Fast substring search via SQLite INSTR. Used by nreki_navigate fast_grep.
-     * INSTR does not interpret wildcards — safer than LIKE for arbitrary queries.
+     * Exact substring search via SQLite INSTR. Returns only (path, raw_code,
+     * start_line, symbol_name). Used by the nreki_navigate fast_grep handler.
      */
-    async fastGrep(queryText: string, limit: number = 50): Promise<ChunkRecord[]> {
+    async fastGrep(queryText: string, limit: number = 50): Promise<FastGrepHit[]> {
         await this.initialize();
         return this.db.fastGrep(queryText, limit);
     }

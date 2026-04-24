@@ -926,51 +926,69 @@ export async function handleFastGrep(
         byFile.set(c.path, arr);
     }
 
-    const isMultiLine = query.includes("\n");
-    const lines: string[] = [`## Semantic Fast Grep: "${query}"`, ""];
+    const lines = [`## Semantic Fast Grep: "${query}"\n`];
     let matchCount = 0;
 
-    const sortedFiles = [...byFile.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-    for (const [file, fileChunks] of sortedFiles) {
+    const isMultiLine = query.includes("\n");
+    let multiLineSnippet = "";
+    if (isMultiLine) {
+        const nlIdx = query.indexOf("\n");
+        const preview = (nlIdx === -1 ? query : query.substring(0, nlIdx)).trim();
+        multiLineSnippet = preview.length > 80 ? preview.substring(0, 80) + "..." : preview + "...";
+    }
+
+    for (const [file, fileChunks] of [...byFile.entries()].sort((a,b) => a[0].localeCompare(b[0]))) {
         const relPath = path.relative(root, file).replace(/\\/g, "/");
+
         for (const chunk of fileChunks) {
             const symName = chunk.symbol_name || "anonymous";
-            const reportedLines = new Set<number>();
-
             let scanPos = chunk.raw_code.indexOf(query);
+            if (scanPos === -1) continue;
+
+            const reportedLines = new Set<number>();
+            let currentLineOffset = 0;
+            let currentLineStart = 0;
+            let nextNl = chunk.raw_code.indexOf("\n");
+
             while (scanPos !== -1) {
-                const prefix = chunk.raw_code.substring(0, scanPos);
-                const lineOffset = prefix.split("\n").length - 1;
-                const exactLine = chunk.start_line + lineOffset;
+                while (nextNl !== -1 && nextNl < scanPos) {
+                    currentLineOffset++;
+                    currentLineStart = nextNl + 1;
+                    nextNl = chunk.raw_code.indexOf("\n", currentLineStart);
+                }
+
+                const exactLine = chunk.start_line + currentLineOffset;
 
                 if (!reportedLines.has(exactLine)) {
                     reportedLines.add(exactLine);
                     matchCount++;
 
                     if (isMultiLine) {
-                        const preview = query.split("\n")[0].trim();
-                        const snippet = preview.length > 80 ? preview.substring(0, 80) + "..." : preview;
                         lines.push(`${relPath} :: ${symName} (L${exactLine}) [match spans multiple lines]`);
-                        lines.push(`  ${snippet}`);
+                        lines.push(`  ${multiLineSnippet}`);
                     } else {
-                        const chunkLines = chunk.raw_code.split("\n");
-                        const context = (chunkLines[lineOffset] || "").trim();
+                        const lineEnd = nextNl !== -1 ? nextNl : chunk.raw_code.length;
+                        const context = chunk.raw_code.substring(currentLineStart, lineEnd).trim();
+
                         lines.push(`${relPath} :: ${symName} (L${exactLine})`);
                         lines.push(`  ${context}`);
                     }
                 }
+
                 scanPos = chunk.raw_code.indexOf(query, scanPos + query.length);
             }
         }
     }
 
-    lines.splice(1, 0, `Found ${matchCount} match(es) within ${chunks.length} AST symbol(s).`);
+    lines.splice(1, 0, `Found ${matchCount} match(es) within ${chunks.length} AST symbol(s).\n`);
 
-    const resultText = lines.join("\n");
-    const tokens = Embedder.estimateTokens(resultText);
-    engine.logUsage("nreki_navigate:fast_grep", tokens, tokens, 0);
+    try {
+        const { Embedder } = await import("../embedder.js");
+        const tokens = Embedder.estimateTokens(lines.join("\n"));
+        engine.logUsage("nreki_navigate:fast_grep", tokens, tokens, 0);
+    } catch {}
 
     return {
-        content: [{ type: "text" as const, text: resultText }],
+        content: [{ type: "text" as const, text: lines.join("\n") }],
     };
 }

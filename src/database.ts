@@ -44,6 +44,17 @@ export interface ChunkRecord {
     symbol_name: string;
 }
 
+/**
+ * Shape returned by fastGrep(): the 4 columns handleFastGrep consumes.
+ * Avoids sql.js WASM overhead of serializing unused columns per row.
+ */
+export interface FastGrepHit {
+    path: string;
+    raw_code: string;
+    start_line: number;
+    symbol_name: string;
+}
+
 export interface HybridSearchResult {
     id: number;
     path: string;
@@ -951,30 +962,25 @@ export class NrekiDB {
     }
 
     /**
-     * Fast Substring Search for fast_grep action.
-     * Uses SQLite INSTR for exact substring match. Unlike LIKE, INSTR does NOT
-     * interpret wildcards (% and _) so any query text is safe without escaping.
+     * Exact substring search for the nreki_navigate fast_grep action.
+     * Uses SQLite INSTR (no wildcard interpretation — safe for arbitrary queries)
+     * and SELECTs only the 4 columns handleFastGrep consumes to minimize
+     * sql.js WASM row-serialization cost.
      */
-    fastGrep(queryText: string, limit: number = 50): ChunkRecord[] {
+    fastGrep(queryText: string, limit: number = 50): FastGrepHit[] {
         if (!this._ready) return [];
         const stmt = this.db.prepare(
-            "SELECT id, path, shorthand, raw_code, node_type, start_line, end_line, start_index, end_index, symbol_name FROM chunks WHERE INSTR(raw_code, ?) > 0 LIMIT ?"
+            "SELECT path, raw_code, start_line, symbol_name FROM chunks WHERE INSTR(raw_code, ?) > 0 LIMIT ?"
         );
-        const results: ChunkRecord[] = [];
+        const results: FastGrepHit[] = [];
         try {
             stmt.bind([queryText, limit]);
             while (stmt.step()) {
                 const row = stmt.getAsObject() as Record<string, unknown>;
                 results.push({
-                    id: row.id as number,
                     path: row.path as string,
-                    shorthand: row.shorthand as string,
                     raw_code: row.raw_code as string,
-                    node_type: row.node_type as string,
                     start_line: row.start_line as number,
-                    end_line: row.end_line as number,
-                    start_index: (row.start_index as number) ?? 0,
-                    end_index: (row.end_index as number) ?? 0,
                     symbol_name: (row.symbol_name as string) ?? "",
                 });
             }
