@@ -41,6 +41,16 @@ const SENSITIVE_PATTERNS: RegExp[] = [
     /[/\\]\.terraform[/\\]/i,           // Terraform state (may contain secrets)
 ];
 
+function normalizeForRootCheck(filePath: string): string {
+    return process.platform === "win32" ? filePath.toLowerCase() : filePath;
+}
+
+function isInsideRoot(candidatePath: string, rootPath: string): boolean {
+    const candidate = normalizeForRootCheck(candidatePath);
+    const root = normalizeForRootCheck(rootPath);
+    return candidate.startsWith(root + path.sep) || candidate === root;
+}
+
 /**
  * Check if a file path matches known sensitive file patterns.
  * These files should never be read/written by an LLM tool.
@@ -71,7 +81,7 @@ export function safePath(workspaceRoot: string, inputPath: string): string {
     const resolved = path.resolve(workspaceRoot, normalized);
     const resolvedRoot = path.resolve(workspaceRoot);
 
-    if (!resolved.startsWith(resolvedRoot + path.sep) && resolved !== resolvedRoot) {
+    if (!isInsideRoot(resolved, resolvedRoot)) {
         throw new Error(`Path traversal blocked: ${inputPath}`);
     }
 
@@ -92,7 +102,7 @@ export function safePath(workspaceRoot: string, inputPath: string): string {
         } catch {
             realRoot = resolvedRoot;
         }
-        if (!realPath.startsWith(realRoot + path.sep) && realPath !== realRoot) {
+        if (!isInsideRoot(realPath, realRoot)) {
             throw new Error(`Symlink escape blocked: ${inputPath} resolves outside workspace`);
         }
     } catch (err) {
@@ -111,7 +121,7 @@ export function safePath(workspaceRoot: string, inputPath: string): string {
                 } catch {
                     realRoot = resolvedRoot;
                 }
-                if (!realParent.startsWith(realRoot + path.sep) && realParent !== realRoot) {
+                if (!isInsideRoot(realParent, realRoot)) {
                     throw new Error(`Symlink escape blocked in parent directory: ${inputPath}`);
                 }
             } catch (parentErr) {
