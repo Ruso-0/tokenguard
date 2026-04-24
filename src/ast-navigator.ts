@@ -101,17 +101,23 @@ function walkFiles(dirPath: string): string[] {
 
 function extractSignature(rawCode: string): string {
     const lines = rawCode.split("\n");
-    if (lines.length <= 1) return rawCode.trim();
 
     let parenDepth = 0;
     let angleDepth = 0;
+    let topLevelAssignmentSeen = false;
 
     for (let i = 0; i < rawCode.length; i++) {
         const ch = rawCode[i];
         if (ch === "(") parenDepth++;
-        else if (ch === ")") parenDepth--;
+        else if (ch === ")") parenDepth = Math.max(0, parenDepth - 1);
         else if (ch === "<") angleDepth++;
-        else if (ch === ">") angleDepth--;
+        else if (ch === ">" && !(i > 0 && rawCode[i - 1] === "=")) angleDepth = Math.max(0, angleDepth - 1);
+        else if (ch === "=" && i + 1 < rawCode.length && rawCode[i + 1] === ">" &&
+                 parenDepth === 0 && angleDepth === 0 && topLevelAssignmentSeen) {
+            return rawCode.slice(0, i + 2).trim();
+        } else if (ch === "=" && parenDepth === 0 && angleDepth === 0) {
+            topLevelAssignmentSeen = true;
+        }
         else if (ch === "{" && parenDepth === 0 && angleDepth === 0) {
             return rawCode.slice(0, i).trim();
         }

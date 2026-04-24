@@ -8,8 +8,9 @@ import os from "os";
 import path from "path";
 import { ASTParser } from "../src/parser.js";
 import { AstSandbox } from "../src/ast-sandbox.js";
-import { semanticEdit, applySemanticSplice, type SpliceTarget } from "../src/semantic-edit.js";
+import { semanticEdit, applySemanticSplice, detectSignatureChange, type SpliceTarget } from "../src/semantic-edit.js";
 import { extractSignature } from "../src/repo-map.js";
+import { getFileSymbols } from "../src/ast-navigator.js";
 
 let tmpDir: string;
 let parser: ASTParser;
@@ -151,5 +152,56 @@ describe("BUG 4: extractSignature string-safe", () => {
         const code = `function add(a: number, b: number): number {\n    return a + b;\n}`;
         const sig = extractSignature(code);
         expect(sig).toBe("function add(a: number, b: number): number");
+    });
+
+    it("should strip one-line function bodies", () => {
+        const sig = extractSignature("export function foo(): number { return 1; }");
+        expect(sig).toBe("export function foo(): number");
+    });
+
+    it("should strip one-line arrow expression bodies", () => {
+        const sig = extractSignature("const x = () => 1");
+        expect(sig).toBe("const x = () =>");
+    });
+
+    it("should not cut at nested arrow types inside parameters", () => {
+        expect(detectSignatureChange(
+            "const x = (cb: () => number) => cb()",
+            "const x = (cb: () => number) => cb2()",
+        )).toBe(false);
+    });
+
+    it("should preserve generic arrow signatures", () => {
+        const sig = extractSignature("const x = <T,>(v: T) => v");
+        expect(sig).toBe("const x = <T,>(v: T) =>");
+    });
+
+    it("should not mark one-line body-only edits as topology changes", async () => {
+        const file = writeTmp("one-line-topology.ts", "export function foo(): number { return 1; }\n");
+
+        const result = await semanticEdit(
+            file,
+            "foo",
+            "export function foo(): number { return 2; }",
+            parser,
+            sandbox,
+            tmpDir,
+            "replace",
+            true,
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.topologyChanged).toBe(false);
+    });
+
+    it("should expose stripped one-line signatures through ast-navigator", async () => {
+        const file = writeTmp("navigator-one-line.ts", "export function foo(): number { return 1; }\nconst x = () => 1;\n");
+
+        const symbols = await getFileSymbols(file, parser, tmpDir);
+        const foo = symbols.find(s => s.name === "foo");
+        const x = symbols.find(s => s.name === "x");
+
+        expect(foo?.signature).toBe("export function foo(): number");
+        expect(x?.signature).toBe("const x = () =>");
     });
 });
