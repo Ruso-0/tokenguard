@@ -756,7 +756,7 @@ async function main(): Promise<void> {
     await server.connect(transport);
 
     if (engine) {
-        engine.startWatcher();
+        await engine.startWatcher();
         logger.info("File watcher started (reactive mode).");
     }
 

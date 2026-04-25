@@ -119,6 +119,7 @@ export class NrekiEngine {
     private searcher!: SearchEngine;
 
     private watcher: FSWatcher | null = null;
+    private watcherReady: Promise<void> | null = null;
     private config: Required<EngineConfig>;
     private indexingQueue = new Set<string>();
     private isIndexing = false;
@@ -453,8 +454,8 @@ export class NrekiEngine {
 
     // ─── File Watching ────────────────────────────────────────────
 
-    startWatcher(): void {
-        if (this.watcher) return;
+    startWatcher(): Promise<void> {
+        if (this.watcher) return this.watcherReady ?? Promise.resolve();
 
         const shouldWatchFile = (fp: string) => this.config.extensions.includes(path.extname(fp).toLowerCase());
 
@@ -462,6 +463,11 @@ export class NrekiEngine {
             ignored: this.config.ignorePaths,
             persistent: true,
             ignoreInitial: true, // prevent race with handler bootstrap
+        });
+
+        this.watcherReady = new Promise((resolve, reject) => {
+            this.watcher!.once("ready", resolve);
+            this.watcher!.once("error", reject);
         });
 
         this.watcher
@@ -472,6 +478,8 @@ export class NrekiEngine {
                 this.db.clearChunks(fp);
                 this.scheduleSave();
             });
+
+        return this.watcherReady;
     }
 
     /** Queue a file for indexing (debounced). */
@@ -539,6 +547,7 @@ export class NrekiEngine {
         if (this.watcher) {
             this.watcher.close();
             this.watcher = null;
+            this.watcherReady = null;
         }
     }
 

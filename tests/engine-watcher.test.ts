@@ -83,11 +83,9 @@ describe("engine watcher and fast_grep bootstrap", () => {
         ].join("\n"), "utf-8");
 
         await engine.initialize();
-        engine.startWatcher();
-        await sleep(500);
+        await engine.startWatcher();
         expectFastGrepHit(await fastGrepText("REACTIVE_OLD_TOKEN"), "REACTIVE_OLD_TOKEN");
 
-        await sleep(500);
         fs.writeFileSync(file, [
             "export function reactive(): string {",
             "    return 'REACTIVE_NEW_TOKEN';",
@@ -131,8 +129,7 @@ describe("engine watcher and fast_grep bootstrap", () => {
         ].join("\n"), "utf-8");
 
         await engine.initialize();
-        engine.startWatcher();
-        await sleep(700);
+        await engine.startWatcher();
 
         expect(engine.getStats().filesIndexed).toBe(0);
         expect(engine.getStats().totalChunks).toBe(0);
