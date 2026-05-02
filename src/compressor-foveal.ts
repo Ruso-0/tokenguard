@@ -48,6 +48,11 @@ export interface TfcResult {
     };
 }
 
+export type TfcResultPayload =
+    | { kind: "success"; data: TfcResult }
+    | { kind: "not_found" }
+    | { kind: "shield_tripped"; ratio: number; originalSize: number; compressedSize: number };
+
 const NOISE_WORDS = new Set([
     "if", "for", "while", "switch", "catch", "return", "throw", "new", "await",
     "function", "class", "typeof", "instanceof", "delete", "void", "yield",
@@ -73,7 +78,7 @@ export async function tfcCompress(
     content: string,
     focusInput: string,
     engine: NrekiEngine
-): Promise<TfcResult | null> {
+): Promise<TfcResultPayload> {
     const originalSize = content.length;
 
     // O(1) parse cache by content hash
@@ -98,10 +103,10 @@ export async function tfcCompress(
                 }
                 tfcParseCache.set(filePath, { hash: contentHash, result: parseResult });
             }
-        } catch { return null; }
+        } catch { return { kind: "not_found" }; }
     }
 
-    if (parseResult.chunks.length === 0) return null;
+    if (parseResult.chunks.length === 0) return { kind: "not_found" };
 
     // 1. MULTI-FOCAL TARGETS + OVERLOAD FIX
     const ext = path.extname(filePath).toLowerCase();
@@ -123,7 +128,7 @@ export async function tfcCompress(
         );
         for (const m of matches) foveas.add(m);
     }
-    if (foveas.size === 0) return null;
+    if (foveas.size === 0) return { kind: "not_found" };
 
     // 2. CAUSAL RAYTRACING
     const foveaUses = new Set<string>();
@@ -272,21 +277,29 @@ export async function tfcCompress(
     //  - Marginal compression cases where the agent's choice of focus is
     //    barely useful (better to give them the full aggressive summary)
     if (compressedSize >= originalSize * 0.85) {
-        return null;
+        return {
+            kind: "shield_tripped",
+            ratio: 1 - (compressedSize / originalSize),
+            originalSize,
+            compressedSize
+        };
     }
 
     const tokensSaved = Math.max(0, Embedder.estimateTokens(content) - Embedder.estimateTokens(compressed));
 
     return {
-        compressed, originalSize, compressedSize,
-        ratio: 1 - (compressedSize / originalSize),
-        tokensSaved,
-        zones: {
-            foveas: Array.from(foveaNames),
-            localParafovea: downstream.size,
-            externalParafovea: externalCount,
-            upstream: upstreamNames.size,
-            darkMatterLines
+        kind: "success",
+        data: {
+            compressed, originalSize, compressedSize,
+            ratio: 1 - (compressedSize / originalSize),
+            tokensSaved,
+            zones: {
+                foveas: Array.from(foveaNames),
+                localParafovea: downstream.size,
+                externalParafovea: externalCount,
+                upstream: upstreamNames.size,
+                darkMatterLines
+            }
         }
     };
 }

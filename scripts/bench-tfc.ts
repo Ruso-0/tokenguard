@@ -71,7 +71,7 @@ interface FocusBench {
     tfcAdvantageOverTier3: number;
     foveaFidelity: boolean; // exact match of symbol body in output
     zones: TfcResult["zones"];
-    fellBack: boolean; // true if tfcCompress returned null
+    fellBack: boolean; // true if tfcCompress returned non-success payload
 }
 
 interface BenchSummary {
@@ -191,13 +191,13 @@ async function main() {
             const focus = sym.symbolName;
 
             const t0 = performance.now();
-            const tfcResult = await tfcCompress(file, content, focus, engine);
+            const tfcPayload = await tfcCompress(file, content, focus, engine);
             const elapsed = performance.now() - t0;
 
             if (i === 0) parseTime1stMs = elapsed;
             if (i === 1) parseTime2ndMs = elapsed;
 
-            if (!tfcResult) {
+            if (tfcPayload.kind !== "success") {
                 focusResults.push({
                     focus,
                     focusSize: sym.rawCode.length,
@@ -211,6 +211,8 @@ async function main() {
                 });
                 continue;
             }
+
+            const tfcResult = tfcPayload.data;
 
             const tfcTokens = Embedder.estimateTokens(tfcResult.compressed);
             const tfcRatio = tfcResult.ratio;
@@ -245,9 +247,9 @@ async function main() {
 
         const boundaryResults: BoundaryCase[] = [];
         for (const target of smallestSymbols) {
-            const boundaryResult = await tfcCompress(file, content, target.symbolName, engine);
+            const boundaryPayload = await tfcCompress(file, content, target.symbolName, engine);
             const focusLines = target.endLine - target.startLine + 1;
-            if (!boundaryResult) {
+            if (boundaryPayload.kind !== "success") {
                 boundaryResults.push({
                     focus: target.symbolName,
                     focusLines,
@@ -259,6 +261,7 @@ async function main() {
                 });
                 continue;
             }
+            const boundaryResult = boundaryPayload.data;
             boundaryResults.push({
                 focus: target.symbolName,
                 focusLines,

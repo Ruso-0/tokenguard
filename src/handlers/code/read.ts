@@ -240,9 +240,10 @@ export async function handleCompress(
         // TFC-PRO INJECTION
         if (focus) {
             const content = readSource(resolvedPath);
-            const tfcResult = await tfcCompress(resolvedPath, content, focus, engine);
+            const tfcPayload = await tfcCompress(resolvedPath, content, focus, engine);
 
-            if (tfcResult) {
+            if (tfcPayload.kind === "success") {
+                const tfcResult = tfcPayload.data;
                 engine.markFileRead(resolvedPath);
 
                 const compressedTokens = Embedder.estimateTokens(tfcResult.compressed);
@@ -261,18 +262,25 @@ export async function handleCompress(
                             `(${(tfcResult.ratio * 100).toFixed(1)}% reduction)\n` +
                             `Fovea: 100% | Upstream: ${tfcResult.zones.upstream} | Downstream: ${tfcResult.zones.localParafovea}+${tfcResult.zones.externalParafovea} | Dark: ${tfcResult.zones.darkMatterLines}L\n\n` +
                             `\`\`\`\n${tfcResult.compressed}\n\`\`\``,
+                        }],
+                    };
+            } else if (tfcPayload.kind === "shield_tripped") {
+                return {
+                    content: [{
+                        type: "text" as const,
+                        text: `TFC-Pro shield tripped: focus "${focus}" spans >85% of file (compression ratio ${(tfcPayload.ratio * 100).toFixed(1)}%). Use action:"read" compress:false to read raw, or omit focus for aggressive compression.`
                     }],
+                    isError: true,
                 };
             } else {
-                // C4: Honest diagnosis — distinguish unsupported language from genuine miss.
+                // kind === "not_found"
                 const ext = path.extname(resolvedPath).toLowerCase();
                 const parser = engine.getParser();
-
                 if (!parser.isSupported(ext)) {
                     return {
                         content: [{
                             type: "text" as const,
-                            text: `TFC-Pro failed: Language AST not supported for '${ext}'. Raw read is permitted for this file type via nreki_code action:"read".`
+                            text: `TFC-Pro: language AST not supported for '${ext}'. Use action:"read" compress:false.`
                         }],
                         isError: true,
                     };
@@ -281,7 +289,7 @@ export async function handleCompress(
                 return {
                     content: [{
                         type: "text" as const,
-                        text: `TFC-Pro failed: "${focus}" was NOT FOUND or is TOO LARGE (Density Shield). Verify exact name via outline, or focus on a smaller inner method.`
+                        text: `TFC-Pro: symbol "${focus}" not found in ${path.basename(resolvedPath)}. Run action:"outline" first to verify exact name.`
                     }],
                     isError: true,
                 };
