@@ -63,3 +63,6 @@ prisma-test/
 
 # Claude Code scheduled task locks
 .claude/scheduled_tasks.lock
+
+# Benchmark outputs (ephemeral, regenerable)
+scripts/benchmark-*.json
