@@ -239,6 +239,19 @@ export async function handleCompress(
 
         // TFC-PRO INJECTION
         if (focus) {
+            const ext = path.extname(resolvedPath).toLowerCase();
+            const isWeb = [".css", ".html", ".json"].includes(ext);
+
+            if (!isWeb && focus && /\s/.test(focus) && !focus.includes(",")) {
+                return {
+                    content: [{
+                        type: "text" as const,
+                        text: `Error: focus="${focus}" appears to be multiple symbols separated by spaces. Use comma-separated format: focus:"a,b,c". For exact strings with spaces, this validation only triggers in non-web file types.`
+                    }],
+                    isError: true,
+                };
+            }
+
             const content = readSource(resolvedPath);
             const tfcPayload = await tfcCompress(resolvedPath, content, focus, engine);
 
@@ -274,7 +287,6 @@ export async function handleCompress(
                 };
             } else {
                 // kind === "not_found"
-                const ext = path.extname(resolvedPath).toLowerCase();
                 const parser = engine.getParser();
                 if (!parser.isSupported(ext)) {
                     return {
