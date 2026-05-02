@@ -208,7 +208,13 @@ const LANGUAGE_CONFIGS: Record<string, LanguageConfig> = {
     },
     ".css": {
         wasmFile: "tree-sitter-css.wasm",
-        query: `(rule_set (selectors) @symbol_name) @class`,
+        query: `
+          (rule_set (selectors) @symbol_name) @class
+          (keyframes_statement (keyframes_name) @symbol_name) @class
+          (media_statement (feature_query) @symbol_name) @class
+          (import_statement (string_value) @symbol_name) @class
+          (at_rule (at_keyword) @symbol_name) @class
+        `,
     },
     ".json": {
         wasmFile: "tree-sitter-json.wasm",
