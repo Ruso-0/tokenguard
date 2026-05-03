@@ -49,6 +49,10 @@ const DEFAULT_IGNORE = [
     "**/__pycache__/**",
     "**/*.min.js",
     "**/*.d.ts",
+    // NREKI's own artifacts (prevents auto-indexing of self in dogfooding
+    // and contamination of corpus benchmarks against external repos)
+    "**/.nreki/**",
+    "**/.nreki.db*",
 ];
 
 // ─── Session Tracker ─────────────────────────────────────────────────
