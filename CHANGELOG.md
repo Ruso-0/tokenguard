@@ -2,6 +2,109 @@
 
 All notable changes to NREKI will be documented in this file.
 
+## [10.18.0] - 2026-05-02
+
+# v10.18.0 — Schema compatibility + CSS parser + UX deadlock fix
+
+## Fixed
+
+### Critical: Schema break in strict MCP clients (Bloque A)
+SDK MCP `@modelcontextprotocol/sdk` was silently resolving from `^1.12.1` 
+to `1.27.1` via `npx -y` distribution. Versions 1.24.0+ inject an 
+`execution.taskSupport: 'forbidden'` field in tool registrations that 
+strict MCP clients (Gemini CLI, Codex CLI) reject as non-spec, causing 
+NREKI tools to be silently dropped. Now pinned to `1.23.1` (last clean 
+version, verified empirically).
+
+All other runtime dependencies pinned to current lockfile resolutions to 
+prevent recurrence:
+- `@typescript-eslint/parser`, `chokidar`, `eslint`, `eslint-plugin-jsx-a11y`, 
+  `eslint-plugin-react`, `eslint-plugin-react-hooks`, `picomatch`, 
+  `web-tree-sitter`, `zod`, `@xenova/transformers`
+- TypeScript peer dependency capped at `>=5.5.0 <6.0.0`
+
+### Critical: P0 deadlock in Chronos + Cognitive Enforcer (Bug D reclassified)
+Files marked HIGH friction by Chronos triggered an infinite loop:
+1. Layer 2 (edit gate) blocks edit and instructs LLM to `read compress:false`
+2. LLM obeys
+3. Layer 1 (Cognitive Enforcer) blocks the raw read on >100 line files
+4. Layer 2 keeps demanding raw read, Layer 1 keeps rejecting
+5. Context budget exhausted
+
+Fix: Layer 2 now emits the JSON-RPC tool call including 
+`_nreki_bypass:"chronos_recovery"` token that Layer 1 honors. Both 
+single-edit and batch-edit gates updated.
+
+### CSS parser captures at-rules (Bloque C2)
+Tree-sitter-css query previously only captured `rule_set` selectors, 
+making `@keyframes`, `@media`, `@import`, and `@font-face` blocks 
+invisible to the chunks index. `fast_grep` for at-rule strings returned 
+"No matches" even when present in source files.
+
+Now captures 5 node types with `@symbol_name` binding:
+- `rule_set` (regular CSS rules)
+- `keyframes_statement` (`@keyframes`)
+- `media_statement` (`@media`)
+- `import_statement` (`@import`)
+- `at_rule` (catch-all for `@font-face`, `@supports`, etc.)
+
+### CSS focus normalization (Hallazgo Colateral)
+Parser strips punctuation from selectors at extraction (`.foo` → `foo`), 
+but `compressor-foveal.ts` kept the user's focus raw. TFC-Pro silently 
+failed to find `.home-sidebar` against the indexed `home-sidebar`. Now 
+applies the same normalization to focus when the file is CSS or HTML.
+
+### TFC-Pro returns discriminated union (Bloque C1)
+Previously returned `TfcResult | null` and emitted misleading 
+"NOT FOUND or TOO LARGE (Density Shield)" which conflated two distinct 
+cases. New `TfcResultPayload` type:
+- `{ kind: "success", data: TfcResult }`
+- `{ kind: "not_found" }` → "symbol X not found, run outline first"
+- `{ kind: "shield_tripped", ratio, ... }` → "focus spans >85% of file, 
+  use compress:false or omit focus"
+
+### Multi-focus validation with domain shield (Bloque C3.A)
+Agents passing `focus="func1 func2 func3"` (space-separated) previously 
+became a single token that never matched, returning generic "not_found". 
+Now emits an educational error in non-web file types. CSS/HTML preserve 
+multi-word selectors (e.g., `body .foo`).
+
+## Migration notes
+
+If upgrading from earlier versions and you observe that:
+- `fast_grep` returns no matches for CSS at-rules in projects you 
+  previously indexed
+- Indexed paths still point to old project locations (e.g., after 
+  moving the project to a different directory)
+
+**Workaround:** delete the `.nreki/` directory and `.nreki.db` file from 
+your project root to force reindex with the new parser.
+
+```bash
+# Linux/Mac
+rm -rf .nreki/ .nreki.db
+
+# Windows PowerShell  
+Remove-Item -Recurse -Force .nreki, .nreki.db
+```
+
+A permanent migration mechanism (paths relative to projectRoot, 
+schema-versioned cache invalidation) is shipping in v10.18.1.
+
+## Known issues for v10.18.1
+
+- Path stale: paths in `.nreki.db` and `.nreki/backups/` are stored 
+  absolute, breaking when projects are moved between directories.
+- 8 npm audit vulnerabilities in transitive dependencies (review case 
+  by case in v10.18.1).
+
+## Dependencies
+
+- `@modelcontextprotocol/sdk`: `^1.12.1` → `1.23.1` (pinned, downgrade)
+- All other runtime deps pinned to current lockfile resolutions
+- 9 commits in this release including 3 internal smoke tests as 
+  permanent regression tooling
+
 ## [10.17.0] - 2026-04-25
 
 ### Reliability pass: 6 critical bugs fixed
