@@ -276,4 +276,73 @@ describe("Circuit Breaker Middleware", () => {
         const state = cb.getState();
         expect(state.history[0].symbolName).toBe("validateToken");
     });
+
+    // ─── NUEVO-B nivel 2: defensa profunda containsError ─────────────
+    // Tests firmados por Furia (sprint v10.18.1 / Commit #5):
+    // verifican que las read-only actions NO tripeen el breaker por
+    // false-positive de containsError() text matching, pero SÍ tripeen
+    // cuando el handler reporta isError:true (señal de hardware).
+
+    it("should NOT trip on text matching for read-only actions (search, fast_grep, etc.)", async () => {
+        // fast_grep returns matches that legitimately contain "error" strings
+        // (e.g., search hits on try/catch blocks). The breaker must NOT trip
+        // even after many calls, because containsError() is a heuristic that
+        // produces false positives on real source code.
+        const handler = async (): Promise<McpToolResponse> => ({
+            content: [{
+                type: "text",
+                text: "Found 3 matches:\n- src/foo.ts: try { ... } catch (error) { throw new Error(...) }\n- src/bar.ts: error handling logic\n- src/baz.ts: failed test case",
+            }],
+        });
+
+        // Invoke 5 times: more than the 3-call breaker threshold
+        for (let i = 0; i < 5; i++) {
+            await wrapWithCircuitBreaker(cb, "nreki_navigate", "fast_grep", handler);
+        }
+
+        const state = cb.getState();
+        expect(state.escalationLevel).toBe(0);
+    });
+
+    it("should still trip on text matching for write actions (edit, batch_edit) - preserved behavior", async () => {
+        // For write actions (edit, batch_edit), containsError() text matching
+        // remains active. Repeated error responses indicate a doom loop and
+        // SHOULD trip the breaker. This preserves the existing behavior.
+        const handler = async (): Promise<McpToolResponse> => ({
+            content: [{
+                type: "text",
+                text: "TypeError: assignment failed at line 42",
+            }],
+        });
+
+        // 3 calls to trigger breaker on write action
+        for (let i = 0; i < 3; i++) {
+            await wrapWithCircuitBreaker(cb, "nreki_code", "edit", handler, "src/foo.ts");
+        }
+
+        const state = cb.getState();
+        expect(state.escalationLevel).toBeGreaterThanOrEqual(1);
+    });
+
+    it("should trip on read-only action when response.isError === true (hardware signal)", async () => {
+        // Even on a read-only action, an explicit isError:true (e.g., path
+        // jail violation, security error, contract failure) MUST trip the
+        // breaker. isError is hardware (explicit contract); containsError is
+        // heuristic. Hardware always overrides the read-only exemption.
+        const handler = async (): Promise<McpToolResponse> => ({
+            content: [{
+                type: "text",
+                text: "Security error: path outside project root",
+            }],
+            isError: true,
+        });
+
+        // 3 calls of identical hardware error to trip
+        for (let i = 0; i < 3; i++) {
+            await wrapWithCircuitBreaker(cb, "nreki_navigate", "search", handler);
+        }
+
+        const state = cb.getState();
+        expect(state.escalationLevel).toBeGreaterThanOrEqual(1);
+    });
 });

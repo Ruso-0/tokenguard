@@ -17,6 +17,33 @@ import type { McpToolResponse } from "../router.js";
 /** Inactivity timeout for auto-reset (60 seconds). */
 const INACTIVITY_TIMEOUT_MS = 60_000;
 
+/**
+ * Read-only actions exempt from heuristic text-matching of error patterns
+ * via containsError(). These actions can legitimately return responses
+ * containing words like "error", "failed", "exception" (search hits on
+ * try/catch blocks, fast_grep over real source code, audit reports with
+ * "Type errors" frequency, agent's own memorize/engram annotations).
+ *
+ * Important: this skip applies ONLY to containsError() text heuristic.
+ * Explicit response.isError === true (hardware signal: path jail
+ * violation, security error, etc.) STILL trips the breaker for these
+ * actions, because that is a contract violation, not a false-positive.
+ *
+ * Excluded from this set: filter_output (it is the gateway for the
+ * agent to read Bash/test/build output - text matching of "FAIL"/"error"
+ * there is exactly the doom-loop signal the breaker must catch).
+ */
+const READ_ONLY_ACTIONS = new Set<string>([
+    // nreki_navigate
+    "search", "definition", "references", "outline", "map",
+    "fast_grep", "prepare_refactor", "orphan_oracle", "type_shape",
+    // nreki_code (read-only sub-actions; filter_output deliberately excluded)
+    "read", "compress",
+    // nreki_guard (state inspection + agent's own memory annotations)
+    "status", "report", "audit",
+    "pin", "unpin", "reset", "set_plan", "memorize", "engram",
+]);
+
 
 // ─── Level-Specific Payloads ─────────────────────────────────────────
 
@@ -182,7 +209,15 @@ export function wrapWithCircuitBreaker(
         // Record the result for pattern detection
         // Truncate to 2KB before hashing — terminal output can be megabytes
         const responseText = response.content.map(c => c.text ?? "").filter(Boolean).join("\n").slice(0, 2048);
-        const hasError = response.isError === true || containsError(responseText);
+        // Read-only actions skip the containsError() text heuristic to avoid
+        // false-positive trips on legitimate error mentions in source code,
+        // search results, audit reports, or agent's own memory annotations.
+        // Explicit response.isError === true (hardware signal) still trips
+        // the breaker for these actions: it is a contract violation, not a
+        // heuristic match.
+        const isReadOnly = READ_ONLY_ACTIONS.has(action);
+        const hasError = response.isError === true ||
+            (!isReadOnly && containsError(responseText));
 
         if (hasError) {
             const loopCheck = cb.recordToolCall(
