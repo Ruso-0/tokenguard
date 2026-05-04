@@ -130,7 +130,7 @@ export class NrekiDB {
         // Force full reindex when parser/index format changes between
         // versions. Users on older schema get a clean slate without
         // manual .nreki.db deletion. Bumped in v10.18.1.
-        const PARSER_SCHEMA_VERSION = 1;
+        const PARSER_SCHEMA_VERSION = 2;
         const storedSchema = parseInt(this.getMetadata("parser_schema_version") ?? "0", 10);
         if (storedSchema < PARSER_SCHEMA_VERSION) {
             if (storedSchema > 0) {

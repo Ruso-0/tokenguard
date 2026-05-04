@@ -35,7 +35,7 @@ describe("Parser schema version gate", () => {
         const db = new NrekiDB(testDbPath);
         await db.initialize();
 
-        expect(db.getMetadata("parser_schema_version")).toBe("1");
+        expect(db.getMetadata("parser_schema_version")).toBe("2");
     });
 
     it("Test 2: older schema triggers full wipe (chunks, vectors, sequence)", async () => {
@@ -79,7 +79,7 @@ describe("Parser schema version gate", () => {
         expect(newId).toBe(1);
 
         // Schema version actualizada
-        expect(db2.getMetadata("parser_schema_version")).toBe("1");
+        expect(db2.getMetadata("parser_schema_version")).toBe("2");
     });
 
     it("Test 3: current schema preserves data (no wipe)", async () => {
@@ -90,9 +90,12 @@ describe("Parser schema version gate", () => {
             "/fake/file.ts", "[func] foo()", "function foo(){}",
             "func", 1, 1, new Float32Array(0), 0, 10, "foo"
         );
+        // Blindaje explícito: setear schema = 2 simula DB ya en versión actual.
+        // Robusto a futuros bumps de PARSER_SCHEMA_VERSION sin tocar este test.
+        db1.setMetadata("parser_schema_version", "2");
         db1.save();
 
-        // Reabrir con schema actual (1) -> gate no entra -> datos preservados
+        // Reabrir con schema actual (2) -> gate no entra -> datos preservados
         const db2 = new NrekiDB(testDbPath);
         await db2.initialize();
 
