@@ -14,7 +14,7 @@
 
 import fs from "fs";
 import path from "path";
-import { ASTParser, type ParsedChunk } from "./parser.js";
+import { ASTParser, type ParsedChunk, normalizeWebSymbol } from "./parser.js";
 import { AstSandbox } from "./ast-sandbox.js";
 import { Embedder } from "./embedder.js";
 import { readSource } from "./utils/read-source.js";
@@ -458,11 +458,20 @@ export async function batchSemanticEdit(
     for (const [filePath, fileEdits] of editsByFile.entries()) {
         let virtualCode = vfs.get(filePath)!;
         const parseResult = await parser.parse(filePath, virtualCode);
+        const ext = path.extname(filePath).toLowerCase();
 
         // ─── PHASE A: Cluster edits by AST node identity (startIndex) ───
         const chunkGroups = new Map<number, { chunk: ParsedChunk; edits: BatchEditOp[] }>();
 
         for (const edit of fileEdits) {
+            // v10.18.1: normalize web symbols IN-PLACE so downstream
+            // oldRawCodes/newRawCodes keys (built from chunk.symbolName)
+            // align with handleBatchEdit's blast-radius lookup
+            // (built from edit.symbol). Without in-place mutation,
+            // signature changes on .css/.json/.html files would evade
+            // detection silently.
+            edit.symbol = normalizeWebSymbol(edit.symbol, ext);
+
             // AMBIGUITY CHECK: Reject if multiple symbols share the same name.
             const allMatches = parseResult.chunks.filter(c => {
                 const name = c.symbolName || extractName(c);
@@ -862,6 +871,11 @@ export async function semanticEdit(
         };
     }
 
+    // v10.18.1: normalize web symbols at API boundary so LLM-supplied
+    // ".foo" / '"key"' match parser-normalized chunk.symbolName.
+    const ext = path.extname(filePath).toLowerCase();
+    symbolName = normalizeWebSymbol(symbolName, ext);
+
     // Find matching chunks by name (prefer AST symbolName, fallback to regex)
     const matches: Array<{ chunk: ParsedChunk; name: string }> = [];
     const allNames: string[] = [];
@@ -1123,7 +1137,6 @@ export async function semanticEdit(
     const newCodeTokens = Embedder.estimateTokens(newCode ?? spliceRes.newRawCode);
     const tokensAvoided = Math.max(0, fullFileTokens + symbolTokens - newCodeTokens);
 
-    const ext = path.extname(filePath).toLowerCase();
     let topologyChanged = false;
     if (rawCode && spliceRes.newRawCode && detectSignatureChange(rawCode, spliceRes.newRawCode)) {
         topologyChanged = true;

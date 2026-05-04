@@ -22,7 +22,7 @@
 
 import path from "path";
 import crypto from "crypto";
-import { type ParsedChunk, type ParseResult } from "./parser.js";
+import { type ParsedChunk, type ParseResult, normalizeWebSymbol } from "./parser.js";
 import { extractDependencies, cleanSignature } from "./utils/imports.js";
 import { Embedder } from "./embedder.js";
 import type { NrekiEngine } from "./engine.js";
@@ -109,15 +109,13 @@ export async function tfcCompress(
     if (parseResult.chunks.length === 0) return { kind: "not_found" };
 
     // 1. MULTI-FOCAL TARGETS + OVERLOAD FIX
+    // v10.18.1: shared normalizeWebSymbol covers CSS+HTML+JSON uniformly.
+    // Previous inline regex covered only CSS (despite isCss naming HTML too,
+    // it ran identical CSS rules). JSON foci were never normalized.
     const ext = path.extname(filePath).toLowerCase();
-    const isCss = ext === ".css" || ext === ".html";
 
     const foci = focusInput.split(",").map(s => {
-        let clean = s.trim().toLowerCase();
-        if (isCss) {
-            clean = clean.replace(/[.#,]/g, " ").replace(/\s+/g, " ").trim();
-        }
-        return clean;
+        return normalizeWebSymbol(s.trim(), ext).toLowerCase();
     }).filter(Boolean);
     const foveas = new Set<ParsedChunk>();
 

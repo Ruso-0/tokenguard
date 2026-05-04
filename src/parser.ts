@@ -398,13 +398,9 @@ export class ASTParser {
                     }
                 }
 
-                // Web symbol name normalization (D1)
+                // Web symbol name normalization (D1) — extracted to shared utility (v10.18.1)
                 if (symbolName) {
-                    if (ext === ".css") {
-                        symbolName = symbolName.replace(/[.#,]/g, " ").replace(/\s+/g, " ").trim();
-                    } else if (ext === ".json" || ext === ".html") {
-                        symbolName = symbolName.replace(/^["']|["']$/g, "").trim();
-                    }
+                    symbolName = normalizeWebSymbol(symbolName, ext);
                 }
 
                 const node = mainCapture.node;
@@ -573,4 +569,30 @@ export class ASTParser {
 
         return typeMap[captureName] ?? captureName;
     }
+}
+
+/**
+ * Normalize a web symbol (CSS selector, HTML attribute value, JSON key)
+ * to match the canonical form stored in ParsedChunk.symbolName.
+ *
+ * CSS: strips ".", "#", "," prefixes; collapses whitespace.
+ *   ".foo, #bar" → "foo bar"
+ * HTML/JSON: strips surrounding quotes.
+ *   '"key"' → "key"
+ * Other extensions: no-op (returns input unchanged).
+ *
+ * Used at the API boundary of semantic-edit + compressor-foveal to
+ * accept LLM-supplied symbols with web prefixes that the parser stripped
+ * during chunk creation. Without this normalization, ".foo" sent by an
+ * LLM caller fails to match a parser-stored chunk named "foo".
+ */
+export function normalizeWebSymbol(symbolName: string, ext: string): string {
+    if (!symbolName) return symbolName;
+    if (ext === ".css") {
+        return symbolName.replace(/[.#,]/g, " ").replace(/\s+/g, " ").trim();
+    }
+    if (ext === ".json" || ext === ".html") {
+        return symbolName.replace(/^["']|["']$/g, "").trim();
+    }
+    return symbolName;
 }
