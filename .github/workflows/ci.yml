@@ -21,5 +21,6 @@ jobs:
       - run: npm ci
       - run: npm audit --audit-level=high || true
       - run: npm run lint
+      - run: npm run build
       - run: npx vitest run --reporter=json --outputFile=test-results.json
       - run: node -e "const d=JSON.parse(require('fs').readFileSync('test-results.json','utf8'));if(d.numFailedTests>0){console.error(d.numFailedTests+' test(s) failed');process.exit(1)}else{console.log(d.numPassedTests+' tests passed')}"
